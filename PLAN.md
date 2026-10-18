@@ -39,7 +39,9 @@ Layout: `src/engines/` (normalized event stream; `acp.ts` generic client; `codex
 
 **Usage (v0.3.2):** `/usage`, footer cost and `codemax usage` sum tokens per agent/model and price them at public API list rates (API-equivalent value; subscriptions bill flat). Sources: Codex `thread/tokenUsage/updated` deltas; OpenCode ACP `usage_update` (own cost, context size); Claude transcript `usage` fields tailed per session; Grok `~/.grok/sessions/<cwd>/<id>/usage.json` (its own cost ticks, which matched the list-price estimate exactly). Prices in `src/core/pricing.ts`, user overrides in `~/.codemax/prices.json`.
 
-Open: Gemini CLI untested (not installed); native resume across restarts unverified for ACP `session/load`; compiled binary cannot find the Claude adapter unless it is on PATH (`bun link` install works); markdown rendering and diff views in the transcript; `/model` switching.
+**v0.4 (2026-10-18):** markdown and diff styling in the transcript (headings, inline code, bold/italic, bullets, fenced blocks, +/- lines coloured, throttled restyle while streaming); `/model` (ACP `session/set_model`, Codex per-turn model); `/compact` and summarize-on-switch writing `summary.md` for every handoff (skipped at 85%+ quota, 30s cap, Esc skips); `!cmd` shell mode attached to the next prompt; `/diff`, `/new`; terminal title and bell on long turns; queued `/` and `!` entries dispatched like typed ones; permission dialog no longer reacts to letters (typing at the wrong moment picked "allow for session"); switch palette keeps its highlight across the background refresh; compiled binary fetches the Claude adapter through bunx when it is not on disk.
+
+Open: Gemini CLI untested (not installed).
 
 ## How context survives
 

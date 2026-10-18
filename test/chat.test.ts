@@ -72,7 +72,7 @@ test("chat: send a message, see streamed reply, answer a permission prompt, repl
     expect(frame).toContain("wants to edit files"); // kind "edit" from the fake agent's tool_call
     expect(frame).toContain("1. Yes");
     expect(frame).toMatch(/No, and tell Claude Code what to do differently/);
-    setup.mockInput.pressKey("y");
+    setup.mockInput.pressKey("1");
     frame = await waitText(setup, (f) => f.includes("Saved."));
     expect(frame).toContain("❯ hello there");
     expect(frame).toContain("⏺ You said: hello there.");
@@ -84,6 +84,20 @@ test("chat: send a message, see streamed reply, answer a permission prompt, repl
     expect(turns[1]).toMatchObject({ role: "assistant", agent: "claude" });
     expect(turns[1]!.text).toContain("Saved.");
     expect(turns[1]!.tools).toEqual(["Write"]);
+
+    // ! shell mode: runs locally, output attached to the next prompt
+    await setup.mockInput.typeText("!echo shell-works");
+    setup.mockInput.pressEnter();
+    frame = await waitText(setup, (f) => f.includes("$ echo shell-works") && f.includes("shell-works"));
+    expect(frame).toContain("output will be sent with your next message");
+
+    // /compact: agent reply is saved as the project summary
+    await setup.mockInput.typeText("/compact");
+    setup.mockInput.pressEnter();
+    await waitText(setup, (f) => f.includes("Do you want to proceed?"), 8000); // the fake agent asks on every turn
+    setup.mockInput.pressKey("1");
+    await waitText(setup, (f) => f.includes("summary saved"), 8000);
+    expect(ledger.summary()).toContain("You said:");
 
     await setup.mockInput.typeText("/quit");
     setup.mockInput.pressEnter();

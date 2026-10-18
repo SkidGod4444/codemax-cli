@@ -72,6 +72,7 @@ export class CodexEngine implements Engine {
         { id: "never", name: "full auto (no approvals)" },
       ],
       currentMode: "on-request",
+      models: [...new Set([this.model, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"].filter(Boolean))].map((id) => ({ id: id!, name: id! })),
       currentModel: this.model,
       plan: account?.account?.planType ? `chatgpt ${account.account.planType}` : undefined,
     };
@@ -273,7 +274,8 @@ export class CodexEngine implements Engine {
     if (!this.transport || !this.threadId) throw new Error("engine not started");
     const done = new Promise<StopReason>((resolve) => (this.turn = { resolve }));
     try {
-      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }] });
+      const approvalPolicy = this.info?.currentMode === "never" ? "never" : "on-request";
+      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }], model: this.model, approvalPolicy });
       if (this.turn) this.turn.id = res?.turn?.id;
     } catch (e: any) {
       const msg = `${e?.message ?? e} ${JSON.stringify(e?.data ?? "")}`.trim();
@@ -300,6 +302,12 @@ export class CodexEngine implements Engine {
     // Applied on the next turn via approvalPolicy; kept for parity with ACP modes.
     if (this.info) this.info.currentMode = modeId;
     this.emit({ type: "mode", modeId });
+  }
+
+  /** Codex takes the model per turn; it applies from the next prompt. */
+  async setModel(modelId: string) {
+    this.model = modelId;
+    if (this.info) this.info.currentModel = modelId;
   }
 
   async close() {

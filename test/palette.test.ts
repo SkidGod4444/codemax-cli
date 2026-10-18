@@ -53,6 +53,12 @@ test("palette filters by prefix and word start, never matches typos, Enter picks
     await waitText(setup, (f) => f.includes("❯ /switch"));
     expect(p.handleKey({ name: "return" } as any)).toBe(true);
     expect(picked).toEqual(["switch"]);
+    // a background refresh must not move the highlight
+    p.setFilter("");
+    p.handleKey({ name: "down" } as any);
+    const before = p.current?.value;
+    p.setItems([{ label: "/switch", value: "switch" }, { label: "/status", value: "status" }, { label: "/mode", value: "mode" }, { label: "/firecrawl-deep-research", value: "fdr" }, { label: "/new", value: "new" }]);
+    expect(p.current?.value).toBe(before);
     expect(p.handleKey({ name: "escape" } as any)).toBe(true);
     expect(closed).toBe(1);
     p.destroy();

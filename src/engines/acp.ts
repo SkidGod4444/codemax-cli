@@ -230,6 +230,12 @@ export class AcpEngine implements Engine {
     await this.conn.cancel({ sessionId: this.session.id }).catch(() => {});
   }
 
+  async setModel(modelId: string) {
+    if (!this.conn || !this.session) return;
+    await (this.conn as any).unstable_setSessionModel({ sessionId: this.session.id, modelId });
+    if (this.info) this.info.currentModel = modelId;
+  }
+
   async setMode(modeId: string) {
     if (!this.conn || !this.session) return;
     await this.conn.setSessionMode({ sessionId: this.session.id, modeId });

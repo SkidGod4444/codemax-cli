@@ -16,6 +16,10 @@ export interface Config {
   autoSwitch: boolean;
   /** Per-agent extra CLI args appended to every launch. */
   agentArgs: Partial<Record<AgentId, string[]>>;
+  /** Ask the outgoing agent for a project summary before a switch (skipped when it is out of quota). */
+  summarizeOnSwitch: boolean;
+  /** Ring the terminal bell when a turn longer than this many seconds finishes (0 = never). */
+  bellAfterSeconds: number;
   /** Refresh the public price list weekly for /usage (set false to stay offline). */
   priceUpdates: boolean;
   /** Max turns and chars included in a handoff brief. */
@@ -28,6 +32,8 @@ export const DEFAULT_CONFIG: Config = {
   autoSwitch: true,
   agentArgs: {},
   priceUpdates: true,
+  summarizeOnSwitch: true,
+  bellAfterSeconds: 20,
   brief: { turns: 10, maxChars: 8000, turnChars: 1200 },
 };
 

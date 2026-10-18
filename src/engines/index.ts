@@ -35,25 +35,35 @@ function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] 
   };
 }
 
-/** The Claude ACP adapter installed with codemax; it runs the user's own `claude`. */
-function claudeAdapterBin(): string | null {
+const CLAUDE_ADAPTER_PKG = "@zed-industries/claude-code-acp@0.16.2";
+
+/**
+ * Command for the Claude ACP adapter (it runs the user's own `claude`).
+ * From a source checkout it is in node_modules; from the compiled binary it is
+ * fetched once by bunx and cached.
+ */
+function claudeAdapterCmd(): string[] | null {
   const candidates = [
     join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-code-acp"),
     join(process.cwd(), "node_modules", ".bin", "claude-code-acp"),
   ];
-  for (const c of candidates) if (existsSync(c)) return c;
-  return Bun.which("claude-code-acp");
+  for (const c of candidates) if (existsSync(c)) return [c];
+  const onPath = Bun.which("claude-code-acp");
+  if (onPath) return [onPath];
+  const bunx = Bun.which("bunx") ?? (Bun.which("bun") ? [Bun.which("bun")!, "x"] : null);
+  if (!bunx) return null;
+  return Array.isArray(bunx) ? [...bunx, CLAUDE_ADAPTER_PKG] : [bunx, CLAUDE_ADAPTER_PKG];
 }
 
 const factories: EngineFactory[] = [
   {
     agent: "claude",
-    available: async () => !!Bun.which("claude") && !!claudeAdapterBin(),
+    available: async () => !!Bun.which("claude") && !!claudeAdapterCmd(),
     create: () =>
       new AcpEngine({
         agent: "claude",
         name: "Claude Code",
-        cmd: [claudeAdapterBin()!],
+        cmd: claudeAdapterCmd()!,
         env: { CLAUDE_CODE_EXECUTABLE: Bun.which("claude")! },
         usageTail: (s) => new ClaudeUsageTail(s.cwd, s.id),
       }),

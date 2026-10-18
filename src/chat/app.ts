@@ -123,6 +123,7 @@ export class ChatApp {
       "/ for commands            shift + tab to cycle permission mode     esc to interrupt a turn",
       "/switch to change agent   ↑ for history                             ctrl + c twice to quit",
       "/mode to set permissions  shift + ⏎ for newline                     ? to toggle this help",
+      "! to run a shell command  /model to pick a model                    /compact for a handoff summary",
     ])
       this.shortcuts.add(new TextRenderable(renderer, { content: l, fg: C.dim, wrapMode: "none", truncate: true }));
     root.add(this.shortcuts);
@@ -288,7 +289,16 @@ export class ChatApp {
     this.closePalette();
     this.input.clear();
     this.pushHistory(text);
+    const busy = !!this.active?.turn;
+    const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
+    if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
+      this.queue.push(text);
+      this.transcript.note(`queued until the turn ends: ${text.slice(0, 60)}`, C.dim);
+      this.renderFooter();
+      return;
+    }
     if (text.startsWith("/")) return this.command(text);
+    if (text.startsWith("!")) return this.shell(text.slice(1).trim());
     if (!this.active) {
       this.transcript.note("no agent running — /switch to start one", C.warn);
       return;
@@ -301,12 +311,27 @@ export class ChatApp {
     await this.send(this.active, text);
   }
 
+  /** Run one queued entry the same way as if it had just been typed. */
+  private async dispatch(active: Active, text: string) {
+    if (text.startsWith("!")) return this.shell(text.slice(1).trim());
+    if (text.startsWith("/")) return this.command(text);
+    return this.send(active, text);
+  }
+
+  private async drainQueue(active: Active) {
+    while (this.queue.length && this.active === active && !active.turn) await this.dispatch(active, this.queue.shift()!);
+    this.renderFooter();
+  }
+
   private async send(active: Active, text: string) {
     this.transcript.user(text);
+    if (this.pendingShell.length) {
+      text = `${text}\n\n[shell output the user ran in this repo]\n${this.pendingShell.join("\n\n")}`;
+      this.pendingShell = [];
+    }
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
     await this.runTurn(active, text);
-    const next = this.queue.shift();
-    if (next && this.active === active) await this.send(active, next);
+    await this.drainQueue(active);
   }
 
   private pushHistory(text: string) {
@@ -320,12 +345,16 @@ export class ChatApp {
     return [
       { name: "/switch", description: "Switch to another agent (keeps the conversation)", run: () => this.openSwitch() },
       { name: "/mode", description: "Set how often the agent asks permission", run: (a) => this.openModes(a) },
+      { name: "/model", description: "Pick the model for the current agent", run: (a) => this.openModels(a) },
+      { name: "/compact", description: "Have the agent write a project summary used in every handoff", run: () => void this.compact() },
+      { name: "/diff", description: "Uncommitted changes in this repo", run: () => void this.showDiff() },
       { name: "/agents", description: "Show agents, sessions and quota", run: () => this.openSwitch() },
       { name: "/usage", description: "Tokens and API-equivalent cost per agent (like /cost)", run: () => this.showUsage() },
       { name: "/cost", description: "Alias of /usage", run: () => this.showUsage() },
       { name: "/status", description: "Session, ledger and quota details", run: () => this.showStatus() },
       { name: "/clear", description: "Clear the screen (history stays in the ledger)", run: () => this.clearScreen() },
       { name: "/help", description: "Keyboard shortcuts and commands", run: () => void (this.shortcuts.visible = true) },
+      { name: "/new", description: "Start a fresh session with the current agent", run: () => void (this.active && this.switchTo(this.active.agent, true)) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
   }
@@ -350,6 +379,85 @@ export class ChatApp {
   private runCommandValue(value: string, args: string) {
     if (value.startsWith("builtin:")) return this.builtins().find((b) => b.name === value.slice(8))?.run(args);
     if (value.startsWith("agentcmd:")) return this.command(`/${value.slice(9)}${args ? " " + args : ""}`);
+  }
+
+  private pendingShell: string[] = [];
+
+  /** `!cmd`: run locally, show output, and attach it to the next prompt as context. */
+  private async shell(cmd: string) {
+    if (!cmd) return;
+    this.transcript.user(`! ${cmd}`);
+    const p = Bun.spawn(["sh", "-c", cmd], { cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+    const code = await p.exited;
+    const body = (out + (err ? `\n${err}` : "")).trimEnd() || "(no output)";
+    const block = this.transcript.agent();
+    block.tool(`sh-${Date.now()}`, `$ ${cmd}${code ? `  (exit ${code})` : ""}`, code ? "failed" : "completed", body);
+    this.pendingShell.push(`$ ${cmd}\n${body.slice(0, 4000)}`);
+    this.transcript.note("output will be sent with your next message", C.dimmer);
+  }
+
+  private async showDiff() {
+    const { diffStat } = await import("../core/git.ts");
+    for (const l of (await diffStat(this.cwd)).split("\n")) this.transcript.note(l);
+  }
+
+  private openModels(arg: string) {
+    const a = this.active;
+    if (!a) return;
+    const models = a.engine.info?.models ?? [];
+    if (!a.engine.setModel || !models.length) return this.transcript.note(`${a.name} does not expose model choice over its protocol`, C.dim);
+    const apply = async (id: string) => {
+      try {
+        await a.engine.setModel!(id);
+        this.transcript.note(`model: ${id}`);
+        this.renderFooter();
+      } catch (e: any) {
+        this.transcript.error(`could not switch model: ${e?.message ?? e}`);
+      }
+    };
+    if (arg) return void apply(arg);
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `Model for ${a.name}`,
+      items: models.map((m) => ({ label: m.id, description: `${m.name !== m.id ? m.name : ""}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id })),
+      onPick: (it) => {
+        this.closePalette();
+        void apply(it.value);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** Ask the active agent for a compact project summary and store it for every future handoff. */
+  async compact(o: { quiet?: boolean } = {}): Promise<boolean> {
+    const a = this.active;
+    if (!a) return false;
+    if (a.turn) {
+      if (!o.quiet) this.transcript.note("the agent is busy; run /compact when the turn ends", C.warn);
+      return false;
+    }
+    const prompt =
+      "[codemax] Write a compact project summary for another coding agent that will take over this repository. " +
+      "Max 250 words, plain markdown: goal, what is done (files touched), what is in progress, open problems, next step. " +
+      "Do not use any tools. Reply with the summary only.";
+    this.transcript.note(o.quiet ? `asking ${a.name} for a handoff summary before switching · esc to skip` : `asking ${a.name} for a handoff summary…`);
+    const block = this.transcript.agent();
+    a.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: "Summarizing" };
+    this.startSpinner(a);
+    const stop = await a.engine.prompt(prompt);
+    a.turn = null;
+    this.stopSpinner();
+    const text = block.text().trim();
+    if (stop === "end_turn" && text.length > 40) {
+      this.ledger.writeSummary(`_${a.name}, ${new Date().toISOString().slice(0, 16).replace("T", " ")}_\n\n${text}`);
+      block.footer("summary saved · used in every handoff");
+      return true;
+    }
+    block.footer("no summary saved");
+    return false;
   }
 
   private showUsage() {
@@ -408,10 +516,9 @@ export class ChatApp {
     this.renderer.root.add(this.palette.box);
   }
 
-  openSwitch() {
-    this.closePalette();
+  private switchItems(): PaletteItem[] {
     const sessions = this.ledger.sessions();
-    const items: PaletteItem[] = listAdapters(this.config.order).map((a) => {
+    return listAdapters(this.config.order).map((a) => {
       const d = this.detect.get(a.id);
       const s = sessions[a.id];
       const q = this.quota.get(a.id);
@@ -427,6 +534,11 @@ export class ChatApp {
       }
       return { label: a.name + (a.id === this.active?.agent ? " (current)" : ""), description: bits.join(" · "), value: a.id, disabled: !usable };
     });
+  }
+
+  openSwitch() {
+    this.closePalette();
+    const items = this.switchItems();
     this.paletteKind = "switch";
     this.palette = new Palette(this.renderer, {
       title: "Switch agent · Enter to hand off the conversation · Esc to cancel",
@@ -440,7 +552,8 @@ export class ChatApp {
       onClose: () => this.closePalette(),
     }, this.paletteAnchor);
     this.renderer.root.add(this.palette.box);
-    void this.refreshDetect().then(() => this.paletteKind === "switch" && this.openSwitch());
+    const p = this.palette;
+    void this.refreshDetect().then(() => this.palette === p && p.setItems(this.switchItems()));
   }
 
   private openModes(arg: string) {
@@ -515,14 +628,14 @@ export class ChatApp {
       if (NO_PERMISSION_PROMPTS.has(agent)) this.transcript.note(grokPermissionNote() ?? `${adapter.name} acts without asking permission`, C.warn);
       this.setWorking(null);
       this.renderFooter();
+      this.setTitle();
       const hasHistory = this.ledger.turns().length > 0 || !!o.from;
       if (hasHistory && (o.from || !resumed)) {
         const brief = await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: o.from, reason: o.reason, config: this.config });
         this.transcript.note(`handing over ${this.ledger.turns().length} earlier turns and the repo state (${brief.length} chars)`);
         await this.runTurn(active, brief, { record: false });
       }
-      const next = this.queue.shift();
-      if (next && this.active === active) await this.send(active, next);
+      await this.drainQueue(active);
     } catch (e: any) {
       this.setWorking(null);
       this.transcript.error(`${adapter.name} failed to start: ${e?.message ?? e}`);
@@ -540,10 +653,13 @@ export class ChatApp {
     const block = this.transcript.agent();
     active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS) };
     this.startSpinner(active);
+    this.setTitle(`✳ ${active.name} working`);
     const stop = await active.engine.prompt(text);
     const turn = active.turn;
     active.turn = null;
     this.stopSpinner();
+    this.setTitle();
+    if (turn && this.config.bellAfterSeconds > 0 && Date.now() - turn.startedAt > this.config.bellAfterSeconds * 1000) process.stdout.write("\x07");
     if (turn) {
       const dur = fmtDuration(Date.now() - turn.startedAt);
       block.footer(stop === "cancelled" ? `Interrupted after ${dur}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())}`);
@@ -678,6 +794,15 @@ export class ChatApp {
     }, 120);
   }
 
+  private setTitle(text?: string) {
+    const base = `codemax · ${this.active?.name ?? "no agent"} · ${this.cwd.split("/").pop()}`;
+    try {
+      this.renderer.setTerminalTitle(text ? `${text} · ${this.cwd.split("/").pop()}` : base);
+    } catch {
+      /* test renderer */
+    }
+  }
+
   private stopSpinner() {
     if (this.spinnerTimer) clearInterval(this.spinnerTimer);
     this.spinnerTimer = null;
@@ -755,6 +880,13 @@ export class ChatApp {
     this.switching = true;
     const prev = this.active;
     let from: AgentId | undefined;
+    const pq = prev ? this.quota.get(prev.agent) : undefined;
+    const nearLimit = isExhausted(pq) || (typeof pq?.usedPercent === "number" && pq.usedPercent >= 85);
+    if (prev && !prev.turn && this.config.summarizeOnSwitch && !nearLimit && this.ledger.turns().length >= 4) {
+      const timer = setTimeout(() => void prev.engine.cancel(), 30_000);
+      await this.compact({ quiet: true }).catch(() => false);
+      clearTimeout(timer);
+    }
     if (prev) {
       from = prev.agent;
       if (prev.turn) await prev.engine.cancel().catch(() => {});

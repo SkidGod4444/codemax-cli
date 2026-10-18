@@ -1,5 +1,6 @@
 import { BoxRenderable, ScrollBoxRenderable, TextRenderable, type CliRenderer } from "@opentui/core";
 import { C, G } from "./theme.ts";
+import { styleMarkdown, styleToolOutput } from "./markdown.ts";
 
 export interface AgentBlock {
   /** Stream assistant text; starts a `⏺` paragraph, continues it until a tool row interrupts. */
@@ -72,6 +73,7 @@ export class Transcript {
   agent(): AgentBlock {
     const self = this;
     let para: { node: TextRenderable; text: string } | null = null;
+    let styleTimer: ReturnType<typeof setTimeout> | null = null;
     const tools = new Map<string, { title: TextRenderable; result?: TextRenderable; name: string; status: string }>();
     let all = "";
     return {
@@ -82,8 +84,10 @@ export class Transcript {
           para = { node, text: t.replace(/^\n+/, "") };
         } else {
           para.text += t;
-          para.node.content = para.text;
         }
+        const p = para;
+        // Restyle at most every 80ms while streaming; the final append is always styled.
+        if (!styleTimer) styleTimer = setTimeout(() => { styleTimer = null; p.node.content = styleMarkdown(p.text); }, 80);
         self.scrollToEnd();
       },
       tool(id, title, status, detail) {
@@ -91,7 +95,7 @@ export class Transcript {
         const node = self.line(`${G.bullet} `, title, { fg: undefined });
         const entry = { title: node, name: title, status, result: undefined as TextRenderable | undefined };
         tools.set(id, entry);
-        if (detail) entry.result = self.nestedNode(summarize(detail), C.dim);
+        if (detail) entry.result = self.nestedNode(summarize(detail), C.dim, true);
         self.scrollToEnd();
       },
       toolUpdate(id, status, title, detail) {
@@ -105,11 +109,16 @@ export class Transcript {
         if (status === "failed") e.title.fg = C.error;
         if (detail) {
           const s = summarize(detail);
-          if (e.result) e.result.content = s;
-          else e.result = self.nestedNode(s, status === "failed" ? C.error : C.dim);
+          if (e.result) e.result.content = styleToolOutput(s);
+          else e.result = self.nestedNode(s, status === "failed" ? C.error : C.dim, true);
         }
       },
       footer(text) {
+        if (para) {
+          if (styleTimer) clearTimeout(styleTimer);
+          styleTimer = null;
+          para.node.content = styleMarkdown(para.text);
+        }
         para = null;
         self.line(`${G.done} `, text, { fg: C.dim, glyphFg: C.dim });
         self.scrollToEnd();
@@ -139,8 +148,10 @@ export class Transcript {
     this.scrollToEnd();
   }
 
-  private nestedNode(text: string, fg: string): TextRenderable {
-    return this.line(`  ${G.nest}  `, text, { fg, glyphFg: C.dimmer });
+  private nestedNode(text: string, fg: string, toolOutput = false): TextRenderable {
+    const node = this.line(`  ${G.nest}  `, text, { fg, glyphFg: C.dimmer });
+    if (toolOutput) node.content = styleToolOutput(text);
+    return node;
   }
 
   scrollToEnd() {

@@ -66,8 +66,20 @@ export class Palette {
       .sort((a, b) => b.s - a.s || (b.it.weight ?? 0) - (a.it.weight ?? 0) || a.it.label.localeCompare(b.it.label));
     this.matches = scored.map((x) => x.it);
     this.cursor = Math.min(this.cursor, Math.max(0, this.matches.length - 1));
-    if (q === "" && this.cursor > 0) this.cursor = 0;
+
     this.render();
+  }
+
+  /** Replace items without losing the highlighted row (matched by value). */
+  setItems(items: PaletteItem[]) {
+    const keep = this.current?.value;
+    this.opts.items = items;
+    this.setFilter(this.filter);
+    const i = this.matches.findIndex((m) => m.value === keep);
+    if (i >= 0) {
+      this.cursor = i;
+      this.render();
+    }
   }
 
   get current(): PaletteItem | undefined {

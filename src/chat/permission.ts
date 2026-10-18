@@ -53,7 +53,7 @@ export class PermissionDialog {
       this.box.add(t);
       return t;
     });
-    this.box.add(new TextRenderable(renderer, { content: "Enter to confirm · Esc to cancel", fg: C.dim }));
+    this.box.add(new TextRenderable(renderer, { content: "1-3 or ↑/↓ then Enter · Esc to cancel", fg: C.dim }));
     this.render();
   }
 
@@ -72,9 +72,8 @@ export class PermissionDialog {
     else if (n === "down" || n === "tab") this.cursor = (this.cursor + 1) % len;
     else if (n === "return") return this.pick(this.cursor);
     else if (/^[1-9]$/.test(n) && Number(n) <= len) return this.pick(Number(n) - 1);
-    else if (n === "y") return this.pick(0);
-    else if (n === "a" && len === 3) return this.pick(1);
-    else if (n === "n" || n === "escape") return this.pick(len - 1);
+    // No letter shortcuts: text typed while the dialog is open must never pick an option.
+    else if (n === "escape") return this.pick(len - 1);
     this.render();
     return false;
   }
