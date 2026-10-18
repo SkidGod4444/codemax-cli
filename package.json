@@ -28,7 +28,7 @@
   "author": "Saidev Dhal",
   "type": "module",
   "bin": {
-    "codemax": "./bin/codemax.cjs"
+    "codemax": "bin/codemax.cjs"
   },
   "files": [
     "bin",

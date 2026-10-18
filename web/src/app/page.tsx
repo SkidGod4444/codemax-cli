@@ -334,7 +334,7 @@ export default function Home() {
             </div>
             <ol className="mt-8 max-w-lg border-t border-[var(--line)]">
               {[
-                ["01", "Paste it in your terminal", "installs codemax in about a minute"],
+                ["01", "Install with npm", "one command on macOS, Linux or Windows"],
                 ["02", "Open your project", "run codemax in any repo"],
                 ["03", "Just ask", "switch agents any time with one key"],
               ].map(([n, a, b]) => (

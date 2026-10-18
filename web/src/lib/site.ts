@@ -34,8 +34,10 @@ export const SITE = {
   installScriptWindows: "https://raw.githubusercontent.com/SkidGod4444/codemax-cli/main/install.ps1",
 } as const;
 
-/** What users paste into their terminal; the site's /install and /install.ps1 redirect to the scripts in the repo. */
-export const INSTALL_COMMANDS = {
-  unix: `curl -fsSL ${SITE.url}/install | bash`,
-  windows: `irm ${SITE.url}/install.ps1 | iex`,
-} as const;
+/**
+ * What users paste into their terminal: the npm package works the same on macOS,
+ * Linux and Windows and brings its own Bun. (The script installers stay available
+ * at /install and /install.ps1.)
+ */
+const NPM_INSTALL = "npm install -g codemax-cli";
+export const INSTALL_COMMANDS = { unix: NPM_INSTALL, windows: NPM_INSTALL } as const;

@@ -24,7 +24,7 @@ export default function InstallCommand({ commands, note = false }: { commands: R
       <CopyCommand command={commands[os]} prompt={os === "windows" ? "PS>" : "$"} />
       {note && (
         <p className="mt-3 font-mono text-[10.5px] tracking-[0.14em] text-[var(--ink-3)] uppercase">
-          {os === "windows" ? "Windows · paste in PowerShell" : "macOS · Linux · paste in your terminal"} — installs Bun if you need it
+          macOS · Linux · Windows — needs Node.js 18 or newer
         </p>
       )}
     </div>

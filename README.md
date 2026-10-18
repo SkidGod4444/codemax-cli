@@ -31,6 +31,14 @@
 
 ## Get started
 
+**Any system with Node.js 18+** (brings its own Bun):
+
+```sh
+npm install -g codemax-cli
+```
+
+Or without npm:
+
 **macOS and Linux:**
 
 ```sh
