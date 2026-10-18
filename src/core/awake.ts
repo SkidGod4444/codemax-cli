@@ -103,7 +103,8 @@ export class Awake {
     if (mode === "off") return { mode: "off", lid: false, notes };
 
     // 1. The sleep hold, tied to codemax's lifetime.
-    const hold = this.holdCommand(mode === "lid");
+    let hold = this.holdCommand(mode === "lid");
+    if (hold && this.d.platform === "linux") hold = await this.linuxHold(mode === "lid", notes);
     if (hold) this.holder = this.d.spawn(hold);
     else notes.push(this.d.platform === "linux" ? "systemd-inhibit was not found, so codemax cannot keep this machine awake. Install systemd or use your desktop's 'caffeine' setting." : `keeping awake is not supported on ${this.d.platform}`);
 
@@ -111,8 +112,9 @@ export class Awake {
     if (mode === "lid") {
       if (this.d.platform === "darwin") this.lidActive = await this.macLidOn(notes);
       else if (this.d.platform === "win32") this.lidActive = await this.winLidOn(notes);
-      else this.lidActive = !!hold; // Linux: handle-lid-switch inhibitor
+      else this.lidActive = !!hold && hold.some((a) => a.includes("handle-lid-switch")); // Linux: lid-switch inhibitor
     }
+    if (this.d.platform === "linux" && hold && !hold.some((a) => a.includes("shutdown"))) notes.push("This session is not allowed to block shutdown; only sleep is prevented.");
     if (this.d.platform !== "linux") notes.push(`${this.d.platform === "darwin" ? "macOS" : "Windows"} does not let apps block a shutdown; only sleep is prevented.`);
     if (this.lidActive) notes.push("With the lid closed, keep the laptop somewhere it can breathe: not in a bag.");
     this.mode = hold || this.lidActive ? mode : "off";
@@ -154,6 +156,30 @@ export class Awake {
     if (ok) rmSync(this.d.recordPath, { force: true });
   }
 
+  /**
+   * Linux: the system's policy decides which locks a session may take (a remote or
+   * headless session often may not block shutdown or the lid switch). Probe with an
+   * instant command, keep the widest set that is allowed, and say what was refused.
+   */
+  private async linuxHold(lid: boolean, notes: string[]): Promise<string[] | null> {
+    const sets = lid ? [["idle", "sleep", "shutdown", "handle-lid-switch"], ["idle", "sleep", "handle-lid-switch"], ["idle", "sleep"]] : [["idle", "sleep", "shutdown"], ["idle", "sleep"]];
+    let lastErr = "";
+    for (const set of sets) {
+      const r = await this.d.run(["systemd-inhibit", `--what=${set.join(":")}`, "--who=codemax", `--why=${WHY}`, "--mode=block", "true"]);
+      if (r.code === 0) {
+        if (lid && !set.includes("handle-lid-switch")) notes.push("This session is not allowed to hold the lid switch, so closing the lid may still suspend.");
+        return this.linuxCommand(set);
+      }
+      lastErr = r.err || r.out;
+    }
+    notes.push(`The system refused to let codemax keep it awake${lastErr ? ` (${lastErr.split("\n")[0]!.slice(0, 160)})` : ""}. This usually means a remote or non-desktop session.`);
+    return null;
+  }
+
+  private linuxCommand(what: string[]): string[] {
+    return ["systemd-inhibit", `--what=${what.join(":")}`, "--who=codemax", `--why=${WHY}`, "--mode=block", "sh", "-c", `while kill -0 ${this.d.pid} 2>/dev/null; do sleep 5; done`];
+  }
+
   holdCommand(lid: boolean): string[] | null {
     const pid = String(this.d.pid);
     switch (this.d.platform) {
@@ -162,8 +188,7 @@ export class Awake {
         return this.d.which("caffeinate") ? ["caffeinate", "-ims", "-w", pid] : null;
       case "linux": {
         if (!this.d.which("systemd-inhibit")) return null;
-        const what = ["idle", "sleep", "shutdown", ...(lid ? ["handle-lid-switch"] : [])].join(":");
-        return ["systemd-inhibit", `--what=${what}`, "--who=codemax", `--why=${WHY}`, "--mode=block", "sh", "-c", `while kill -0 ${pid} 2>/dev/null; do sleep 5; done`];
+        return this.linuxCommand(["idle", "sleep", "shutdown", ...(lid ? ["handle-lid-switch"] : [])]);
       }
       case "win32":
         return [
@@ -228,7 +253,7 @@ export class Awake {
     const q = await this.d.run(["powercfg", "/q", "SCHEME_CURRENT", "SUB_BUTTONS", "LIDACTION"]);
     const ac = parsePowercfg(q.out, "AC"), dc = parsePowercfg(q.out, "DC");
     if (ac === undefined || dc === undefined) {
-      notes.push("Could not read this PC's lid setting (powercfg), so lid-close was not changed.");
+      notes.push("This PC reports no lid setting (a desktop or server has none), so only sleep is prevented.");
       return false;
     }
     writeRecord(this.d.recordPath, { platform: "win32", pid: this.d.pid, at: Date.now(), win: { ac, dc } });

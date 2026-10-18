@@ -38,7 +38,7 @@ export interface Config {
    * leaves a note when something needs attention. `forward: "auto"` sends notes to the
    * main agent by itself; "ask" waits for /forward.
    */
-  sideAgent: { agent: AgentId | null; forward: "ask" | "auto" };
+  sideAgent: { agent: AgentId | null; forward: "ask" | "auto"; model?: string };
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
   /**

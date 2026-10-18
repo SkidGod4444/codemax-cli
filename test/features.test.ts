@@ -628,3 +628,72 @@ test("22. side agent in auto mode forwards its note to the main agent by itself"
     await h.frame(() => h.prompts.filter((p) => p.agent === "claude").some((p) => p.text.includes("Missing migration")));
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("23. the UI survives tiny and changing terminal sizes with long content, menus and note cards", async () => {
+  const long = "x".repeat(300);
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "thinking ".repeat(60) } });
+      await upd(ctx, { sessionUpdate: "plan", entries: [{ content: "a very long plan entry ".repeat(10), status: "in_progress", priority: "high" }] });
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "t1", title: `Bash(${"echo ".repeat(50)})`, kind: "execute", status: "completed", content: [{ type: "content", content: { type: "text", text: `${long}\n`.repeat(20) } }] });
+      await ctx.say(`Done. ${long} and **bold** \`code\` text.`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    h.setup.resize(32, 18);
+    await h.send(`please handle ${long}`);
+    await h.frame((f) => f.includes("for ") || f.includes("Done"), 10000);
+    (h.app as any).addNote("codex", "Codex", `Heads up · ${"careful ".repeat(30)}\n\n**Title**\n- ${long}\n- **Consider something.**`);
+    for (const [w, ht] of [[24, 10], [140, 45], [40, 12], [80, 24]] as const) {
+      h.setup.resize(w, ht);
+      await h.setup.renderOnce();
+    }
+    h.setup.resize(30, 14);
+    await h.setup.mockInput.typeText("/");
+    await h.frame((f) => f.includes("/agents"));
+    h.setup.mockInput.pressEscape();
+    h.setup.mockInput.pressEscape();
+    await h.send("/config");
+    await h.frame((f) => f.includes("Settings") || f.includes("Theme"));
+    h.setup.mockInput.pressEscape();
+    h.setup.resize(110, 30);
+    const f = await h.frame((f) => f.includes("Note from Codex"));
+    expect(f).toContain("Note from Codex");
+    expect((h.app as any).uiErrors).toBe(0);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("24. /config changes settings and saves them; /side picks the side agent and its model from the agent's own list", async () => {
+  const calls: unknown[] = [];
+  const h = await harness({ claude: reply("ok"), codex: reply("NO_NOTE") }, {}, undefined, {
+    codex: { configCalls: calls, session: { models: { currentModelId: "gpt-5.6-terra", availableModels: [{ modelId: "gpt-5.6-terra", name: "Terra" }, { modelId: "gpt-5.6-mini", name: "Mini" }] } } },
+  });
+  const { CONFIG_PATH } = await import("../src/config.ts");
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  writeFileSync(CONFIG_PATH, "{}\n");
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/config");
+    await h.frame((f) => f.includes("Theme") && f.includes("Keep awake") && f.includes("Side agent model"));
+    h.setup.mockInput.pressEnter(); // Theme
+    await h.frame((f) => f.includes("Theme · now"));
+    await h.setup.mockInput.typeText("light");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("theme set to light"));
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).theme).toBe("light");
+    h.setup.mockInput.pressEscape();
+    await h.send("/side");
+    await h.frame((f) => f.includes("Side agent ·") && f.includes("Codex"));
+    await h.setup.mockInput.typeText("codex");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Model for the side agent (Codex)"));
+    await h.setup.mockInput.typeText("mini");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("side agent model: gpt-5.6-mini") && f.includes("◆ side codex gpt-5.6-mini"));
+    expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "gpt-5.6-mini" })]);
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).sideAgent).toMatchObject({ agent: "codex", model: "gpt-5.6-mini" });
+  } finally { await h.cleanup(); }
+}, 30000);

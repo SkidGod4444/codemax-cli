@@ -23,4 +23,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun scripts/awake-check.ts
+      - name: Check (Linux as root, since a CI session may not take logind locks)
+        if: runner.os == 'Linux'
+        run: sudo -E env "PATH=$PATH" bun scripts/awake-check.ts
+      - name: Check
+        if: runner.os != 'Linux'
+        run: bun scripts/awake-check.ts

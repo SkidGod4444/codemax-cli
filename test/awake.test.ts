@@ -139,6 +139,23 @@ test("Linux: one systemd-inhibit blocks idle, sleep and shutdown, plus the lid s
   expect(st.notes.join(" ")).not.toContain("shutdown");
 });
 
+test("Linux: when the session may not block shutdown or the lid, codemax takes what is allowed and says what was refused", async () => {
+  const sys = fakeSystem("linux", (c) => (c.endsWith(" true") && (c.includes("shutdown") || c.includes("handle-lid-switch")) ? { code: 1, out: "Access denied" } : {}));
+  const st = await new Awake(sys.deps).set("lid");
+  expect(sys.spawned[0]!.cmd).toContain("--what=idle:sleep --who=codemax");
+  expect(st).toMatchObject({ mode: "lid", lid: false });
+  expect(st.notes.join(" ")).toContain("not allowed to hold the lid switch");
+  expect(st.notes.join(" ")).toContain("not allowed to block shutdown");
+});
+
+test("Linux: when the system refuses every lock, codemax does not claim to keep it awake", async () => {
+  const sys = fakeSystem("linux", (c) => (c.endsWith(" true") ? { code: 1, out: "Access denied" } : {}));
+  const st = await new Awake(sys.deps).set("on");
+  expect(st.mode).toBe("off");
+  expect(sys.spawned).toHaveLength(0);
+  expect(st.notes[0]).toContain("refused to let codemax keep it awake (Access denied)");
+});
+
 test("Linux without systemd-inhibit says so and stays off", async () => {
   const sys = fakeSystem("linux");
   sys.deps.which = () => null;

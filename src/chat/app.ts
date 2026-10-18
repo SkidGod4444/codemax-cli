@@ -1,6 +1,7 @@
 import { BoxRenderable, TextRenderable, TextareaRenderable, createCliRenderer, type CliRenderer, type KeyEvent } from "@opentui/core";
 import type { Config } from "../config.ts";
-import { hotkeyLabel, saveConfigKey } from "../config.ts";
+import { CONFIG_PATH, hotkeyLabel, saveConfigKey } from "../config.ts";
+import { homedir } from "node:os";
 import type { AgentId, QuotaStatus, SessionRef } from "../adapters/types.ts";
 import { listAdapters, getAdapter } from "../adapters/index.ts";
 import { Ledger } from "../core/ledger.ts";
@@ -167,7 +168,10 @@ export class ChatApp {
     });
 
     renderer.keyInput.on("keypress", this.onKey);
-    renderer.on("resize", () => this.palette?.render());
+    renderer.on("resize", () => this.safely("resize", () => {
+      this.palette?.render();
+      this.renderFooter();
+    }));
     this.input.focus();
     this.renderFooter();
   }
@@ -200,7 +204,29 @@ export class ChatApp {
 
   // ---------- keys ----------
 
-  private onKey = (key: KeyEvent) => {
+  /**
+   * The UI must never break: a failure while handling one event, key or redraw is
+   * shown as a short line and codemax carries on.
+   */
+  private uiErrors = 0;
+  private safely(where: string, fn: () => void) {
+    try {
+      fn();
+    } catch (e: any) {
+      this.uiErrors++;
+      if (this.uiErrors <= 5) {
+        try {
+          this.transcript.error(`display glitch in ${where}: ${String(e?.message ?? e).slice(0, 160)} (codemax keeps going)`);
+        } catch {
+          /* the screen itself is gone */
+        }
+      }
+    }
+  }
+
+  private onKey = (key: KeyEvent) => this.safely("key handling", () => this.handleKey(key));
+
+  private handleKey(key: KeyEvent) {
     if (key.eventType === "release") return;
     if (this.permission) {
       key.stopPropagation();
@@ -274,7 +300,7 @@ export class ChatApp {
       this.shortcuts.visible = !this.shortcuts.visible;
       return;
     }
-  };
+  }
 
   private isHotkey(key: KeyEvent): boolean {
     if (key.raw && findHotkey(new TextEncoder().encode(key.raw), this.hotkeys)) return true;
@@ -321,6 +347,10 @@ export class ChatApp {
       else this.palette.setFilter(text.slice(1));
     } else if (this.palette && this.paletteKind === "commands") {
       this.closePalette();
+    } else if (this.palette && this.paletteKind !== "handoff" && this.paletteKind !== "files" && !text.includes("\n")) {
+      // Every picker filters as you type (agents, models, settings…), like Claude Code's.
+      this.palette.setFilter(text);
+      this.paletteFiltered = text.length > 0;
     }
     if (this.shortcuts.visible && text) this.shortcuts.visible = false;
   }
@@ -647,7 +677,8 @@ export class ChatApp {
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
-      { name: "/side", description: "Side agent that reviews each turn: /side codex | /side codex auto | /side off", run: (a) => void this.setSide(a) },
+      { name: "/config", description: "Settings: theme, keep awake, side agent and model, handoffs, checkpoints…", run: () => this.openConfig() },
+      { name: "/side", description: "Side agent that reviews each turn: /side (pick agent and model) · /side codex <model> [auto] · /side off", run: (a) => void this.setSide(a) },
       { name: "/notes", description: "Notes the side agent left", run: () => this.showNotes() },
       { name: "/forward", description: "Send the side agent's latest note (or /forward <n>) to the main agent", run: (a) => this.forwardNote(a.trim() ? Number(a) - 1 : undefined) },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
@@ -1003,10 +1034,15 @@ export class ChatApp {
     this.renderer.root.add(this.palette.box);
   }
 
+  /** True while text in the prompt is only filtering a picker; it is cleared when the picker closes. */
+  private paletteFiltered = false;
+
   private closePalette(_focus = true) {
     this.palette?.destroy();
     this.palette = null;
     this.paletteKind = null;
+    if (this.paletteFiltered) this.input.clear();
+    this.paletteFiltered = false;
     this.input.focus();
   }
 
@@ -1131,6 +1167,10 @@ export class ChatApp {
   }
 
   private onEngineEvent(active: Active, e: EngineEvent) {
+    this.safely(`${active.name} event`, () => this.handleEngineEvent(active, e));
+  }
+
+  private handleEngineEvent(active: Active, e: EngineEvent) {
     if (this.active !== active && !this.side.has(active) && e.type !== "permission_request") return;
     const target = () => active.turn?.block ?? (active.replay ??= this.transcript.agent());
     switch (e.type) {
@@ -1266,29 +1306,201 @@ export class ChatApp {
 
   // ---------- side agent ----------
 
+  /**
+   * /side                     pick the side agent, then its model
+   * /side <agent> [model] [auto|ask]
+   * /side off
+   */
   private async setSide(arg: string) {
-    const [who, mode] = arg.trim().toLowerCase().split(/\s+/);
+    const words = arg.trim().split(/\s+/).filter(Boolean);
     const cfg = this.config.sideAgent ?? { agent: null, forward: "ask" as const };
-    if (!who) {
-      this.transcript.note(cfg.agent ? `side agent: ${cfg.agent} · notes ${cfg.forward === "auto" ? "go to the main agent automatically" : "wait for /forward"} · /side off to stop` : "no side agent · /side codex adds one that reviews each turn (/side codex auto forwards its notes by itself)");
-      return;
-    }
+    if (!words.length) return this.openSidePicker();
+    const who = words[0]!.toLowerCase();
     if (who === "off") {
       await this.closeReviewer();
-      this.config.sideAgent = { ...cfg, agent: null };
-    } else {
-      if (!this.detect.get(who as AgentId)?.engine) return this.transcript.note(`no protocol engine for "${who}"`, C.warn);
-      await this.closeReviewer();
-      this.config.sideAgent = { agent: who as AgentId, forward: mode === "auto" ? "auto" : "ask" };
+      this.saveSide({ ...cfg, agent: null, model: undefined });
+      this.transcript.note("side agent off", C.dim);
+      return this.renderFooter();
     }
+    if (!this.detect.get(who as AgentId)?.engine) return this.transcript.note(`no protocol engine for "${who}" · /side to pick one`, C.warn);
+    const rest = words.slice(1);
+    const forward = rest.includes("auto") ? "auto" : rest.includes("ask") ? "ask" : cfg.agent === who ? cfg.forward : "ask";
+    const model = rest.find((w) => w !== "auto" && w !== "ask");
+    await this.enableSide(who as AgentId, { forward, model, pickModel: false });
+  }
+
+  private saveSide(v: Config["sideAgent"]) {
+    this.config.sideAgent = v;
     try {
-      saveConfigKey("sideAgent", this.config.sideAgent);
+      saveConfigKey("sideAgent", v);
     } catch {
       /* read-only home */
     }
-    const s = this.config.sideAgent;
-    this.transcript.note(s.agent ? `side agent: ${getAdapter(s.agent).name} reviews each turn and speaks up only when something needs attention${s.forward === "auto" ? "; its notes go to the main agent automatically" : " · /forward sends a note to the main agent"}` : "side agent off", s.agent ? C.accent : C.dim);
+  }
+
+  private async enableSide(agent: AgentId, o: { forward: "ask" | "auto"; model?: string; pickModel: boolean }) {
+    const prev = this.config.sideAgent;
+    if (prev?.agent !== agent || (o.model && o.model !== prev.model)) await this.closeReviewer();
+    this.saveSide({ agent, forward: o.forward, model: o.model ?? (prev?.agent === agent ? prev.model : undefined) });
+    const name = getAdapter(agent).name;
+    this.transcript.note(`side agent: ${name}${this.config.sideAgent.model ? ` (${this.config.sideAgent.model})` : ""} reviews each turn and speaks up only when something needs attention${o.forward === "auto" ? "; its notes go to the main agent automatically" : " · /forward sends a note to the main agent"}`, C.accent);
     this.renderFooter();
+    if (!o.pickModel) return;
+    // Start the reviewer now so its real model list can be offered.
+    const r = await this.ensureReviewer();
+    const models = r?.engine.info?.models ?? [];
+    if (!r || models.length < 2) {
+      if (r && models.length === 1) this.transcript.note(`${name} offers one model on your plan: ${models[0]!.name}`);
+      return;
+    }
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `Model for the side agent (${name}) · Esc keeps ${shortModelName(r.engine.info?.currentModel ?? "default")}`,
+      items: models.map((m) => ({ label: m.id, description: `${m.name !== m.id ? m.name : ""}${m.id === r.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id })),
+      onPick: (it) => {
+        this.closePalette();
+        void this.setSideModel(it.value);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  private async setSideModel(model: string) {
+    const cfg = this.config.sideAgent;
+    if (!cfg?.agent) return this.transcript.note("no side agent · /side to pick one", C.warn);
+    this.saveSide({ ...cfg, model });
+    const r = this.reviewer;
+    try {
+      if (r?.engine.setModel) await r.engine.setModel(model);
+      this.transcript.note(`side agent model: ${model}`);
+      if (cfg.agent === "cursor") this.transcript.note("Cursor saves this as its default model, so Cursor uses it outside codemax too", C.warn);
+    } catch (e: any) {
+      this.transcript.error(`could not set the side agent's model: ${e?.message ?? e}`);
+    }
+    this.renderFooter();
+  }
+
+  // ---------- settings (/config) ----------
+
+  private settings(): { key: string; label: string; value: string; choices: { value: string; label?: string; description?: string }[]; apply: (v: string) => void | Promise<void> }[] {
+    const c = this.config;
+    const onOff = (b: boolean) => (b ? "on" : "off");
+    const bool = (key: "autoSwitch" | "summarizeOnSwitch" | "checkpoints" | "priceUpdates") => (v: string) => {
+      c[key] = v === "on";
+      saveConfigKey(key, c[key]);
+    };
+    const side = c.sideAgent ?? { agent: null, forward: "ask" as const };
+    const agents = listAdapters(c.order).filter((a) => this.detect.get(a.id)?.engine);
+    return [
+      { key: "theme", label: "Theme", value: c.theme ?? "auto", choices: [{ value: "auto", description: "follow the terminal's background" }, { value: "dark" }, { value: "light" }], apply: (v) => this.setThemePref(v) },
+      { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
+      { key: "side", label: "Side agent", value: side.agent ?? "off", choices: [{ value: "off" }, ...agents.map((a) => ({ value: a.id, label: a.name, description: "pick its model next" }))], apply: (v) => (v === "off" ? this.setSide("off") : this.enableSide(v as AgentId, { forward: side.forward, pickModel: true })) },
+      { key: "sideModel", label: "Side agent model", value: side.agent ? (side.model ?? "default") : "(no side agent)", choices: side.agent ? [{ value: "pick", label: "Choose from its models", description: "starts the side agent to list them" }] : [], apply: async () => { if (side.agent) await this.enableSide(side.agent, { forward: side.forward, pickModel: true }); } },
+      { key: "sideForward", label: "Side agent notes", value: side.forward, choices: [{ value: "ask", description: "wait for /forward" }, { value: "auto", description: "send each note to the main agent" }], apply: (v) => this.saveSide({ ...side, forward: v === "auto" ? "auto" : "ask" }) },
+      { key: "autoSwitch", label: "Offer a handoff at limits", value: onOff(c.autoSwitch), choices: [{ value: "on" }, { value: "off" }], apply: bool("autoSwitch") },
+      { key: "summarizeOnSwitch", label: "Summary before switching", value: onOff(c.summarizeOnSwitch), choices: [{ value: "on", description: "only for history without a step journal" }, { value: "off" }], apply: bool("summarizeOnSwitch") },
+      { key: "checkpoints", label: "Snapshots for /undo", value: onOff(c.checkpoints), choices: [{ value: "on" }, { value: "off", description: "also turns off code diffs in handoffs" }], apply: bool("checkpoints") },
+      {
+        key: "bell",
+        label: "Bell after long turns",
+        value: c.bellAfterSeconds ? `${c.bellAfterSeconds}s` : "off",
+        choices: [{ value: "0", label: "off" }, { value: "10", label: "10s" }, { value: "20", label: "20s" }, { value: "60", label: "60s" }],
+        apply: (v) => {
+          c.bellAfterSeconds = Number(v);
+          saveConfigKey("bellAfterSeconds", c.bellAfterSeconds);
+        },
+      },
+      { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
+    ];
+  }
+
+  /** /config: every setting with its value; pick one to change it. */
+  private openConfig() {
+    const all = this.settings();
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `Settings · Enter to change · saved to ${CONFIG_PATH.replace(homedir(), "~")}`,
+      // Weights keep the settings in this order (the palette otherwise sorts by label).
+      items: all.map((x, i) => ({ label: x.label, description: x.value, value: x.key, disabled: !x.choices.length, weight: 100 - i })),
+      maxRows: 12,
+      onPick: (it) => {
+        const st = all.find((x) => x.key === it.value);
+        if (st) this.openSetting(st);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  private openSetting(st: ReturnType<ChatApp["settings"]>[number]) {
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `${st.label} · now ${st.value} · Esc back to settings`,
+      items: st.choices.map((ch, i) => ({ label: ch.label ?? ch.value, description: `${ch.description ?? ""}${(ch.label ?? ch.value) === st.value || ch.value === st.value ? "  (current)" : ""}`, value: ch.value, weight: 100 - i })),
+      onPick: (it) => {
+        this.closePalette();
+        void (async () => {
+          try {
+            await st.apply(it.value);
+            if (!["theme", "awake", "side", "sideModel"].includes(st.key)) this.transcript.note(`${st.label.toLowerCase()}: ${it.label}`);
+          } catch (e: any) {
+            this.transcript.error(`could not change ${st.label.toLowerCase()}: ${e?.message ?? e}`);
+          }
+          this.renderFooter();
+          // Back to the list for the next change, unless a follow-up picker took over.
+          if (!this.palette) this.openConfig();
+        })();
+      },
+      onClose: () => this.openConfig(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** /side with no arguments: pick the agent (then its model). */
+  private openSidePicker() {
+    const cfg = this.config.sideAgent;
+    const items: PaletteItem[] = listAdapters(this.config.order)
+      .filter((a) => this.detect.get(a.id)?.engine)
+      .map((a) => ({ label: a.name + (a.id === cfg?.agent ? " (current)" : ""), description: a.id === this.active?.agent ? "same harness as the main agent, in its own session" : "reviews the main agent's turns", value: a.id }));
+    items.push({ label: "Off", description: "no side agent", value: "off" });
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: "Side agent · reviews each turn and leaves a note when something needs attention",
+      items,
+      onPick: (it) => {
+        this.closePalette();
+        if (it.value === "off") return void this.setSide("off");
+        void this.enableSide(it.value as AgentId, { forward: cfg?.forward ?? "ask", pickModel: true });
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** The side agent's session, started on first use with the chosen model. */
+  private async ensureReviewer() {
+    const cfg = this.config.sideAgent;
+    if (!cfg?.agent || this.closed) return null;
+    if (this.reviewer?.agent === cfg.agent) return this.reviewer;
+    await this.closeReviewer();
+    if (this.checkBlockers(cfg.agent).length) return null;
+    const engine = this.engineFactory(cfg.agent);
+    const r = { agent: cfg.agent, name: getAdapter(cfg.agent).name, engine, busy: false, pending: false, since: this.lastReviewBaseline(), primed: false };
+    this.reviewer = r;
+    try {
+      await engine.start({ cwd: this.cwd });
+      if (cfg.model && engine.setModel && engine.info?.currentModel !== cfg.model) await engine.setModel(cfg.model).catch((e: any) => this.transcript.note(`side agent: could not use model ${cfg.model} (${e?.message ?? e}); using ${engine.info?.currentModel ?? "its default"}`, C.warn));
+      return r;
+    } catch (e: any) {
+      if (this.reviewer === r) this.reviewer = null;
+      this.transcript.note(`side agent ${r.name} could not start: ${e?.message ?? e}`, C.warn);
+      return null;
+    }
   }
 
   private async closeReviewer() {
@@ -1301,25 +1513,12 @@ export class ChatApp {
   private async review() {
     const cfg = this.config.sideAgent;
     if (!cfg?.agent || this.closed) return;
-    let r = this.reviewer;
-    if (r?.busy) {
-      r.pending = true;
+    if (this.reviewer?.busy) {
+      this.reviewer.pending = true;
       return;
     }
-    if (!r || r.agent !== cfg.agent) {
-      await this.closeReviewer();
-      if (this.checkBlockers(cfg.agent).length) return;
-      const engine = this.engineFactory(cfg.agent);
-      r = { agent: cfg.agent, name: getAdapter(cfg.agent).name, engine, busy: true, pending: false, since: this.lastReviewBaseline(), primed: false };
-      this.reviewer = r;
-      try {
-        await engine.start({ cwd: this.cwd });
-      } catch (e: any) {
-        this.reviewer = null;
-        this.transcript.note(`side agent ${r.name} could not start: ${e?.message ?? e}`, C.warn);
-        return;
-      }
-    }
+    const r = await this.ensureReviewer();
+    if (!r) return;
     r.busy = true;
     this.renderFooter();
     try {
@@ -1334,13 +1533,17 @@ export class ChatApp {
         let limited = false;
         const engine = r.engine;
         const off = engine.onEvent((e) => {
+          try {
           if (e.type === "text_delta") reply += e.text;
           else if (e.type === "permission_request") {
             // A reviewer never acts: refuse anything it asks to do.
             const no = e.request.options.find((o) => /reject|deny|decline/i.test(`${o.kind} ${o.id}`)) ?? e.request.options.at(-1);
             if (no) engine.answerPermission(e.request.id, no.id);
-          } else if (e.type === "usage") this.recordUsage(r!.agent, engine, e);
+          } else if (e.type === "usage") this.recordUsage(r.agent, engine, e);
           else if (e.type === "error" && e.kind === "quota") limited = true;
+          } catch {
+            /* a bad event must never break the reviewer or the screen */
+          }
         });
         await engine.prompt(prompt).catch(() => "error");
         off();
@@ -1447,6 +1650,10 @@ export class ChatApp {
   }
 
   private renderFooter() {
+    this.safely("footer", () => this.drawFooter());
+  }
+
+  private drawFooter() {
     const a = this.active;
     const width = Math.max(20, this.renderer.width - 4);
     let color: string = C.dim;
@@ -1462,7 +1669,7 @@ export class ChatApp {
     else if (this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
     else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
-    if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
+    if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.config.sideAgent.model ? ` ${shortModelName(this.config.sideAgent.model)}` : ""}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
     // Narrow glyph: the footer is measured in characters, and an emoji takes two columns.
     if (this.awake.mode !== "off") left.push({ text: `● awake${this.awake.status.lid ? " · lid" : ""}`, prio: 1 });
     const effort = a ? this.effortOption(a)?.current : undefined;

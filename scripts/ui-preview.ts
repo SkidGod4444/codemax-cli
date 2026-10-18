@@ -85,6 +85,14 @@ async function shoot(mode: "dark" | "light") {
   await until((f) => f.includes("/agents"));
   await setup.renderOnce();
   write(`${mode}-palette`, setup.captureSpans(), mode);
+  setup.mockInput.pressEscape();
+  setup.mockInput.pressEscape();
+  (app as any).addNote("codex", "Codex", "Heads up · The tests ran once, so a flaky pass would ship.\n\n**Thin evidence**\n- `bun test test/auth.test.ts` ran a single time\n- one unrelated snapshot still fails\n- **Consider running the suite twice before shipping.**");
+  await setup.mockInput.typeText("/config");
+  setup.mockInput.pressEnter();
+  await until((f) => f.includes("Keep awake"));
+  await setup.renderOnce();
+  write(`${mode}-config`, setup.captureSpans(), mode);
   await app.quit();
   setup.renderer.destroy();
 }

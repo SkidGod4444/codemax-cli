@@ -47,7 +47,9 @@ if (process.platform === "win32") {
 
 const st = await awake.set("lid");
 console.log("set lid ->", JSON.stringify(st));
-if (st.mode !== "lid" || !st.lid) fail("lid mode did not turn on");
+// A Windows server/desktop has no lid setting: then only the no-sleep hold can be checked.
+const noLid = process.platform === "win32" && st.notes.some((n) => n.includes("no lid setting"));
+if (st.mode !== "lid" || (!st.lid && !noLid)) fail("lid mode did not turn on");
 
 if (process.platform === "darwin") {
   await until("pmset reports sleep disabled", () => /SleepDisabled\s+1/.test(sh(["pmset", "-g"])));
@@ -59,6 +61,11 @@ if (process.platform === "darwin") {
   await until("systemd-inhibit holds idle/sleep/shutdown/lid", () => /codemax[\s\S]*handle-lid-switch/.test(sh(["systemd-inhibit", "--list"])));
   standIn.kill("SIGKILL");
   await until("inhibitor released after codemax was killed", () => !/codemax/.test(sh(["systemd-inhibit", "--list"])));
+} else if (process.platform === "win32" && noLid) {
+  await until("a system-required power request is held", () => /SYSTEM:[\s\S]*powershell/i.test(sh(["powercfg", "/requests"])));
+  standIn.kill("SIGKILL");
+  await until("power request released after codemax was killed", () => !/SYSTEM:[\s\S]*powershell/i.test(sh(["powercfg", "/requests"])), 15000);
+  console.log("note: this machine has no lid, so the lid action could not be checked here");
 } else if (process.platform === "win32") {
   await until("lid action set to do nothing (AC and DC)", () => lidValues().every((v) => v === 0));
   await until("a system-required power request is held", () => /SYSTEM:[\s\S]*powershell/i.test(sh(["powercfg", "/requests"])));
