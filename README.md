@@ -90,9 +90,10 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
+| `/update` | Update codemax when a new version is out (also `codemax update`) |
 | `/config` | Every setting in one panel: theme, keep awake, side agent and its model, handoffs, snapshots… |
 | `/side` | Pick a side agent and its model; it reviews each turn and leaves a note when something needs attention (`/side codex <model> auto` forwards notes itself) |
-| `/forward`, `/notes` | Send the side agent's note to the main agent; list notes |
+| `/forward`, `/notes`, `/review` | Send the side agent's note to the main agent; list notes; ask for a review now. How often it reviews is in `/config`; each review uses the side agent's plan, so a different subscription than the main agent is best |
 | `/awake on`, `/awake lid` | Keep the machine from sleeping while agents work; `lid` also with the lid closed |
 | `/undo` | Revert the last turn's changes |
 | `/usage`, `/budget` | Usage and spend per agent |
@@ -141,7 +142,7 @@ codemax history | brief | status | config | keys
 - Your code goes only to the agents you already use, under your own logins.
 - codemax always removes vendor API keys from the agents it starts, and `codemax doctor --fix` removes any left in Claude Code's settings.
 - Grok follows your Claude Code permission setting. If that is `auto`, Grok acts without asking, and codemax warns you.
-- Its only network call is a weekly price-list download, which `priceUpdates: false` turns off.
+- Its own network calls are a weekly price-list download (`priceUpdates: false` turns it off) and a version check at most every 12 hours against npm or GitHub releases (`updateCheck: false` turns it off). Both are in `/config`.
 - Usage values are what your plans covered at public API rates, not money you spent.
 
 </details>

@@ -28,11 +28,15 @@ import { platformArgv, shellArgv } from "../core/spawn.ts";
 import { cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
-import { buildReviewPrompt, forwardMessage, parseNote } from "../core/review.ts";
+import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
+import { logoLines } from "./logo.ts";
+import { checkForUpdate, updatePlan } from "../core/update.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
 const MODE_CYCLE = ["default", "acceptEdits", "plan"];
+/** Most side-agent notes sent automatically per task; more wait for /forward. */
+const AUTO_FORWARD_CAP = 2;
 
 interface Active {
   agent: AgentId;
@@ -95,6 +99,14 @@ export class ChatApp {
   /** Side agent (/side): reviews the main agent's work after each turn. */
   private reviewer: { agent: AgentId; name: string; engine: Engine; busy: boolean; pending: boolean; since: number; primed: boolean } | null = null;
   private notes: { ts: number; agent: AgentId; name: string; text: string }[] = [];
+  /** Working turns since the side agent last reviewed (for `sideAgent.every`). */
+  private turnsSinceReview = 0;
+  /** Notes sent automatically per task (auto mode is capped so the two agents cannot loop). */
+  private autoForwards = new Map<string, number>();
+  /** A newer codemax on npm, when the update check found one. */
+  private updateAvailable: string | null = null;
+  /** Update check (tests swap it; it never runs under `bun test`). */
+  updateChecker: (current: string) => Promise<string | null> = (current) => (process.env.NODE_ENV === "test" ? Promise.resolve(null) : checkForUpdate(current));
   /** Keep-awake (/awake). Tests swap its system runner. */
   awake = new Awake({ ...defaultAwakeDeps(), interactive: (fn) => this.withTerminal(fn) });
   private resolveDone!: () => void;
@@ -195,8 +207,13 @@ export class ChatApp {
     }
     const stripped = strippedKeys();
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
-    this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes });
+    // Card border (2) + padding (2) + transcript padding (2): the logo must fit inside without wrapping.
+    this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes, logo: logoLines(this.renderer.width - 6) });
     if ((this.config as any).priceUpdates !== false) void refreshLivePricesIfStale().then((l) => l && resetPriceCache());
+    if (this.config.updateCheck !== false)
+      void this.updateChecker(VERSION)
+        .then((v) => v && this.announceUpdate(v))
+        .catch(() => {});
     if (o.pick && !fresh && this.openPicker(first)) return this.done;
     await this.launch(first, { fresh });
     return this.done;
@@ -594,24 +611,30 @@ export class ChatApp {
   }
 
   /** Startup picker: resume a recent session or start fresh. Returns false when there is nothing to pick. */
+  /**
+   * Startup: choose the agent to continue with. One row per usable agent, most
+   * recently used first, resuming its saved session when there is one.
+   */
   private openPicker(defaultAgent: AgentId): boolean {
-    const sessions = Object.values(this.ledger.sessions()).filter((s): s is SessionRef => !!s && !!this.detect.get(s.agent)?.engine);
-    if (!sessions.length) return false;
-    sessions.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    const sessions = this.ledger.sessions();
     const turns = this.ledger.turns();
-    const items: PaletteItem[] = sessions.map((s, i) => {
-      const last = [...turns].reverse().find((t) => t.agent === s.agent && t.role === "user");
-      return {
-        label: `Resume ${getAdapter(s.agent).name}`,
-        description: `${ago(s.lastUsedAt)}${last ? ` · "${last.text.replace(/\s+/g, " ").slice(0, 60)}"` : ""}`,
-        value: `resume:${s.agent}`,
-        weight: 100 - i,
-      };
+    const usable = listAdapters(this.config.order).filter((a) => this.detect.get(a.id)?.installed && this.detect.get(a.id)?.engine);
+    if (!usable.length) return false;
+    const recent = [...usable].sort((a, b) => (sessions[b.id]?.lastUsedAt ?? 0) - (sessions[a.id]?.lastUsedAt ?? 0));
+    const items: PaletteItem[] = recent.map((a, i) => {
+      const s = sessions[a.id];
+      const last = [...turns].reverse().find((t) => t.agent === a.id && t.role === "user");
+      const q = this.quota.get(a.id);
+      const bits = [s ? `resume · ${ago(s.lastUsedAt)}${last ? ` · "${last.text.replace(/\s+/g, " ").slice(0, 50)}"` : ""}` : "new session"];
+      if (q && quotaLabel(q)) bits.push(quotaLabel(q));
+      return { label: a.name, description: bits.join(" · "), value: `resume:${a.id}`, weight: 100 - i };
     });
-    items.push({ label: `New session with ${getAdapter(defaultAgent).name}`, description: "start fresh (history stays in the ledger)", value: `new:${defaultAgent}`, weight: 0 });
+    const fresh = recent[0]!;
+    items.push({ label: `Start fresh with ${fresh.name}`, description: "new session (history stays in the ledger)", value: `new:${fresh.id}`, weight: 0 });
+    defaultAgent = sessions[fresh.id] ? fresh.id : defaultAgent;
     this.paletteKind = "picker";
     this.palette = new Palette(this.renderer, {
-      title: "Resume a session · Enter to continue · Esc for the most recent",
+      title: `Choose an agent to continue with · Enter to start · Esc for ${getAdapter(defaultAgent).name}`,
       items,
       onPick: (it) => {
         this.closePalette();
@@ -620,7 +643,7 @@ export class ChatApp {
       },
       onClose: () => {
         this.closePalette();
-        void this.launch(sessions[0]!.agent, { fresh: false });
+        void this.launch(defaultAgent, { fresh: false });
       },
     }, this.paletteAnchor);
     this.renderer.root.add(this.palette.box);
@@ -640,6 +663,7 @@ export class ChatApp {
   }
 
   private async send(active: Active, text: string) {
+    if (this.closed) return;
     this.transcript.user(text);
     text = this.withAttachments(text);
     const cp = await this.checkpoint(active, text);
@@ -677,8 +701,10 @@ export class ChatApp {
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
+      { name: "/update", description: "Update codemax to the latest version", run: () => void this.runUpdate() },
       { name: "/config", description: "Settings: theme, keep awake, side agent and model, handoffs, checkpoints…", run: () => this.openConfig() },
       { name: "/side", description: "Side agent that reviews each turn: /side (pick agent and model) · /side codex <model> [auto] · /side off", run: (a) => void this.setSide(a) },
+      { name: "/review", description: "Ask the side agent to review the latest work now", run: () => void this.reviewNow() },
       { name: "/notes", description: "Notes the side agent left", run: () => this.showNotes() },
       { name: "/forward", description: "Send the side agent's latest note (or /forward <n>) to the main agent", run: (a) => this.forwardNote(a.trim() ? Number(a) - 1 : undefined) },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
@@ -1124,6 +1150,7 @@ export class ChatApp {
   }
 
   private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean } = {}) {
+    if (this.closed) return;
     const block = this.transcript.agent();
     const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
     active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS), rec };
@@ -1147,7 +1174,13 @@ export class ChatApp {
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
       turn.rec?.end(stop);
       // The side agent reviews main-agent turns that did work (not /ask, not summaries).
-      if (turn.rec && this.active === active && !this.side.has(active) && (turn.tools.size > 0 || reply.length > 0)) void this.review();
+      // A turn that only answers a forwarded note is not reviewed: note → turn → review → note
+      // would loop on both plans. Its work is covered by the next review after a user turn.
+      if (turn.rec && this.active === active && !this.side.has(active) && !isForwardedNote(text) && (turn.tools.size > 0 || reply.length > 0)) {
+        const every = this.config.sideAgent?.every ?? 1;
+        this.turnsSinceReview++;
+        if (every > 0 && this.turnsSinceReview >= every) void this.review();
+      }
       if (isLimitNotice(reply)) {
         // The agent ended the turn with only a limit notice: treat it as running out, and leave
         // the user's request unanswered in the ledger so the next agent is asked to finish it.
@@ -1341,9 +1374,11 @@ export class ChatApp {
   private async enableSide(agent: AgentId, o: { forward: "ask" | "auto"; model?: string; pickModel: boolean }) {
     const prev = this.config.sideAgent;
     if (prev?.agent !== agent || (o.model && o.model !== prev.model)) await this.closeReviewer();
-    this.saveSide({ agent, forward: o.forward, model: o.model ?? (prev?.agent === agent ? prev.model : undefined) });
+    // Keep the user's other side-agent settings (review cadence) when switching agent.
+    this.saveSide({ ...prev, agent, forward: o.forward, model: o.model ?? (prev?.agent === agent ? prev.model : undefined) });
     const name = getAdapter(agent).name;
-    this.transcript.note(`side agent: ${name}${this.config.sideAgent.model ? ` (${this.config.sideAgent.model})` : ""} reviews each turn and speaks up only when something needs attention${o.forward === "auto" ? "; its notes go to the main agent automatically" : " · /forward sends a note to the main agent"}`, C.accent);
+    if (agent === this.active?.agent) this.transcript.note(`${name} is also the main agent: both use one ${name} plan, so each review brings the main agent's limit closer. A different subscription (or a cheaper model: /side ${agent} <model>, or fewer reviews in /config) keeps it from running out sooner.`, C.warn);
+    this.transcript.note(`side agent: ${name}${this.config.sideAgent.model ? ` (${this.config.sideAgent.model})` : ""} reviews ${reviewCadence(this.config.sideAgent.every)} and speaks up only when something needs attention${o.forward === "auto" ? "; its notes go to the main agent automatically" : " · /forward sends a note to the main agent"}`, C.accent);
     this.renderFooter();
     if (!o.pickModel) return;
     // Start the reviewer now so its real model list can be offered.
@@ -1398,6 +1433,13 @@ export class ChatApp {
       { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
       { key: "side", label: "Side agent", value: side.agent ?? "off", choices: [{ value: "off" }, ...agents.map((a) => ({ value: a.id, label: a.name, description: "pick its model next" }))], apply: (v) => (v === "off" ? this.setSide("off") : this.enableSide(v as AgentId, { forward: side.forward, pickModel: true })) },
       { key: "sideModel", label: "Side agent model", value: side.agent ? (side.model ?? "default") : "(no side agent)", choices: side.agent ? [{ value: "pick", label: "Choose from its models", description: "starts the side agent to list them" }] : [], apply: async () => { if (side.agent) await this.enableSide(side.agent, { forward: side.forward, pickModel: true }); } },
+      {
+        key: "sideEvery",
+        label: "Side agent reviews",
+        value: reviewCadence(side.every),
+        choices: [{ value: "1", label: "every turn" }, { value: "2", label: "every 2nd turn" }, { value: "3", label: "every 3rd turn" }, { value: "0", label: "only on /review", description: "no automatic reviews" }],
+        apply: (v) => this.saveSide({ ...side, every: Number(v) }),
+      },
       { key: "sideForward", label: "Side agent notes", value: side.forward, choices: [{ value: "ask", description: "wait for /forward" }, { value: "auto", description: "send each note to the main agent" }], apply: (v) => this.saveSide({ ...side, forward: v === "auto" ? "auto" : "ask" }) },
       { key: "autoSwitch", label: "Offer a handoff at limits", value: onOff(c.autoSwitch), choices: [{ value: "on" }, { value: "off" }], apply: bool("autoSwitch") },
       { key: "summarizeOnSwitch", label: "Summary before switching", value: onOff(c.summarizeOnSwitch), choices: [{ value: "on", description: "only for history without a step journal" }, { value: "off" }], apply: bool("summarizeOnSwitch") },
@@ -1412,6 +1454,7 @@ export class ChatApp {
           saveConfigKey("bellAfterSeconds", c.bellAfterSeconds);
         },
       },
+      { key: "updateCheck", label: "Check for codemax updates", value: c.updateCheck === false ? "off" : "on", choices: [{ value: "on", description: "asks npm at most every 12 hours" }, { value: "off" }], apply: (v) => { c.updateCheck = v === "on"; saveConfigKey("updateCheck", c.updateCheck); } },
       { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
     ];
   }
@@ -1465,7 +1508,8 @@ export class ChatApp {
     const cfg = this.config.sideAgent;
     const items: PaletteItem[] = listAdapters(this.config.order)
       .filter((a) => this.detect.get(a.id)?.engine)
-      .map((a) => ({ label: a.name + (a.id === cfg?.agent ? " (current)" : ""), description: a.id === this.active?.agent ? "same harness as the main agent, in its own session" : "reviews the main agent's turns", value: a.id }));
+      // A different subscription first: the same tool would share (and drain) the main agent's plan.
+      .map((a) => ({ label: a.name + (a.id === cfg?.agent ? " (current)" : ""), description: a.id === this.active?.agent ? "same plan as the main agent: reviews count against its limit" : "its own subscription: reviews do not touch the main agent's limit", value: a.id, weight: a.id === this.active?.agent ? 0 : 10 }));
     items.push({ label: "Off", description: "no side agent", value: "off" });
     this.closePalette();
     this.paletteKind = "modes";
@@ -1519,6 +1563,7 @@ export class ChatApp {
     }
     const r = await this.ensureReviewer();
     if (!r) return;
+    this.turnsSinceReview = 0;
     r.busy = true;
     this.renderFooter();
     try {
@@ -1547,6 +1592,7 @@ export class ChatApp {
         });
         await engine.prompt(prompt).catch(() => "error");
         off();
+        if (this.closed) return;
         r.primed = true;
         r.since = startedAt;
         if (limited || isLimitNotice(reply)) {
@@ -1571,15 +1617,27 @@ export class ChatApp {
   }
 
   private addNote(agent: AgentId, name: string, text: string) {
+    if (this.closed) return;
     this.notes.push({ ts: Date.now(), agent, name, text });
     this.ledger.addEvent({ kind: "note", agent, detail: `side agent note: ${text.slice(0, 2000)}` });
     const main = this.active?.name ?? "the main agent";
     const auto = this.config.sideAgent?.forward === "auto";
-    this.transcript.noteCard(`⚑ Note from ${name} (side agent)`, text, auto ? `sent to ${main} automatically` : `/forward sends this to ${main} · /notes lists all notes`);
-    if (auto) this.forwardNote(this.notes.length - 1);
+    const task = this.ledger.journal.task().request?.id ?? "none";
+    const sent = this.autoForwards.get(task) ?? 0;
+    const capped = auto && sent >= AUTO_FORWARD_CAP;
+    this.transcript.noteCard(
+      `⚑ Note from ${name} (side agent)`,
+      text,
+      auto && !capped ? `sent to ${main} automatically` : capped ? `auto-forward paused: ${AUTO_FORWARD_CAP} notes already sent for this task · /forward to send this one` : `/forward sends this to ${main} · /notes lists all notes`,
+    );
+    if (auto && !capped) {
+      this.autoForwards.set(task, sent + 1);
+      this.forwardNote(this.notes.length - 1);
+    }
   }
 
   private forwardNote(index = this.notes.length - 1) {
+    if (this.closed) return;
     const n = this.notes[index];
     const a = this.active;
     if (!n) return this.transcript.note("no side-agent notes yet");
@@ -1592,6 +1650,48 @@ export class ChatApp {
       return;
     }
     void this.send(a, msg);
+  }
+
+  private announceUpdate(version: string) {
+    if (this.closed) return;
+    this.updateAvailable = version;
+    this.transcript.note(`codemax ${version} is available (you have ${VERSION}) · run /update to install it`, C.accent);
+    this.renderFooter();
+  }
+
+  /** /update: update the way codemax was installed, with its output on the real terminal. */
+  private async runUpdate() {
+    const plan = updatePlan();
+    if (plan.manual) return this.transcript.note(plan.manual, C.warn);
+    if (this.active?.turn) return this.transcript.note("an agent is working; /update when the turn ends", C.warn);
+    this.transcript.note(`updating with ${plan.label}…`);
+    let ok = true;
+    await this.withTerminal(async () => {
+      process.stdout.write(`\ncodemax: updating with ${plan.label}\n\n`);
+      for (const cmd of plan.cmd) {
+        const p = Bun.spawn(platformArgv(cmd), { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
+        if ((await p.exited) !== 0) {
+          ok = false;
+          break;
+        }
+      }
+      process.stdout.write(ok ? "\ncodemax: done. Returning to codemax…\n" : "\ncodemax: the update failed (see above). Returning to codemax…\n");
+      await Bun.sleep(1200);
+    });
+    if (ok) {
+      const to = this.updateAvailable;
+      this.updateAvailable = null;
+      this.transcript.note(`updated${to ? ` to ${to}` : ""} · restart codemax (/quit, then codemax) to use the new version`, C.ok);
+    } else this.transcript.error(`update failed · run it yourself: ${plan.cmd.map((c) => c.join(" ")).join(" && ")}`);
+    this.renderFooter();
+  }
+
+  private async reviewNow() {
+    if (!this.config.sideAgent?.agent) return this.transcript.note("no side agent · /side to pick one", C.warn);
+    this.transcript.note(`asking ${getAdapter(this.config.sideAgent.agent).name} to review…`);
+    const before = this.notes.length;
+    await this.review();
+    if (this.notes.length === before && !this.closed) this.transcript.note("the side agent found nothing worth a note");
   }
 
   private showNotes() {
@@ -1635,6 +1735,7 @@ export class ChatApp {
   }
 
   private setWorking(text: string | null) {
+    if (this.closed && text) return;
     this.working.visible = !!text;
     this.working.content = text ?? "";
   }
@@ -1669,6 +1770,7 @@ export class ChatApp {
     else if (this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
     else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
+    if (this.updateAvailable) left.push({ text: `↑ ${this.updateAvailable} available · /update`, prio: 1 });
     if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.config.sideAgent.model ? ` ${shortModelName(this.config.sideAgent.model)}` : ""}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
     // Narrow glyph: the footer is measured in characters, and an emoji takes two columns.
     if (this.awake.mode !== "off") left.push({ text: `● awake${this.awake.status.lid ? " · lid" : ""}`, prio: 1 });
@@ -1824,4 +1926,9 @@ async function copyToClipboard(renderer: CliRenderer, text: string): Promise<boo
     }
   }
   return osc;
+}
+
+function reviewCadence(every: number | undefined): string {
+  const n = every ?? 1;
+  return n === 0 ? "only on /review" : n === 1 ? "every turn" : n === 2 ? "every 2nd turn" : n === 3 ? "every 3rd turn" : `every ${n}th turn`;
 }

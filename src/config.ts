@@ -38,7 +38,10 @@ export interface Config {
    * leaves a note when something needs attention. `forward: "auto"` sends notes to the
    * main agent by itself; "ask" waits for /forward.
    */
-  sideAgent: { agent: AgentId | null; forward: "ask" | "auto"; model?: string };
+  /** `every`: review every Nth working turn (1 = each turn, 0 = only on /review). Each review is a request on the side agent's plan. */
+  sideAgent: { agent: AgentId | null; forward: "ask" | "auto"; model?: string; every?: number };
+  /** Check npm for a newer codemax at most every 12 hours and offer /update. */
+  updateCheck: boolean;
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
   /**
@@ -61,6 +64,7 @@ export const DEFAULT_CONFIG: Config = {
   bellAfterSeconds: 20,
   theme: "auto",
   awake: "off",
+  updateCheck: true,
   sideAgent: { agent: null, forward: "ask" },
   brief: { turns: 10, maxChars: 8000, turnChars: 1200, resumeChars: 24000 },
 };

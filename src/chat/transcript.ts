@@ -70,7 +70,7 @@ export class Transcript {
   }
 
   /** Startup card: brand mark, what codemax is, the project, and any notes. */
-  header(lines: { title: string; subtitle: string; path: string; notes: string[] }) {
+  header(lines: { title: string; subtitle: string; path: string; notes: string[]; logo?: string[] }) {
     if (this.gone) return;
     const card = new BoxRenderable(this.renderer, {
       id: `header-${++this.n}`,
@@ -82,9 +82,15 @@ export class Transcript {
       paddingX: 1,
       marginTop: 1,
     });
-    const title = new StyledText([fg(C.accent)("✻ "), fg(C.accent)(lines.title)]);
-    card.add(new TextRenderable(this.renderer, { id: `h-t-${this.n}`, content: title, attributes: 1 } as any));
-    card.add(new TextRenderable(this.renderer, { id: `h-s-${this.n}`, content: lines.subtitle, fg: C.dim }));
+    if (lines.logo?.length) {
+      // The wordmark: one line per two rows of the website's halftone grid, never wrapped.
+      for (const [i, l] of lines.logo.entries()) card.add(new TextRenderable(this.renderer, { id: `h-l-${this.n}-${i}`, content: l, fg: C.accent, wrapMode: "none" } as any));
+      card.add(new TextRenderable(this.renderer, { id: `h-s-${this.n}`, content: `${lines.title} · ${lines.subtitle}`, fg: C.dim }));
+    } else {
+      const title = new StyledText([fg(C.accent)("✻ "), fg(C.accent)(lines.title)]);
+      card.add(new TextRenderable(this.renderer, { id: `h-t-${this.n}`, content: title, attributes: 1 } as any));
+      card.add(new TextRenderable(this.renderer, { id: `h-s-${this.n}`, content: lines.subtitle, fg: C.dim }));
+    }
     card.add(new TextRenderable(this.renderer, { id: `h-gap-${this.n}`, content: "", height: 1 }));
     card.add(new TextRenderable(this.renderer, { id: `h-p-${this.n}`, content: `cwd: ${lines.path}`, fg: C.dim, wrapMode: "char" } as any));
     for (const [i, note] of lines.notes.entries()) card.add(new TextRenderable(this.renderer, { id: `h-n-${this.n}-${i}`, content: note, fg: C.dim, wrapMode: "word" } as any));

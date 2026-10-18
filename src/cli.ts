@@ -1,5 +1,8 @@
 import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
 import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
+import { checkForUpdate, installKind, updatePlan } from "./core/update.ts";
+import { platformArgv } from "./core/spawn.ts";
+import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
 import { Ledger } from "./core/ledger.ts";
 import { Orchestrator } from "./core/orchestrator.ts";
@@ -28,6 +31,7 @@ usage:
   codemax brief [--to <id>]                  print the handoff brief that would be injected
   codemax config                             print config path and values
   codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
+  codemax update [--check]                    update codemax the way it was installed (--check only reports)
   codemax awake [on|lid|off|status]          keep the machine awake while codemax runs (lid: also with the lid closed)
   codemax quota [clear [<id>]]               show or clear remembered quota state for this project
   codemax doctor [--fix]                     check agent auth/permission setup (API keys that would be billed, silent modes)
@@ -164,6 +168,23 @@ async function main(argv: string[]) {
         if (f.fix) console.log(`      fix: ${f.fix.description}${args.includes("--fix") ? "" : "  (run: codemax doctor --fix)"}`);
         if (f.fix && args.includes("--fix")) console.log(`      → ${f.fix.apply()}`);
       }
+      return;
+    }
+    case "update": {
+      const latest = await checkForUpdate(pkg.version, { force: true });
+      console.log(latest ? `codemax ${latest} is available (you have ${pkg.version})` : `codemax ${pkg.version} is the latest`);
+      if (args.includes("--check") || !latest) return;
+      const plan = updatePlan();
+      if (plan.manual) return console.log(plan.manual);
+      console.log(`updating with ${plan.label} (${installKind().kind} install)\n`);
+      for (const cmd of plan.cmd) {
+        const p = Bun.spawn(platformArgv(cmd), { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
+        if ((await p.exited) !== 0) {
+          console.error(`\nupdate failed · run it yourself: ${plan.cmd.map((c) => c.join(" ")).join(" && ")}`);
+          process.exit(1);
+        }
+      }
+      console.log("\ncodemax updated.");
       return;
     }
     case "awake": {

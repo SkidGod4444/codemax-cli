@@ -79,7 +79,8 @@ export class Journal {
    * follow-ups. Earlier steps are history.
    */
   task(steps = this.steps()): { request?: StepOf<"user">; followUps: StepOf<"user">[]; steps: Step[]; earlier: Step[] } {
-    const users = steps.filter((s): s is StepOf<"user"> => s.kind === "user");
+    // A forwarded side-agent note continues the current task; it never starts one.
+    const users = steps.filter((s): s is StepOf<"user"> => s.kind === "user" && !s.text.startsWith("A side agent ("));
     if (!users.length) return { followUps: [], steps: [], earlier: steps };
     // A task begins at a user message that follows a turn which ended "done";
     // messages sent while the work was cut short continue the same task.
@@ -91,7 +92,8 @@ export class Journal {
     }
     const task = steps.slice(startIdx);
     const taskUsers = task.filter((s): s is StepOf<"user"> => s.kind === "user");
-    return { request: taskUsers[0], followUps: taskUsers.slice(1), steps: task, earlier: steps.slice(0, startIdx) };
+    const request = taskUsers.find((s) => !s.text.startsWith("A side agent ("));
+    return { request, followUps: taskUsers.filter((s) => s !== request), steps: task, earlier: steps.slice(0, startIdx) };
   }
 
   /** When this agent last did any work (not counting being briefed). */

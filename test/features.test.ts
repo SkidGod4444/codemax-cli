@@ -194,7 +194,7 @@ test("5. /ask and routing rules: one-off answers from another agent, active agen
   } finally { await h.cleanup(); }
 }, 30000);
 
-test("6. session picker: lists recent sessions with their last message and resumes the chosen one", async () => {
+test("6. startup picker: lists agents, most recent first, with their last message, and resumes the chosen one", async () => {
   const h = await harness({ claude: reply("resumed claude"), codex: reply("resumed codex") }, {}, (repo, ledger) => {
     const now = Date.now();
     ledger.saveSession({ agent: "claude", id: "claude-old", cwd: repo, startedAt: now - 7200_000, lastUsedAt: now - 3600_000 });
@@ -206,11 +206,11 @@ test("6. session picker: lists recent sessions with their last message and resum
   });
   try {
     void h.app.start("claude", false, { pick: true });
-    let f = await h.frame((f) => f.includes("Resume a session"));
+    let f = await h.frame((f) => f.includes("Choose an agent to continue with"));
     expect(f).toContain('"fix the flaky test"');
     expect(f).toContain('"add a parser"');
-    expect(f.indexOf("Resume Codex")).toBeLessThan(f.indexOf("Resume Claude Code")); // most recent first
-    expect(f).toContain("New session with Claude Code");
+    expect(f.indexOf("Codex  ")).toBeLessThan(f.indexOf("Claude Code  ")); // most recent first
+    expect(f).toContain("Start fresh with Codex");
     h.setup.mockInput.pressArrow("down");
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("resumed"));
@@ -587,7 +587,7 @@ test("21. side agent: reviews each working turn, notes appear as cards, /forward
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
     await h.send("/side codex");
-    await h.frame((f) => f.includes("side agent: Codex reviews each turn"));
+    await h.frame((f) => f.includes("side agent: Codex reviews every turn"));
     await h.send("ship the release");
     let f = await h.frame((f) => f.includes("Note from Codex (side agent)"));
     expect(f).toContain("Thin evidence");
@@ -598,10 +598,13 @@ test("21. side agent: reviews each working turn, notes appear as cards, /forward
     const fwd = h.prompts.filter((p) => p.agent === "claude")[1]!.text;
     expect(fwd).toContain("A side agent (Codex) reviewing your work left this note");
     expect(fwd).toContain("Consider running it twice");
-    // the forwarded note was itself a working turn: the side agent reviews again and stays quiet
+    // the main agent's reply to a forwarded note is not reviewed (no note → turn → review loop)
+    await Bun.sleep(300);
+    expect(reviews).toBe(1);
+    // the next turn the user starts is reviewed again, and this time the side agent stays quiet
+    await h.send("now tag the release");
     await h.frame(() => reviews === 2);
     await Bun.sleep(150);
-    f = await h.frame((fr) => fr.includes("Tests pass"));
     expect((h.app as any).notes).toHaveLength(1);
     // reviewer turns stay out of the journal
     expect(h.ledger.journal.steps().some((s: any) => s.agent === "codex")).toBe(false);
@@ -622,7 +625,7 @@ test("22. side agent in auto mode forwards its note to the main agent by itself"
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
     await h.send("/side codex auto");
-    await h.frame((f) => f.includes("side agent: Codex reviews each turn") && f.includes("◆ side codex"));
+    await h.frame((f) => f.includes("side agent: Codex reviews every turn") && f.includes("◆ side codex"));
     await h.send("rename the column");
     await h.frame((f) => f.includes("sent to Claude"));
     await h.frame(() => h.prompts.filter((p) => p.agent === "claude").some((p) => p.text.includes("Missing migration")));
@@ -695,5 +698,88 @@ test("24. /config changes settings and saves them; /side picks the side agent an
     await h.frame((f) => f.includes("side agent model: gpt-5.6-mini") && f.includes("◆ side codex gpt-5.6-mini"));
     expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "gpt-5.6-mini" })]);
     expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).sideAgent).toMatchObject({ agent: "codex", model: "gpt-5.6-mini" });
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("25. side agent cadence: a shared plan is warned about, every 2nd turn reviews, /review forces one", async () => {
+  const reviewed: number[] = [];
+  let turn = 0;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text.includes("You are a side agent")) { reviewed.push(turn); return ctx.say("NO_NOTE"); }
+      turn++;
+      await ctx.say(`work ${turn}`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    (h.app as any).config.sideAgent = { agent: null, forward: "ask", every: 2 };
+    await h.send("/side claude");
+    const f = await h.frame((f) => f.includes("is also the main agent"));
+    expect(f).toContain("reviews every 2nd turn");
+    for (let i = 1; i <= 4; i++) {
+      await h.send(`task ${i}`);
+      await h.frame((fr) => fr.includes(`work ${i}`));
+      await Bun.sleep(120);
+    }
+    await h.frame(() => reviewed.length === 2);
+    expect(reviewed).toEqual([2, 4]);
+    (h.app as any).config.sideAgent.every = 0;
+    await h.send("task 5");
+    await h.frame((fr) => fr.includes("work 5"));
+    await Bun.sleep(200);
+    expect(reviewed).toHaveLength(2);
+    await h.send("/review");
+    await h.frame((fr) => fr.includes("found nothing worth a note"));
+    expect(reviewed).toHaveLength(3);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("26. auto mode cannot loop: note replies are not reviewed, auto-forwards are capped, notes never become the task", async () => {
+  let reviews = 0;
+  const h = await harness({
+    claude: async (text, ctx) => ctx.say(text.startsWith("A side agent (") ? "Agreed, adjusted." : "Built the parser."),
+    codex: async (_t, ctx) => { reviews++; await ctx.say(`Heads up · Issue number ${reviews} deserves a look before shipping.\n\n**Issue ${reviews}**\n- something specific\n- **Consider checking it.**`); },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/side codex auto");
+    await h.frame((f) => f.includes("◆ side codex"));
+    await h.send("build the parser");
+    await h.frame((f) => f.includes("Agreed, adjusted."));
+    await Bun.sleep(400);
+    expect(reviews).toBe(1); // the note reply did not trigger another review
+    expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(2);
+    expect(h.ledger.journal.task().request?.text).toBe("build the parser");
+    // two more notes in the same task: the second auto-forward of this task goes, the third waits
+    (h.app as any).addNote("codex", "Codex", "Heads up · second note for this task, worth a look.\n\n**Two**\n- x\n- **Consider y.**");
+    (h.app as any).addNote("codex", "Codex", "Heads up · third note for this task, worth a look.\n\n**Three**\n- x\n- **Consider y.**");
+    await h.frame((f) => f.includes("auto-forward paused: 2 notes already sent for this task"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("27. startup shows the wordmark and asks which agent to continue with; an update is announced with /update", async () => {
+  const h = await harness({ claude: reply("hello from claude"), codex: reply("hello from codex") }, {}, (_repo, ledger) => {
+    ledger.saveSession({ agent: "codex", id: "s-old", cwd: "/x", startedAt: Date.now() - 7200_000, lastUsedAt: Date.now() - 3600_000 });
+    ledger.addTurns([{ ts: Date.now() - 3600_000, agent: "codex", sessionId: "s-old", role: "user", text: "fix the flaky test" }]);
+  });
+  (h.app as any).updateChecker = async () => "9.9.9";
+  try {
+    void h.app.start("claude", false, { pick: true });
+    const f = await h.frame((f) => f.includes("Choose an agent to continue with"));
+    expect(f).toContain("█████"); // the wordmark
+    expect(f).toContain("Codex");
+    expect(f).toContain('resume · 1h ago · "fix the flaky test"');
+    expect(f).toContain("new session");
+    expect(f).toContain("Start fresh with Codex");
+    await h.frame((fr) => fr.includes("codemax 9.9.9 is available") && fr.includes("/update"));
+    await h.setup.mockInput.typeText("claude");
+    h.setup.mockInput.pressEnter();
+    await h.frame((fr) => /Claude Code t · new session/.test(fr));
+    await h.send("hi");
+    await h.frame((fr) => fr.includes("hello from claude"));
+    expect(h.starts.at(-1)!.agent).toBe("claude");
   } finally { await h.cleanup(); }
 }, 30000);

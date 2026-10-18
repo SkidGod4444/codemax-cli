@@ -30,7 +30,9 @@ export function reviewInstructions(mainAgent: string): string {
 
 /** What the reviewer sees: the request, the plan, and the main agent's steps since its last review. */
 export function buildReviewPrompt(o: { steps: Step[]; since: number; mainAgent: string; reviewer: AgentId; context?: string }): string | null {
-  const recent = o.steps.filter((s) => s.ts > o.since && s.agent !== o.reviewer && s.kind !== "handoff" && s.kind !== "thought");
+  // The reviewer's own turns are never journaled, so every step here is the main agent's,
+  // even when both run on the same harness (Claude reviewing Claude).
+  const recent = o.steps.filter((s) => s.ts > o.since && s.kind !== "handoff" && s.kind !== "thought");
   const work = recent.filter((s) => s.kind === "tool" || s.kind === "text" || s.kind === "plan");
   if (!work.length) return null;
   const users = o.steps.filter((s): s is StepOf<"user"> => s.kind === "user");
@@ -52,7 +54,14 @@ export function parseNote(reply: string): string | null {
   return (at > 0 ? t.slice(at) : t).trim();
 }
 
+/** Forwarded notes start with this; they are follow-ups, never a new task, and never reviewed. */
+export const NOTE_PREFIX = "A side agent (";
+
+export function isForwardedNote(text: string): boolean {
+  return text.startsWith(NOTE_PREFIX);
+}
+
 /** The message that hands a note to the main agent. */
 export function forwardMessage(note: string, reviewerName: string): string {
-  return `A side agent (${reviewerName}) reviewing your work left this note. Weigh it against the user's request and plan: say in a sentence whether you agree, and adjust your work if it is right.\n\n${note}`;
+  return `${NOTE_PREFIX}${reviewerName}) reviewing your work left this note. Weigh it against the user's request and plan: say in a sentence whether you agree, and adjust your work if it is right.\n\n${note}`;
 }
