@@ -169,7 +169,7 @@ test("Windows: SetThreadExecutionState helper; lid action set to do-nothing and 
   const sys = fakeSystem("win32", (c) => (c.startsWith("powercfg /q") ? { out: q } : {}));
   const a = new Awake(sys.deps);
   const st = await a.set("lid");
-  expect(sys.spawned[0]!.cmd).toContain("SetThreadExecutionState(0x80000001)");
+  expect(sys.spawned[0]!.cmd).toContain("SetThreadExecutionState([uint32]2147483649)");
   expect(sys.spawned[0]!.cmd).toContain("Get-Process -Id 4242");
   expect(sys.ran).toContain("powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0");
   expect(sys.ran).toContain("powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0");

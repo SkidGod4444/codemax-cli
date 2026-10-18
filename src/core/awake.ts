@@ -79,7 +79,9 @@ export function defaultAwakeDeps(): AwakeDeps {
 }
 
 const WHY = "A coding agent is working (codemax /awake)";
-const ES_CONTINUOUS_SYSTEM_REQUIRED = "0x80000001";
+// ES_CONTINUOUS | ES_SYSTEM_REQUIRED (0x80000001), written so PowerShell keeps it unsigned:
+// a bare 0x80000001 is read as a negative Int32 and the call fails.
+const ES_CONTINUOUS_SYSTEM_REQUIRED = "[uint32]2147483649";
 
 export class Awake {
   mode: AwakeMode = "off";
