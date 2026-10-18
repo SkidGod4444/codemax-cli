@@ -1,0 +1,64 @@
+# Installs the codemax npm package on real macOS, Linux and Windows machines
+# with plain npm (no Bun installed beforehand) and checks `codemax` runs.
+#   push to main      -> tests the package packed from this checkout
+#   workflow_dispatch -> source=registry tests what is published on npm
+name: npm package
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json, bun.lock, bin/**, src/**, .github/workflows/npm.yml]
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "tarball (pack this checkout) or registry (install the published package)"
+        default: tarball
+      version:
+        description: "registry version to test (default: latest)"
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Bun is not pre-installed
+        run: if command -v bun; then echo "::warning::bun is on PATH; the bundled-Bun path is not exercised"; else echo "no bun on PATH"; fi
+
+      - name: Pack this checkout
+        if: github.event_name == 'push' || inputs.source != 'registry'
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          echo "PKG=$(ls "$RUNNER_TEMP"/codemax-cli-*.tgz)" >> "$GITHUB_ENV"
+
+      - name: Use the published package
+        if: github.event_name == 'workflow_dispatch' && inputs.source == 'registry'
+        run: echo "PKG=codemax-cli@${{ inputs.version }}" >> "$GITHUB_ENV"
+
+      - name: npm install -g
+        run: npm install -g "$PKG"
+
+      - name: codemax runs (global install)
+        run: |
+          cd "$RUNNER_TEMP"
+          codemax config
+          codemax agents
+
+      - name: codemax runs through npx
+        run: |
+          cd "$RUNNER_TEMP"
+          npx --yes --package "$PKG" codemax agents

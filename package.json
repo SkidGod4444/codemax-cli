@@ -1,6 +1,6 @@
 {
   "name": "codemax-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "One terminal for every coding agent you pay for: drive Claude Code, Codex, OpenCode, Grok and Gemini CLI from one chat, on your subscriptions, with context that survives switching agents.",
   "keywords": [
     "acp",
