@@ -11,6 +11,9 @@ import { quotaLabel } from "./core/quota.ts";
 import type { AgentId } from "./adapters/types.ts";
 import { describeBytes, findHotkey, parseHotkeys } from "./core/hotkey.ts";
 import { diagnose } from "./core/doctor.ts";
+import { renderUsageTable, sumCost } from "./core/usage.ts";
+import { fmtUsd, priceFor, priceProvenance, resetPriceCache } from "./core/pricing.ts";
+import { fetchLivePrices, loadLivePrices, LIVE_PRICES_PATH } from "./core/prices-live.ts";
 
 const HELP = `codemax — one terminal for all your coding agents
 
@@ -26,6 +29,8 @@ usage:
   codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
   codemax quota [clear [<id>]]               show or clear remembered quota state for this project
   codemax doctor [--fix]                     check agent auth/permission setup (API keys that would be billed, silent modes)
+  codemax usage [--all]                      tokens and API-equivalent cost per agent for this project (or every project)
+  codemax prices [update] [<model>]          show price source and age, refresh the public list, or look up one model
 
 inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
 set "hotkeys": ["ctrl+<key>", ...] in the config to change it.
@@ -113,6 +118,39 @@ async function main(argv: string[]) {
     }
     case "config": {
       console.log(`${CONFIG_PATH}\nhotkeys: ${hotkeyLabel(config.hotkeys)}\n${JSON.stringify(config, null, 2)}`);
+      return;
+    }
+    case "prices": {
+      if (args[0] === "update") {
+        const l = await fetchLivePrices();
+        if (!l) return console.log("could not reach openrouter.ai or the LiteLLM list; keeping the current table");
+        resetPriceCache();
+        console.log(`updated: ${Object.keys(l.prices).length} models from ${l.source} → ${LIVE_PRICES_PATH}`);
+      }
+      const prov = priceProvenance();
+      const cache = loadLivePrices();
+      console.log(`price source: ${prov.source} list as of ${prov.asOf}${cache ? ` (${Object.keys(cache.prices).length} models cached, refreshed weekly)` : " (built-in table; run codemax prices update to download the current list)"}`);
+      console.log(`overrides: ~/.codemax/prices.json`);
+      const model = args.find((a) => a !== "update");
+      if (model) {
+        const hit = priceFor(model);
+        console.log(hit ? `${model}: $${hit.price.input}/M in · $${hit.price.output}/M out · cache read $${hit.price.cacheRead ?? hit.price.input * 0.1}/M (matched "${hit.key}" from ${hit.source})` : `${model}: no price found`);
+      }
+      return;
+    }
+    case "usage": {
+      if (args.includes("--all")) {
+        const { readdirSync, existsSync } = await import("node:fs");
+        const { join } = await import("node:path");
+        const { CODEMAX_HOME } = await import("./core/paths.ts");
+        const root = join(CODEMAX_HOME, "projects");
+        const all = existsSync(root) ? readdirSync(root).flatMap((d) => new Ledger("/", join(root, d)).usage()) : [];
+        for (const l of renderUsageTable(all, { title: "Usage across all projects" })) console.log(l);
+        return;
+      }
+      const u = new Ledger(cwd).usage();
+      for (const l of renderUsageTable(u, { title: `Usage for ${cwd}` })) console.log(l);
+      console.log(`  total ${fmtUsd(sumCost(u))} · prices: ~/.codemax/prices.json overrides the built-in list`);
       return;
     }
     case "doctor": {

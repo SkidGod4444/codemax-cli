@@ -3,8 +3,37 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineFactory } from "./types.ts";
-import { AcpEngine } from "./acp.ts";
+import { AcpEngine, type UsageSample } from "./acp.ts";
 import { CodexEngine } from "./codex.ts";
+import { ClaudeUsageTail } from "../transcripts/claude-usage.ts";
+
+/** Grok writes ~/.grok/sessions/<encoded cwd>/<session>/usage.json with per-turn totals. */
+function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] } {
+  const path = join(homedir(), ".grok", "sessions", encodeURIComponent(cwd), sessionId, "usage.json");
+  let seen = 0;
+  return {
+    read() {
+      if (!existsSync(path)) return [];
+      let j: any;
+      try {
+        j = JSON.parse(readFileSync(path, "utf8"));
+      } catch {
+        return [];
+      }
+      const turns: any[] = j.turns ?? [];
+      const fresh = turns.slice(seen);
+      seen = turns.length;
+      return fresh.map((t) => ({
+        model: t.primaryModelId ?? j.session?.primaryModelId,
+        input: Math.max(0, (t.inputTokens ?? 0) - (t.cachedReadTokens ?? 0)),
+        cacheRead: t.cachedReadTokens ?? 0,
+        cacheWrite: t.cacheCreationTokens ?? 0,
+        output: t.outputTokens ?? 0,
+        costUsd: typeof t.costUsdTicks === "number" ? t.costUsdTicks / 1e10 : undefined,
+      }));
+    },
+  };
+}
 
 /** The Claude ACP adapter installed with codemax; it runs the user's own `claude`. */
 function claudeAdapterBin(): string | null {
@@ -26,6 +55,7 @@ const factories: EngineFactory[] = [
         name: "Claude Code",
         cmd: [claudeAdapterBin()!],
         env: { CLAUDE_CODE_EXECUTABLE: Bun.which("claude")! },
+        usageTail: (s) => new ClaudeUsageTail(s.cwd, s.id),
       }),
   },
   {
@@ -50,7 +80,7 @@ const factories: EngineFactory[] = [
     agent: "grok",
     available: async () => !!Bun.which("grok"),
     // Grok takes its permission mode from the user's Claude Code settings; see grokPermissionNote().
-    create: () => new AcpEngine({ agent: "grok", name: "Grok", cmd: ["grok", "agent", "stdio"], permissionPrompts: !grokPermissionNote() }),
+    create: () => new AcpEngine({ agent: "grok", name: "Grok", cmd: ["grok", "agent", "stdio"], permissionPrompts: !grokPermissionNote(), usageTail: (s) => grokUsageTail(s.cwd, s.id) }),
   },
   {
     agent: "gemini",

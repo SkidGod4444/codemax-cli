@@ -55,7 +55,7 @@ test("chat: send a message, see streamed reply, answer a permission prompt, repl
       stream: fakeAgentStream(async (text, conn, sessionId) => {
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `You said: ${text}. ` } } as any });
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "Write notes.md", kind: "edit", status: "pending" } as any });
-        const perm = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "t1", title: "Write notes.md" }, options: [{ optionId: "ok", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
+        const perm = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "t1", title: "Write notes.md", kind: "edit" }, options: [{ optionId: "ok", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
         const ok = (perm.outcome as any).optionId === "ok";
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "t1", status: ok ? "completed" : "failed" } as any });
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: ok ? "Saved." : "Not saved." } } as any });
@@ -68,13 +68,16 @@ test("chat: send a message, see streamed reply, answer a permission prompt, repl
     await waitText(setup, (f) => f.includes("new session"));
     await setup.mockInput.typeText("hello there");
     setup.mockInput.pressEnter();
-    let frame = await waitText(setup, (f) => f.includes("asks permission"));
-    expect(frame).toContain("Write notes.md");
+    let frame = await waitText(setup, (f) => f.includes("Do you want to proceed?"));
+    expect(frame).toContain("wants to edit files"); // kind "edit" from the fake agent's tool_call
+    expect(frame).toContain("1. Yes");
+    expect(frame).toMatch(/No, and tell Claude Code what to do differently/);
     setup.mockInput.pressKey("y");
     frame = await waitText(setup, (f) => f.includes("Saved."));
-    expect(frame).toContain("You said: hello there.");
-    expect(frame).toMatch(/✓ Write notes\.md/);
-    expect(frame).toContain("allowed: Write notes.md");
+    expect(frame).toContain("❯ hello there");
+    expect(frame).toContain("⏺ You said: hello there.");
+    expect(frame).toContain("⏺ Write notes.md");
+    expect(frame).toMatch(/✻ \w+ for \d+s · done/);
     await waitText(setup, () => ledger.turns().length >= 2, 5000);
     const turns = ledger.turns();
     expect(turns[0]).toMatchObject({ role: "user", text: "hello there" });

@@ -10,7 +10,22 @@ export type EngineEvent =
   | { type: "plan"; entries: { content: string; status: string; priority?: string }[] }
   | { type: "mode"; modeId: string }
   | { type: "commands"; commands: { name: string; description?: string }[] }
-  | { type: "usage"; inputTokens?: number; outputTokens?: number; usedPercent?: number }
+  | {
+      type: "usage";
+      /** Incremental token counts for the work just done (never cumulative). */
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+      model?: string;
+      /** Incremental cost the agent itself reported, in USD. */
+      costUsd?: number;
+      /** Rate-limit window consumption, when the agent exposes it. */
+      usedPercent?: number;
+      /** Context window fill, when reported (tokens used / size). */
+      contextUsed?: number;
+      contextSize?: number;
+    }
   | { type: "session"; ref: EngineSessionRef }
   | { type: "turn_end"; stopReason: StopReason }
   | { type: "error"; kind: ErrorKind; message: string }
@@ -30,6 +45,8 @@ export interface PermissionOption {
 export interface PermissionRequest {
   id: string;
   toolCallId?: string;
+  /** ACP tool kind when known: read | edit | delete | move | search | execute | think | fetch | other */
+  kind?: string;
   title: string;
   detail?: string;
   options: PermissionOption[];
@@ -64,6 +81,8 @@ export interface EngineInfo {
   currentMode?: string;
   models?: { id: string; name: string }[];
   currentModel?: string;
+  /** Subscription plan name when the agent reports one (e.g. "chatgpt pro"). */
+  plan?: string;
 }
 
 /**

@@ -35,7 +35,15 @@ codemax brief --to codex     # preview the handoff brief
 codemax config               # ~/.codemax/config.json
 ```
 
-In the chat: type and press Enter (Shift+Enter for a newline), `Esc` cancels the running turn, `/switch [agent]`, `/mode [id]`, `/status`, `/quit`. Permission prompts appear as an overlay: `y` allows once, `a` allows for the session, `n` denies. Press **Ctrl+^** (Ctrl+Shift+6) or **Ctrl+/** to open the agent menu: pick another agent with the number keys or arrows, `f` toggles fresh vs. resume, `Esc` goes back, `x` quits. Some terminals swallow Ctrl+/ (Warp does); run `codemax keys` to see what yours sends, and set `"hotkeys": ["ctrl+<key>"]` in the config to change it.
+In the chat:
+
+- Type and press Enter. Shift+Enter inserts a newline. Typing while the agent works queues the message.
+- `/` opens the command palette, filtered as you type: `/switch`, `/mode`, `/status`, `/clear`, `/help`, `/quit`, plus the agent's own commands. Enter runs the highlighted one; a typo never runs anything.
+- `/switch` (or **Ctrl+^** / **Ctrl+/**) lists agents with version, session age and quota. Enter hands the conversation over with a brief.
+- `Shift+Tab` cycles permission modes (ask → accept edits → plan); the footer shows the current one. `/mode` lists them.
+- Permission prompts: `1` Yes · `2` Yes for this session · `3` No, and tell the agent what to do differently (focuses the prompt). `Esc` is No.
+- `Esc` interrupts a running turn. `Ctrl+C` clears the prompt, twice quits. `↑` recalls history. `?` on an empty prompt shows shortcuts.
+- `/usage` (or `codemax usage`, `--all` for every project) shows tokens per agent and model and the **API-equivalent cost** at public list prices. Your subscriptions bill a flat fee, so this is the value of what they covered, not a charge: use it to compare agents and spot heavy sessions. The footer shows the running figure for this session. Sources: Codex streams token totals over its protocol, OpenCode reports its own cost, Claude Code and Grok write per-call usage to their session files, which codemax tails. Prices come from OpenRouter's public model list (LiteLLM's as fallback), downloaded on first run and refreshed weekly into `~/.codemax/prices-live.json`; the built-in table is the offline fallback. `codemax prices` shows the source and date, `codemax prices update` refreshes now, `codemax prices <model>` looks one up. Override any model in `~/.codemax/prices.json` as `{"model-substring": {"input": 2, "output": 12, "cacheRead": 0.2}}` per million tokens. Every usage record keeps the rate it was priced at, so a later price change applies only going forward. Set `"priceUpdates": false` in the config to stay offline. Some terminals swallow Ctrl+/ (Warp does); run `codemax keys` to see what yours sends, and set `"hotkeys": ["ctrl+<key>"]` in the config to change it.
 
 `codemax --raw` runs the older passthrough mode without the codemax screen, for comparison or if the embedded terminal misbehaves in your terminal.
 

@@ -35,6 +35,10 @@ Layout: `src/engines/` (normalized event stream; `acp.ts` generic client; `codex
 
 **Status (2026-10-18, later):** default flipped. Verified end to end through a headless terminal: Claude wrote a file after a permission prompt answered in codemax, the menu switched to Codex with an 821-char brief, Codex confirmed the file and answered a follow-up, all four turns landed in the ledger natively. Permission caveats found and handled: OpenCode needs an inline "ask" config (codemax sets it); Grok inherits the permission mode from the user's Claude Code settings (`defaultMode: "auto"` here), which codemax surfaces as a warning. The Claude adapter runs the user's own `claude` through `CLAUDE_CODE_EXECUTABLE`.
 
+**UI pass (v0.3.1):** chat restyled to Claude Code's idiom from live captures and a cheap-model rules extraction (`docs/claude-code-ui-rules.md`, `docs/ui-review.md`): `❯` prompts, `⏺` blocks with `⎿` nested results, spinner line with verbs/timer/approx tokens, one slash palette for `/`, `/switch`, `/mode` (prefix/word matching, typos never run), Claude's permission wording with "tell the agent what to do differently", Shift+Tab mode cycling, history, queueing while busy, footer with mode indicator.
+
+**Usage (v0.3.2):** `/usage`, footer cost and `codemax usage` sum tokens per agent/model and price them at public API list rates (API-equivalent value; subscriptions bill flat). Sources: Codex `thread/tokenUsage/updated` deltas; OpenCode ACP `usage_update` (own cost, context size); Claude transcript `usage` fields tailed per session; Grok `~/.grok/sessions/<cwd>/<id>/usage.json` (its own cost ticks, which matched the list-price estimate exactly). Prices in `src/core/pricing.ts`, user overrides in `~/.codemax/prices.json`.
+
 Open: Gemini CLI untested (not installed); native resume across restarts unverified for ACP `session/load`; compiled binary cannot find the Claude adapter unless it is on PATH (`bun link` install works); markdown rendering and diff views in the transcript; `/model` switching.
 
 ## How context survives

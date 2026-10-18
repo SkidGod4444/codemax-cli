@@ -1,24 +1,30 @@
 import { BoxRenderable, ScrollBoxRenderable, TextRenderable, type CliRenderer } from "@opentui/core";
-import type { AgentId } from "../adapters/types.ts";
+import { C, G } from "./theme.ts";
 
-const COLORS = { user: "#93c5fd", agent: "#86efac", tool: "#94a3b8", system: "#fbbf24", error: "#f87171", body: "#e5e7eb", dim: "#64748b" };
-
-export interface MessageHandle {
+export interface AgentBlock {
+  /** Stream assistant text; starts a `⏺` paragraph, continues it until a tool row interrupts. */
   append(text: string): void;
-  set(text: string): void;
   tool(id: string, title: string, status: string, detail?: string): void;
   toolUpdate(id: string, status?: string, title?: string, detail?: string): void;
+  /** Closing dim line, e.g. "✻ Worked for 13s · done 7:25 PM". */
+  footer(text: string): void;
   text(): string;
+  toolCount(): number;
 }
 
-/** Scrolling conversation view: user turns, agent turns with tool rows, system notes. */
+/**
+ * Conversation view in Claude Code's idiom: `❯ prompt`, `⏺ text`, `⏺ Tool(args)`
+ * with `  ⎿  result` nested beneath, dim notes, and a divider on agent switches.
+ * Every line is a row box: a fixed glyph column and a wrapping text column, so
+ * wrapped continuation lines stay aligned under the text.
+ */
 export class Transcript {
   readonly box: ScrollBoxRenderable;
   private n = 0;
 
   constructor(private renderer: CliRenderer) {
     this.box = new ScrollBoxRenderable(renderer, {
-      id: "codemax-transcript",
+      id: "transcript",
       width: "100%",
       flexGrow: 1,
       flexShrink: 1,
@@ -26,78 +32,115 @@ export class Transcript {
       stickyStart: "bottom",
       scrollY: true,
       scrollX: false,
-      contentOptions: { flexDirection: "column", paddingX: 1, gap: 1 },
+      contentOptions: { flexDirection: "column", paddingX: 1 },
+      verticalScrollbarOptions: { width: 0, showArrows: false },
     });
   }
 
-  user(text: string) {
-    this.message("you", COLORS.user, text);
+  /** Startup header: name, agent/model/plan, cwd, and any notes as nested dim lines. */
+  header(lines: { title: string; subtitle: string; path: string; notes: string[] }) {
+    this.gap();
+    this.line("", lines.title, { bold: true });
+    this.line("", lines.subtitle, { fg: C.dim });
+    this.line("", lines.path, { fg: C.dim });
+    for (const n of lines.notes) this.nested(n, C.dim);
+    this.gap();
   }
 
-  system(text: string, color = COLORS.system) {
-    this.message("codemax", color, text);
+  user(text: string) {
+    this.gap();
+    this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.dim });
+  }
+
+  note(text: string, fg: string = C.dim) {
+    this.nested(text, fg);
   }
 
   error(text: string) {
-    this.message("error", COLORS.error, text);
+    this.nested(text, C.error);
   }
 
-  agent(agent: AgentId, name: string): MessageHandle {
-    return this.message(name.toLowerCase(), COLORS.agent, "");
+  divider(text: string) {
+    this.gap();
+    const w = Math.max(20, this.renderer.width - 4);
+    const label = ` ${text} `;
+    const side = Math.max(3, Math.floor((w - label.length) / 2));
+    this.line("", G.rule.repeat(side) + label + G.rule.repeat(side), { fg: C.dimmer });
+    this.gap();
   }
 
-  private message(label: string, color: string, initial: string): MessageHandle {
-    const id = `msg-${++this.n}`;
-    const wrap = new BoxRenderable(this.renderer, { id, width: "100%", flexDirection: "column" });
-    wrap.add(new TextRenderable(this.renderer, { id: `${id}-h`, content: label, fg: color }));
-    const body = new TextRenderable(this.renderer, { id: `${id}-b`, content: initial, fg: COLORS.body, width: "100%" });
-    wrap.add(body);
-    this.box.add(wrap);
-    this.scrollToEnd();
-    const tools = new Map<string, TextRenderable>();
-    const titles = new Map<string, string>();
-    // Keep plain strings per segment: TextRenderable.content may hold styled text, not a string.
-    const segments: { node: TextRenderable; text: string }[] = [{ node: body, text: initial }];
-    let toolsAfterText = false;
+  agent(): AgentBlock {
     const self = this;
+    let para: { node: TextRenderable; text: string } | null = null;
+    const tools = new Map<string, { title: TextRenderable; result?: TextRenderable; name: string; status: string }>();
+    let all = "";
     return {
       append(t) {
-        if (toolsAfterText) {
-          // Text after a tool row starts a new paragraph so ordering stays visible.
-          const node = new TextRenderable(self.renderer, { id: `${id}-b${segments.length}`, content: t, fg: COLORS.body, width: "100%" });
-          wrap.add(node);
-          segments.push({ node, text: t });
-          toolsAfterText = false;
+        all += t;
+        if (!para) {
+          const node = self.line(`${G.bullet} `, t.replace(/^\n+/, ""));
+          para = { node, text: t.replace(/^\n+/, "") };
         } else {
-          const seg = segments[segments.length - 1]!;
-          seg.text += t;
-          seg.node.content = seg.text;
+          para.text += t;
+          para.node.content = para.text;
         }
         self.scrollToEnd();
       },
-      set(t) {
-        segments.splice(1).forEach((s) => s.node.destroy());
-        segments[0]!.text = t;
-        body.content = t;
+      tool(id, title, status, detail) {
+        para = null;
+        const node = self.line(`${G.bullet} `, title, { fg: undefined });
+        const entry = { title: node, name: title, status, result: undefined as TextRenderable | undefined };
+        tools.set(id, entry);
+        if (detail) entry.result = self.nestedNode(summarize(detail), C.dim);
         self.scrollToEnd();
       },
-      tool(tid, title, status, detail) {
-        const row = new TextRenderable(self.renderer, { id: `${id}-t-${tools.size}`, content: toolLine(title, status, detail), fg: COLORS.tool, width: "100%" });
-        tools.set(tid, row);
-        titles.set(tid, title);
-        wrap.add(row);
-        toolsAfterText = true;
+      toolUpdate(id, status, title, detail) {
+        const e = tools.get(id);
+        if (!e) return;
+        if (title) {
+          e.name = title;
+          e.title.content = title;
+        }
+        if (status) e.status = status;
+        if (status === "failed") e.title.fg = C.error;
+        if (detail) {
+          const s = summarize(detail);
+          if (e.result) e.result.content = s;
+          else e.result = self.nestedNode(s, status === "failed" ? C.error : C.dim);
+        }
+      },
+      footer(text) {
+        para = null;
+        self.line(`${G.done} `, text, { fg: C.dim, glyphFg: C.dim });
         self.scrollToEnd();
       },
-      toolUpdate(tid, status, title, detail) {
-        const row = tools.get(tid);
-        if (!row) return;
-        if (title) titles.set(tid, title);
-        row.content = toolLine(titles.get(tid) ?? tid, status ?? "in_progress", detail);
-        if (status === "failed") row.fg = COLORS.error;
-      },
-      text: () => segments.map((s) => s.text).join(""),
+      text: () => all,
+      toolCount: () => tools.size,
     };
+  }
+
+  // ---------- primitives ----------
+
+  private gap() {
+    this.box.add(new TextRenderable(this.renderer, { id: `gap-${++this.n}`, content: "", height: 1 }));
+  }
+
+  private line(glyph: string, text: string, o: { fg?: string; glyphFg?: string; bold?: boolean } = {}): TextRenderable {
+    const row = new BoxRenderable(this.renderer, { id: `row-${++this.n}`, width: "100%", flexDirection: "row" });
+    if (glyph) row.add(new TextRenderable(this.renderer, { id: `g-${this.n}`, content: glyph, width: glyph.length, fg: o.glyphFg ?? o.fg, wrapMode: "none" }));
+    const body = new TextRenderable(this.renderer, { id: `t-${this.n}`, content: text, fg: o.fg, flexGrow: 1, flexShrink: 1, wrapMode: "word", attributes: o.bold ? 1 : undefined } as any);
+    row.add(body);
+    this.box.add(row);
+    return body;
+  }
+
+  private nested(text: string, fg: string) {
+    this.nestedNode(text, fg);
+    this.scrollToEnd();
+  }
+
+  private nestedNode(text: string, fg: string): TextRenderable {
+    return this.line(`  ${G.nest}  `, text, { fg, glyphFg: C.dimmer });
   }
 
   scrollToEnd() {
@@ -111,8 +154,9 @@ export class Transcript {
   }
 }
 
-function toolLine(title: string, status: string, detail?: string): string {
-  const mark = status === "completed" ? "✓" : status === "failed" ? "✗" : status === "in_progress" ? "…" : "⚙";
-  const d = detail ? `  ·  ${detail.split("\n").slice(-1)[0]?.slice(0, 120)}` : "";
-  return `${mark} ${title}${d}`;
+/** Tool output: first lines, then "… +N lines" like Claude Code's collapsed results. */
+export function summarize(detail: string, keep = 3): string {
+  const lines = detail.replace(/\s+$/, "").split("\n");
+  if (lines.length <= keep) return lines.join("\n");
+  return lines.slice(0, keep).join("\n") + `\n… +${lines.length - keep} lines`;
 }

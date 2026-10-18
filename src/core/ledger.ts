@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { ensureDir, projectDir } from "./paths.ts";
 import type { AgentId, QuotaStatus, SessionRef, Turn } from "../adapters/types.ts";
+import type { UsageRecord } from "./usage.ts";
 
 export interface LedgerEvent {
   ts: number;
@@ -90,6 +91,14 @@ export class Ledger {
 
   writeSummary(text: string) {
     writeFileSync(this.file("summary.md"), text.trimEnd() + "\n");
+  }
+
+  usage(): UsageRecord[] {
+    return readJsonl<UsageRecord>(this.file("usage.jsonl"));
+  }
+
+  addUsage(r: UsageRecord) {
+    appendFileSync(this.file("usage.jsonl"), JSON.stringify(r) + "\n");
   }
 
   quota(): Partial<Record<AgentId, QuotaStatus>> {

@@ -16,6 +16,8 @@ export interface Config {
   autoSwitch: boolean;
   /** Per-agent extra CLI args appended to every launch. */
   agentArgs: Partial<Record<AgentId, string[]>>;
+  /** Refresh the public price list weekly for /usage (set false to stay offline). */
+  priceUpdates: boolean;
   /** Max turns and chars included in a handoff brief. */
   brief: { turns: number; maxChars: number; turnChars: number };
 }
@@ -25,6 +27,7 @@ export const DEFAULT_CONFIG: Config = {
   hotkeys: ["ctrl+/", "ctrl+^"],
   autoSwitch: true,
   agentArgs: {},
+  priceUpdates: true,
   brief: { turns: 10, maxChars: 8000, turnChars: 1200 },
 };
 

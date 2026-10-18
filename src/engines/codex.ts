@@ -29,6 +29,8 @@ export class CodexEngine implements Engine {
   private turn: { resolve: (r: StopReason) => void; id?: string } | null = null;
   private threadId: string | null = null;
   private cwd = "";
+  private model: string | undefined;
+  private lastTotals = { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
 
   constructor(private opts: CodexEngineOptions = {}) {}
 
@@ -58,6 +60,7 @@ export class CodexEngine implements Engine {
     }
     if (!thread) thread = (await this.request("thread/start", { cwd: o.cwd, approvalPolicy: "on-request" })).thread;
     this.threadId = thread.id;
+    this.model = thread.model ?? undefined;
     this.session = { agent: "codex", id: thread.id, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     const account: any = await this.request("account/read", {}).catch(() => null);
     this.info = {
@@ -69,7 +72,8 @@ export class CodexEngine implements Engine {
         { id: "never", name: "full auto (no approvals)" },
       ],
       currentMode: "on-request",
-      currentModel: account?.account?.planType ? `chatgpt ${account.account.planType}` : undefined,
+      currentModel: this.model,
+      plan: account?.account?.planType ? `chatgpt ${account.account.planType}` : undefined,
     };
     this.emit({ type: "session", ref: this.session });
     return this.info;
@@ -160,6 +164,7 @@ export class CodexEngine implements Engine {
       const request: PermissionRequest = {
         id,
         toolCallId: p.itemId,
+        kind: method.includes("commandExecution") ? "execute" : method.includes("fileChange") ? "edit" : "other",
         title: what,
         detail,
         options: [
@@ -208,7 +213,29 @@ export class CodexEngine implements Engine {
       case "turn/tokenUsage/updated": {
         const rl = p.rateLimits ?? p.tokenUsage?.rateLimits;
         const used = rl?.primary?.usedPercent ?? rl?.primary?.used_percent;
-        this.emit({ type: "usage", inputTokens: p.tokenUsage?.total?.inputTokens, outputTokens: p.tokenUsage?.total?.outputTokens, usedPercent: typeof used === "number" ? used : undefined });
+        const t = p.tokenUsage?.total;
+        if (t) {
+          // Totals are cumulative for the thread; emit the delta. Codex's inputTokens include cached ones.
+          const d = {
+            inputTokens: Math.max(0, (t.inputTokens ?? 0) - this.lastTotals.inputTokens),
+            cachedInputTokens: Math.max(0, (t.cachedInputTokens ?? 0) - this.lastTotals.cachedInputTokens),
+            cacheWriteInputTokens: Math.max(0, (t.cacheWriteInputTokens ?? 0) - this.lastTotals.cacheWriteInputTokens),
+            outputTokens: Math.max(0, (t.outputTokens ?? 0) - this.lastTotals.outputTokens),
+          };
+          this.lastTotals = { inputTokens: t.inputTokens ?? 0, cachedInputTokens: t.cachedInputTokens ?? 0, cacheWriteInputTokens: t.cacheWriteInputTokens ?? 0, outputTokens: t.outputTokens ?? 0 };
+          if (d.inputTokens || d.outputTokens) {
+            this.emit({
+              type: "usage",
+              inputTokens: Math.max(0, d.inputTokens - d.cachedInputTokens),
+              cacheReadTokens: d.cachedInputTokens,
+              cacheWriteTokens: d.cacheWriteInputTokens,
+              outputTokens: d.outputTokens,
+              model: this.model,
+              usedPercent: typeof used === "number" ? used : undefined,
+              contextSize: p.tokenUsage?.modelContextWindow,
+            });
+          }
+        } else if (typeof used === "number") this.emit({ type: "usage", usedPercent: used });
         break;
       }
       case "turn/completed": {

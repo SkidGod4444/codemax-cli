@@ -3,6 +3,15 @@ import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason } from "./types.ts";
 import { agentEnv } from "./env.ts";
 
+export interface UsageSample {
+  model?: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  costUsd?: number;
+}
+
 export interface AcpEngineOptions {
   agent: AgentId;
   name: string;
@@ -13,6 +22,11 @@ export interface AcpEngineOptions {
   stream?: Stream;
   /** False when the agent is known to auto-approve tools over ACP (surfaced to the user). */
   permissionPrompts?: boolean;
+  /**
+   * Agents that do not report usage over ACP (Claude Code, Grok) keep it in
+   * session files. This reads what was appended since the last call.
+   */
+  usageTail?: (session: EngineSessionRef) => { read(): UsageSample[] };
 }
 
 /**
@@ -29,6 +43,8 @@ export class AcpEngine implements Engine {
   private pendingPermissions = new Map<string, (optionId: string | null) => void>();
   private permSeq = 0;
   private turnActive = false;
+  private tail: { read(): UsageSample[] } | null = null;
+  private lastAgentCost = 0;
 
   constructor(private opts: AcpEngineOptions) {
     this.agent = opts.agent;
@@ -80,6 +96,8 @@ export class AcpEngine implements Engine {
       models = s.models;
     }
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
+    this.tail = this.opts.usageTail?.(this.session) ?? null;
+    if (o.resume && this.tail) this.tail.read(); // skip history already accounted for
     this.info = {
       agent: this.agent,
       name: (init as any).agentInfo?.title ?? this.opts.name,
@@ -120,8 +138,9 @@ export class AcpEngine implements Engine {
     const request: PermissionRequest = {
       id,
       toolCallId: p.toolCall?.toolCallId,
+      kind: p.toolCall?.kind,
       title: p.toolCall?.title ?? p.toolCall?.toolCallId ?? "tool",
-      detail: p.toolCall?.rawInput ? JSON.stringify(p.toolCall.rawInput).slice(0, 2000) : undefined,
+      detail: formatInput(p.toolCall?.rawInput),
       options: (p.options ?? []).map((o: any) => ({ id: o.optionId, label: o.name ?? o.optionId, kind: o.kind })),
     };
     const choice = await new Promise<string | null>((resolve) => {
@@ -155,9 +174,15 @@ export class AcpEngine implements Engine {
       case "available_commands_update":
         this.emit({ type: "commands", commands: (u.availableCommands ?? []).map((c: any) => ({ name: c.name, description: c.description })) });
         break;
-      case "usage_update":
-        this.emit({ type: "usage", inputTokens: u.used ?? u.inputTokens, outputTokens: u.outputTokens });
+      case "usage_update": {
+        // ACP: `used`/`size` describe context fill; `cost` is the session's running total.
+        const total = typeof u.cost?.amount === "number" ? u.cost.amount : undefined;
+        const delta = total !== undefined ? Math.max(0, total - this.lastAgentCost) : undefined;
+        if (total !== undefined) this.lastAgentCost = total;
+        // Without per-call token counts, the context submitted this turn is the closest input figure.
+        this.emit({ type: "usage", inputTokens: typeof u.used === "number" ? u.used : undefined, contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.info?.currentModel ?? `${this.opts.name.toLowerCase()} default model` });
         break;
+      }
       default:
         break;
     }
@@ -169,6 +194,7 @@ export class AcpEngine implements Engine {
     try {
       const res = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] });
       this.session.lastUsedAt = Date.now();
+      this.flushUsage();
       const reason = mapStop(res.stopReason);
       this.emit({ type: "turn_end", stopReason: reason });
       return reason;
@@ -188,6 +214,16 @@ export class AcpEngine implements Engine {
     this.pendingPermissions.get(requestId)?.(optionId);
   }
 
+  /** Emit usage appended to the agent's session files since the last check. */
+  flushUsage() {
+    if (!this.tail) return;
+    try {
+      for (const s of this.tail.read()) this.emit({ type: "usage", inputTokens: s.input, outputTokens: s.output, cacheReadTokens: s.cacheRead, cacheWriteTokens: s.cacheWrite, model: s.model, costUsd: s.costUsd });
+    } catch {
+      /* file mid-write; next turn picks it up */
+    }
+  }
+
   async cancel() {
     if (!this.conn || !this.session || !this.turnActive) return;
     for (const resolve of this.pendingPermissions.values()) resolve(null);
@@ -202,6 +238,7 @@ export class AcpEngine implements Engine {
   }
 
   async close() {
+    this.flushUsage();
     const conn = this.conn;
     this.conn = null;
     for (const resolve of this.pendingPermissions.values()) resolve(null);
@@ -246,4 +283,17 @@ function summarize(u: any): string | undefined {
     }
   }
   return parts.length ? parts.join("\n").slice(0, 1200) : undefined;
+}
+
+/** Human-readable view of a tool's raw input: `key: value` lines, long values clipped. */
+function formatInput(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") return String(raw).slice(0, 800);
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(0, 6)) {
+    const val = typeof v === "string" ? v : JSON.stringify(v);
+    if (val === undefined) continue;
+    lines.push(`${k}: ${val.length > 300 ? val.slice(0, 297) + "…" : val}`);
+  }
+  return lines.join("\n") || undefined;
 }
