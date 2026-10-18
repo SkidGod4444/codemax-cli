@@ -77,7 +77,7 @@ export default function TerminalDemo() {
   useEffect(() => {
     alive.current = true;
     const t = setTimeout(() => {
-      push("sys", "codemax 0.5 · ~/app · Claude Code · claude-sonnet-5-5");
+      push("sys", "codemax 0.1 · ~/app · Claude Code · claude-sonnet-5-5");
       push("sys", "Simulated session. Type a request, or try a suggestion below.");
     }, 0);
     return () => {

@@ -22,9 +22,10 @@ import { refreshLivePricesIfStale } from "../core/prices-live.ts";
 import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budget.ts";
 import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, type Checkpoint } from "../core/checkpoint.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
+import pkg from "../../package.json" with { type: "json" };
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
-const VERSION = "0.5.0";
+const VERSION = pkg.version;
 const MODE_CYCLE = ["default", "acceptEdits", "plan"];
 
 interface Active {
