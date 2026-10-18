@@ -36,7 +36,7 @@ These come straight from the project owner. Do not offer options that weaken the
 - **No auto-approval.** Every new engine maps the agent's approval requests to `permission_request` events.
 - **Never touch the user's git state.** Checkpoints use a private index and `refs/codemax/checkpoints`.
 - Commit or push only when the user says "push".
-- **License is AGPL-3.0-only** plus a section 7 permission in `NOTICE` for the non-free agent SDKs and CLIs codemax drives (for example `@anthropic-ai/claude-agent-sdk`). The name and logo are governed by `TRADEMARKS.md`. Check a new dependency's license before adding it.
+- **License is AGPL-3.0-only** plus a section 7 permission in `NOTICE` for the non-free agent SDKs and CLIs codemax drives (for example `@anthropic-ai/claude-agent-sdk`). The name and logo are governed by `TRADEMARKS.md`. Check a new dependency's license before adding it. Outside contributions need a signed `CLA.md` (checked by `.github/workflows/cla.yml`); never merge an outside pull request while that check is red.
 - **Users install release tags, not `main`.** `install.sh` picks the newest `vX.Y.Z` tag (falls back to `main` only before the first release). Pushing to `main` ships nothing; releasing does. To release, when the user asks: bump `version` in `package.json`, commit, then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
 
 ## Design decisions

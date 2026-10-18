@@ -125,7 +125,7 @@ codemax history | brief | status | config | keys
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and [PLAN.md](PLAN.md) for design notes.
+Issues and pull requests are welcome. First-time contributors sign a short [CLA](CLA.md) on their pull request. See [CONTRIBUTING.md](CONTRIBUTING.md) and [PLAN.md](PLAN.md) for design notes.
 
 ```sh
 bun test && bun run typecheck

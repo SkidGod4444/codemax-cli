@@ -38,4 +38,4 @@ Keep them focused and describe what you verified by hand against real agents. Up
 
 ## License
 
-codemax is licensed under the [GNU AGPL-3.0](LICENSE) with an additional permission described in [NOTICE](NOTICE). By opening a pull request you agree that your contribution is licensed under the same terms. The codemax name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by the license.
+codemax is licensed under the [GNU AGPL-3.0](LICENSE) with an additional permission described in [NOTICE](NOTICE). Before your first pull request can be merged, you sign the [Contributor License Agreement](CLA.md). A bot asks on the pull request; you sign by posting one comment. You keep the copyright to your work. The agreement lets the project license codemax under other terms in the future, such as a commercial license, while every AGPL release stays AGPL. The codemax name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by the license.

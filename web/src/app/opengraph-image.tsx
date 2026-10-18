@@ -1,5 +1,5 @@
 import { ImageResponse } from "next/og";
-import { googleFont, HalftoneMark } from "@/lib/og";
+import { googleFont } from "@/lib/og";
 import { SITE } from "@/lib/site";
 
 export const alt = "codemax — every AI coding plan you pay for, one terminal";
@@ -31,16 +31,18 @@ function Tuft({ x, y }: { x: number; y: number }) {
 
 export default async function Image() {
   const host = SITE.url.replace(/^https?:\/\//, "");
-  const [serif, sans, mono] = await Promise.all([
+  const [serif, sans, bold, mono] = await Promise.all([
     googleFont("Instrument Serif", 400, HEAD_1 + HEAD_2),
     googleFont("Inter Tight", 500, AGENTS),
+    googleFont("Inter Tight", 700, "codemax"),
     googleFont("JetBrains Mono", 500, TAG + host),
   ]);
   const fonts = [
     serif && { name: "Instrument Serif", data: serif, weight: 400 as const, style: "normal" as const },
     sans && { name: "Inter Tight", data: sans, weight: 500 as const, style: "normal" as const },
+    bold && { name: "Inter Tight", data: bold, weight: 700 as const, style: "normal" as const },
     mono && { name: "JetBrains Mono", data: mono, weight: 500 as const, style: "normal" as const },
-  ].filter(Boolean) as { name: string; data: ArrayBuffer; weight: 400 | 500; style: "normal" }[];
+  ].filter(Boolean) as { name: string; data: ArrayBuffer; weight: 400 | 500 | 700; style: "normal" }[];
 
   const M = 34; // frame inset
   const W = size.width, H = size.height;
@@ -60,13 +62,15 @@ export default async function Image() {
 
         <div style={{ position: "absolute", left: M + 58, top: M + 52, right: M + 58, bottom: M + 48, display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <HalftoneMark cell={5.2} />
-            <div style={{ display: "flex", fontFamily: "JetBrains Mono", fontSize: 17, letterSpacing: 3, color: "rgba(255,255,255,0.82)" }}>{TAG}</div>
+            <div style={{ display: "flex", fontFamily: "Inter Tight", fontWeight: 700, fontSize: 44, letterSpacing: -1.5 }}>codemax</div>
+            <div style={{ display: "flex", fontFamily: "JetBrains Mono", fontSize: 16, letterSpacing: 3.5, color: "rgba(255,255,255,0.8)" }}>{TAG}</div>
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", fontFamily: "Instrument Serif", fontSize: 92, lineHeight: 1, letterSpacing: -1.5 }}>
-            <div style={{ display: "flex" }}>{HEAD_1}</div>
-            <div style={{ display: "flex" }}>{HEAD_2}</div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", flexDirection: "column", fontFamily: "Instrument Serif", fontSize: 92, lineHeight: 1, letterSpacing: -1.5 }}>
+              <div style={{ display: "flex" }}>{HEAD_1}</div>
+              <div style={{ display: "flex" }}>{HEAD_2}</div>
+            </div>
           </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "Inter Tight", fontSize: 26, color: "rgba(255,255,255,0.92)" }}>
