@@ -1,6 +1,7 @@
 import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason, ToolStatus } from "./types.ts";
 import { agentEnv } from "./env.ts";
+import { platformArgv } from "../core/spawn.ts";
 
 export interface CodexEngineOptions {
   /** Command for the app server. Default: codex app-server. */
@@ -81,7 +82,7 @@ export class CodexEngine implements Engine {
   }
 
   private spawn(cwd: string) {
-    const proc = Bun.spawn(this.opts.cmd ?? ["codex", "app-server"], { cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(platformArgv(this.opts.cmd ?? ["codex", "app-server"]), { cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {

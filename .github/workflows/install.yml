@@ -1,0 +1,54 @@
+# Runs the one-line installers on real macOS, Linux and Windows machines and
+# checks that `codemax` starts afterwards. Installs from this checkout, so it
+# tests the scripts as committed, not what is live on the site.
+name: Install
+
+on:
+  push:
+    branches: [main]
+    paths: [install.sh, install.ps1, package.json, bun.lock, src/**, .github/workflows/install.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run install.sh (installs Bun itself)
+        env:
+          CODEMAX_REPO: file://${{ github.workspace }}
+          CODEMAX_YES: "1"
+          SHELL: /bin/bash
+        run: bash install.sh
+      - name: codemax starts from a new login shell
+        run: |
+          bash -lic 'codemax config >/dev/null && echo "codemax runs at $(command -v codemax)"'
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run install.ps1 (installs Bun itself)
+        shell: pwsh
+        env:
+          CODEMAX_REPO: ${{ github.workspace }}
+          CODEMAX_YES: "1"
+        run: ./install.ps1
+      - name: codemax starts from a new shell (user PATH)
+        shell: pwsh
+        run: |
+          $env:Path = [Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')
+          codemax config | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "codemax exited with $LASTEXITCODE" }
+          Write-Host "codemax runs: $((Get-Command codemax).Source)"

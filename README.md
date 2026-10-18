@@ -31,10 +31,16 @@
 
 ## Get started
 
-Paste this in your terminal (macOS, Linux or WSL):
+**macOS and Linux:**
 
 ```sh
 curl -fsSL https://codemax.saidev.codes/install | bash
+```
+
+**Windows** (PowerShell; Windows support is new):
+
+```powershell
+irm https://codemax.saidev.codes/install.ps1 | iex
 ```
 
 It installs codemax (and [Bun](https://bun.sh) if you don't have it), then lists the agent CLIs it found. You need at least one agent you're logged in to. Then:
@@ -44,7 +50,7 @@ codemax doctor        # confirms nothing will bill an API key
 cd ~/your-project && codemax
 ```
 
-It installs the latest release. Run the same command again to update. To uninstall: `rm -rf ~/.codemax/cli ~/.bun/bin/codemax`.
+It installs the latest release. Run the same command again to update. To uninstall, delete `~/.codemax/cli` and `codemax` (or `codemax.cmd` on Windows) from `~/.bun/bin`.
 
 <details>
 <summary>Install from a clone instead</summary>

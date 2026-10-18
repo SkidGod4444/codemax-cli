@@ -24,7 +24,7 @@ cd web && bun run lint && bunx tsc --noEmit && bun run build
 - `src/core/` ledger, handoff brief, usage and pricing, budgets, checkpoints, `@file`, doctor, quota.
 - `src/tui/`, `src/adapters/`, `src/transcripts/` the embedded-terminal fallback (`codemax --tui`, `--raw`) and transcript tailing for agents without a protocol.
 - `test/` runs the real `ChatApp` in OpenTUI's test renderer against scripted fake ACP agents. `test/setup.ts` (bunfig preload) gives each file its own `CODEMAX_HOME`.
-- `install.sh` the one-line installer (`curl … | bash`): clones the newest release tag into `~/.codemax/cli`, installs Bun if asked, links `codemax` into `~/.bun/bin`. The site's `/install` redirects to it. Test it with a temp `HOME` and `CODEMAX_REPO=$PWD`.
+- `install.sh` (macOS/Linux, adds Bun's bin to the shell profile) and `install.ps1` (Windows PowerShell, adds it to the user PATH) are the one-line installers. `install.sh`: clones the newest release tag into `~/.codemax/cli`, installs Bun if asked, links `codemax` into `~/.bun/bin`. The site's `/install` and `/install.ps1` redirect to them. On Windows, agents are launched through `src/core/spawn.ts` (`.cmd` shims via cmd.exe); `--tui`/`--raw` are Unix-only. Windows is untested on real hardware. Test it with a temp `HOME` and `CODEMAX_REPO=$PWD`.
 - `web/` the Next.js landing page. Read `web/AGENTS.md` first: this Next.js version differs from older ones, and its docs are in `web/node_modules/next/dist/docs/`.
 
 ## Rules that never bend

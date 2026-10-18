@@ -31,7 +31,11 @@ export const SITE = {
   pink: "#ff5c8d",
   /** The installer script in the repo; the site's /install redirects here. */
   installScript: "https://raw.githubusercontent.com/SkidGod4444/codemax-cli/main/install.sh",
+  installScriptWindows: "https://raw.githubusercontent.com/SkidGod4444/codemax-cli/main/install.ps1",
 } as const;
 
-/** What users paste into their terminal: the site's /install redirects to the script in the repo. */
-export const INSTALL_COMMAND = `curl -fsSL ${SITE.url}/install | bash`;
+/** What users paste into their terminal; the site's /install and /install.ps1 redirect to the scripts in the repo. */
+export const INSTALL_COMMANDS = {
+  unix: `curl -fsSL ${SITE.url}/install | bash`,
+  windows: `irm ${SITE.url}/install.ps1 | iex`,
+} as const;

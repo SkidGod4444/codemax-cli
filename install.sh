@@ -4,8 +4,9 @@
 #   curl -fsSL https://codemax.saidev.codes/install | bash
 #   (same script: https://raw.githubusercontent.com/SkidGod4444/codemax-cli/main/install.sh)
 #
+# macOS and Linux (Windows: use install.ps1 in PowerShell).
 # Installs codemax into ~/.codemax/cli and puts `codemax` on your PATH via
-# Bun's bin folder. Never reads, sets or asks for API keys: codemax runs on the
+# Bun's bin folder, adding that folder to your shell profile if needed. Never reads, sets or asks for API keys: codemax runs on the
 # agent subscriptions you are already logged in to.
 #
 # Options (environment variables):
@@ -41,7 +42,7 @@ say ""
 # ── platform
 case "$(uname -s)" in
   Darwin | Linux) ;;
-  MINGW* | MSYS* | CYGWIN*) die "Windows is not supported yet. Run this inside WSL." ;;
+  MINGW* | MSYS* | CYGWIN*) die "On Windows, run this in PowerShell instead: irm https://codemax.saidev.codes/install.ps1 | iex" ;;
   *) die "Unsupported system: $(uname -s)" ;;
 esac
 
@@ -139,12 +140,27 @@ say ""
 say "  ${B}Installed.${R} Next:"
 say "    codemax doctor          ${D}# checks nothing will bill an API key${R}"
 say "    cd your-project && codemax"
+# ── Bun's bin folder on PATH: add it to the shell profile once, if missing
 case ":$PATH:" in
   *":$BUN_HOME/bin:"*) ;;
   *)
-    say ""
-    say "  ${P}Add Bun's bin folder to your PATH${R}, then open a new terminal:"
-    say "    echo 'export PATH=\"$BUN_HOME/bin:\$PATH\"' >> ~/.$(basename "${SHELL:-bash}")rc"
+    shell_name="$(basename "${SHELL:-bash}")"
+    case "$shell_name" in
+      zsh) profile="$HOME/.zshrc"; line="export PATH=\"$BUN_HOME/bin:\$PATH\"" ;;
+      fish) profile="$HOME/.config/fish/config.fish"; line="fish_add_path \"$BUN_HOME/bin\"" ;;
+      bash)
+        if [ "$(uname -s)" = Darwin ]; then profile="$HOME/.bash_profile"; else profile="$HOME/.bashrc"; fi
+        line="export PATH=\"$BUN_HOME/bin:\$PATH\"" ;;
+      *) profile="$HOME/.profile"; line="export PATH=\"$BUN_HOME/bin:\$PATH\"" ;;
+    esac
+    if [ -f "$profile" ] && grep -qF "$BUN_HOME/bin" "$profile"; then
+      say "  ${D}Open a new terminal to use codemax.${R}"
+    else
+      mkdir -p "$(dirname "$profile")"
+      printf '\n# codemax\n%s\n' "$line" >> "$profile"
+      say "  Added $BUN_HOME/bin to your PATH in ${profile/#$HOME/~}."
+      say "  ${D}Open a new terminal (or run: source ${profile/#$HOME/~}) to use codemax.${R}"
+    fi
     ;;
 esac
 say ""

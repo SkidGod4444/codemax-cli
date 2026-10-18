@@ -13,14 +13,14 @@ import {
   Wallet,
 } from "lucide-react";
 import AsciiArt from "@/components/AsciiArt";
-import CopyCommand from "@/components/CopyCommand";
+import InstallCommand from "@/components/InstallCommand";
 import { Logo } from "@/components/Logo";
 import MobileMenu from "@/components/MobileMenu";
 import TerminalDemo from "@/components/TerminalDemo";
 import { Accordion, AccordionItem, AccordionPanel, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 
-import { INSTALL_COMMAND, SITE } from "@/lib/site";
+import { INSTALL_COMMANDS, SITE } from "@/lib/site";
 
 const REPO = SITE.github;
 const NAV: [string, string][] = [["Why", "why"], ["Agents", "agents"], ["Features", "features"], ["Get started", "start"]];
@@ -198,7 +198,7 @@ export default function Home() {
               </Button>
             </div>
             <div className="mt-6 max-w-md">
-              <CopyCommand command={INSTALL_COMMAND} />
+              <InstallCommand commands={INSTALL_COMMANDS} />
             </div>
           </div>
           <div className="border-t border-[var(--line)] p-5 sm:p-8 lg:border-t-0 lg:border-l">
@@ -329,8 +329,7 @@ export default function Home() {
             <h2 className="mt-5 text-[clamp(2.4rem,4.2vw,3.6rem)] leading-[1] font-serif font-normal tracking-[-0.015em] text-balance">Up and running in a minute.</h2>
             <p className="mt-5 max-w-md text-pretty text-[var(--ink-2)]">Free and open source. Uses the logins you already have — nothing new to sign up for.</p>
             <div className="mt-8 max-w-lg">
-              <CopyCommand command={INSTALL_COMMAND} />
-              <p className="mt-3 font-mono text-[10.5px] tracking-[0.14em] text-[var(--ink-3)] uppercase">macOS · Linux · WSL — installs Bun if you need it</p>
+              <InstallCommand commands={INSTALL_COMMANDS} note />
             </div>
             <ol className="mt-8 max-w-lg border-t border-[var(--line)]">
               {[

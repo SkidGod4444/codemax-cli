@@ -1,4 +1,5 @@
 import { termSize } from "./terminal.ts";
+import { IS_WINDOWS } from "./spawn.ts";
 
 const NESTED_SESSION_ENV = /^(CLAUDECODE|CLAUDE_CODE_|CLAUDE_PID|CLAUDE_EFFORT|CODEX_SANDBOX|CODEX_THREAD_ID|CURSOR_AGENT_SESSION)/;
 
@@ -23,6 +24,7 @@ export class AgentProcess {
   readonly startedAt = Date.now();
 
   constructor(private opts: AgentProcessOptions) {
+    if (IS_WINDOWS) throw new Error("The --tui and --raw modes need a Unix terminal. On Windows, run codemax without them.");
     const { cols, rows } = opts.cols && opts.rows ? { cols: opts.cols, rows: opts.rows } : termSize();
     this.term = new Bun.Terminal({
       cols,

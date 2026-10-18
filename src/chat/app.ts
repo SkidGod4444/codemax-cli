@@ -23,6 +23,7 @@ import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budge
 import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, type Checkpoint } from "../core/checkpoint.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
+import { shellArgv } from "../core/spawn.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -639,7 +640,7 @@ export class ChatApp {
   private async shell(cmd: string) {
     if (!cmd) return;
     this.transcript.user(`! ${cmd}`);
-    const p = Bun.spawn(["sh", "-c", cmd], { cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(shellArgv(cmd), { cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     const code = await p.exited;
     const body = (out + (err ? `\n${err}` : "")).trimEnd() || "(no output)";

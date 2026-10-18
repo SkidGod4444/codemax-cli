@@ -403,3 +403,7 @@ button:disabled,
 [aria-disabled="true"] {
   cursor: not-allowed;
 }
+
+/* copy button box: a deeper pink on pink bands, brand pink on white bands */
+.tone-pink { --copy-bg: #e23571; }
+.tone-white { --copy-bg: #ff5c8d; }
