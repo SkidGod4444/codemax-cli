@@ -23,6 +23,8 @@ export interface PaletteOptions {
   onClose: () => void;
   /** Rows to show at most. */
   maxRows?: number;
+  /** Tab picks the highlighted item instead of moving down (file completion). */
+  tabAccepts?: boolean;
 }
 
 /**
@@ -95,7 +97,7 @@ export class Palette {
     this.titleRow.content = this.opts.title ?? "";
     this.box.height = shown + titleLines + (shown === 0 ? 1 : 0);
     this.box.top = Math.max(0, top - this.box.height);
-    const labelW = Math.min(28, Math.max(10, ...visible.map((v) => v.label.length + 2)));
+    const labelW = Math.min(Math.max(28, Math.floor(width * 0.35)), Math.max(10, ...visible.map((v) => v.label.length + 2)));
     this.rows.forEach((row, i) => {
       const it = visible[i];
       if (!it) {
@@ -124,7 +126,14 @@ export class Palette {
     const n = key.name;
     if (n === "up" || (n === "p" && key.ctrl)) return this.move(-1);
     if (n === "down" || (n === "n" && key.ctrl)) return this.move(1);
-    if (n === "tab" && !key.shift) return this.move(1);
+    if (n === "tab" && !key.shift) {
+      if (this.opts.tabAccepts) {
+        const cur = this.current;
+        if (cur && !cur.disabled) this.opts.onPick(cur);
+        return true;
+      }
+      return this.move(1);
+    }
     if (n === "escape") {
       this.opts.onClose();
       return true;
@@ -157,7 +166,8 @@ function score(it: PaletteItem, q: string): number {
   const label = it.label.toLowerCase().replace(/^\//, "");
   const needle = q.replace(/^\//, "");
   if (label.startsWith(needle)) return 3;
-  if (label.split(/[:_\-/ ]/).some((w) => w.startsWith(needle))) return 2;
+  if (label.split(/[:_\-/. ]/).some((w) => w.startsWith(needle))) return 2;
+  if (label.includes(needle)) return 1.5;
   if ((it.description ?? "").toLowerCase().includes(needle)) return 1;
   return 0;
 }

@@ -41,6 +41,8 @@ Layout: `src/engines/` (normalized event stream; `acp.ts` generic client; `codex
 
 **v0.4 (2026-10-18):** markdown and diff styling in the transcript (headings, inline code, bold/italic, bullets, fenced blocks, +/- lines coloured, throttled restyle while streaming); `/model` (ACP `session/set_model`, Codex per-turn model); `/compact` and summarize-on-switch writing `summary.md` for every handoff (skipped at 85%+ quota, 30s cap, Esc skips); `!cmd` shell mode attached to the next prompt; `/diff`, `/new`; terminal title and bell on long turns; queued `/` and `!` entries dispatched like typed ones; permission dialog no longer reacts to letters (typing at the wrong moment picked "allow for session"); switch palette keeps its highlight across the background refresh; compiled binary fetches the Claude adapter through bunx when it is not on disk.
 
+**v0.5 (2026-10-18):** auto-handoff offer on quota exhaustion (deferred to turn end, Enter continues the unfinished request); daily API-equivalent budgets per agent and overall with 80% warning and 100% handoff; working-tree checkpoints under refs/codemax/checkpoints with a private index, /undo and /checkpoints (5 MB untracked cap, newest 50 kept); @file completion with contents attached; /ask and regex routing rules to a throwaway session on another agent; startup session picker. Tests now run with an isolated CODEMAX_HOME (bunfig preload); before that, full-suite runs wrote ledger folders into the real ~/.codemax.
+
 Open: Gemini CLI untested (not installed).
 
 ## How context survives

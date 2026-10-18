@@ -60,7 +60,8 @@ async function main(argv: string[]) {
         process.exit(2);
       }
       const ledger = new Ledger(cwd);
-      const agent = (flag(args, "--agent") ?? flag(args, "-a") ?? config.order[0] ?? "claude") as AgentId;
+      const agentFlag = flag(args, "--agent") ?? flag(args, "-a");
+      const agent = (agentFlag ?? config.order[0] ?? "claude") as AgentId;
       getAdapter(agent); // validate
       if (args.includes("--raw")) {
         const orch = new Orchestrator(config, ledger, cwd);
@@ -68,7 +69,7 @@ async function main(argv: string[]) {
       } else if (args.includes("--tui") || !hasEngine(agent)) {
         await runApp(config, ledger, cwd, agent, args.includes("--fresh"));
       } else {
-        await runChat(config, ledger, cwd, agent, args.includes("--fresh"));
+        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag);
       }
       process.exit(0);
     }

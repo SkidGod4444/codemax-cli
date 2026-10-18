@@ -20,6 +20,12 @@ export interface Config {
   summarizeOnSwitch: boolean;
   /** Ring the terminal bell when a turn longer than this many seconds finishes (0 = never). */
   bellAfterSeconds: number;
+  /** Daily API-equivalent USD limits per agent or "all"; at 80% codemax warns, at 100% it offers a handoff. */
+  budgets: Partial<Record<AgentId | "all", number>>;
+  /** Send a message to another agent when it matches: [{ "match": "^review", "agent": "codex" }]. */
+  routes: { match: string; agent: AgentId }[];
+  /** Snapshot the working tree before every turn so /undo can revert it. */
+  checkpoints: boolean;
   /** Refresh the public price list weekly for /usage (set false to stay offline). */
   priceUpdates: boolean;
   /** Max turns and chars included in a handoff brief. */
@@ -32,6 +38,9 @@ export const DEFAULT_CONFIG: Config = {
   autoSwitch: true,
   agentArgs: {},
   priceUpdates: true,
+  budgets: {},
+  routes: [],
+  checkpoints: true,
   summarizeOnSwitch: true,
   bellAfterSeconds: 20,
   brief: { turns: 10, maxChars: 8000, turnChars: 1200 },
@@ -55,6 +64,8 @@ export function loadConfig(): Config {
       ...raw,
       brief: { ...DEFAULT_CONFIG.brief, ...(raw.brief ?? {}) },
       agentArgs: { ...(raw.agentArgs ?? {}) },
+      budgets: { ...(raw.budgets ?? {}) },
+      routes: Array.isArray(raw.routes) ? raw.routes : [],
     };
   } catch {
     return structuredClone(DEFAULT_CONFIG);

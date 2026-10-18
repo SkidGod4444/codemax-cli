@@ -19,9 +19,12 @@ import { C, DONE_VERBS, G, VERBS, fmtDuration, fmtTime, modeLabel, pick } from "
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
 import { refreshLivePricesIfStale } from "../core/prices-live.ts";
+import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budget.ts";
+import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, type Checkpoint } from "../core/checkpoint.ts";
+import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
-const VERSION = "0.3.1";
+const VERSION = "0.5.0";
 const MODE_CYCLE = ["default", "acceptEdits", "plan"];
 
 interface Active {
@@ -67,6 +70,11 @@ export class ChatApp {
   private history: string[] = [];
   /** API-equivalent USD spent since codemax started (all agents). */
   private sessionCost = 0;
+  private today = new Map<BudgetKey, number>();
+  private budgetNotified = new Map<BudgetKey, "warn" | "over">();
+  private checkpoints: (Checkpoint & { agent: AgentId })[] = [];
+  private projectFiles: string[] | null = null;
+  private side = new Set<Active>();
   private sessionTokens = 0;
   private historyIdx = -1;
   private draft = "";
@@ -124,6 +132,7 @@ export class ChatApp {
       "/switch to change agent   ↑ for history                             ctrl + c twice to quit",
       "/mode to set permissions  shift + ⏎ for newline                     ? to toggle this help",
       "! to run a shell command  /model to pick a model                    /compact for a handoff summary",
+      "@ to attach a file        /undo reverts the last turn's edits        /ask <agent> <msg> for a one-off",
     ])
       this.shortcuts.add(new TextRenderable(renderer, { content: l, fg: C.dim, wrapMode: "none", truncate: true }));
     root.add(this.shortcuts);
@@ -139,7 +148,12 @@ export class ChatApp {
     this.renderFooter();
   }
 
-  async start(agent: AgentId, fresh: boolean) {
+  async start(agent: AgentId, fresh: boolean, o: { pick?: boolean } = {}) {
+    try {
+      this.today = spendToday();
+    } catch {
+      /* no usage yet */
+    }
     await this.refreshDetect();
     const ok = (a: AgentId) => this.detect.get(a)?.installed && this.detect.get(a)?.engine;
     const first = ok(agent) ? agent : listAdapters(this.config.order).find((a) => ok(a.id))?.id;
@@ -150,6 +164,7 @@ export class ChatApp {
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
     this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes });
     if ((this.config as any).priceUpdates !== false) void refreshLivePricesIfStale().then((l) => l && resetPriceCache());
+    if (o.pick && !fresh && this.openPicker(first)) return this.done;
     await this.launch(first, { fresh });
     return this.done;
   }
@@ -262,6 +277,11 @@ export class ChatApp {
   private onInputChanged() {
     const text = this.input.plainText;
     if (this.historyIdx >= 0 && text !== this.history[this.historyIdx]) this.historyIdx = -1;
+    const mention = text.match(MENTION_RE);
+    if (mention && !text.startsWith("/")) {
+      void this.openFilePalette(mention[2]!);
+      return;
+    } else if (this.paletteKind === "files") this.closePalette();
     if (text.startsWith("/") && !text.includes("\n") && !text.includes(" ")) {
       if (!this.palette) this.openCommandPalette(text.slice(1));
       else this.palette.setFilter(text.slice(1));
@@ -303,12 +323,241 @@ export class ChatApp {
       this.transcript.note("no agent running — /switch to start one", C.warn);
       return;
     }
+    const route = this.routeFor(text);
+    if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
     if (this.active.turn) {
       this.queue.push(text);
       this.transcript.note(`queued: ${text.slice(0, 80)}${text.length > 80 ? "…" : ""}`, C.dim);
       return;
     }
     await this.send(this.active, text);
+  }
+
+  /** Append @file contents and pending shell output to an outgoing message. */
+  private withAttachments(text: string): string {
+    const files = mentionedFiles(text, this.cwd);
+    if (files.length) {
+      text += attachFiles(files, this.cwd);
+      this.transcript.note(`attached ${files.join(", ")}`, C.dimmer);
+    }
+    if (this.pendingShell.length) {
+      text = `${text}\n\n[shell output the user ran in this repo]\n${this.pendingShell.join("\n\n")}`;
+      this.pendingShell = [];
+    }
+    return text;
+  }
+
+  private async checkpoint(active: Active, text: string) {
+    if (!this.config.checkpoints) return;
+    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${text.slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
+    if (cp) this.checkpoints.push({ ...cp, agent: active.agent });
+  }
+
+  private async undo() {
+    if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /undo", C.warn);
+    const cp = this.checkpoints.pop() ?? (await listCheckpoints(this.cwd, 1))[0];
+    if (!cp) return this.transcript.note("no checkpoint to restore (checkpoints need a git repo)", C.warn);
+    const stat = await checkpointDiffStat(this.cwd, cp.sha);
+    if (!stat.trim()) {
+      this.transcript.note(`nothing changed since the checkpoint "${cp.label}"`);
+      return;
+    }
+    const r = await restoreCheckpoint(this.cwd, cp.sha);
+    this.transcript.note(`reverted to the snapshot ${cp.label}`, C.warn);
+    for (const l of stat.split("\n")) this.transcript.note(l);
+    if (r.removed.length) this.transcript.note(`removed ${r.removed.length} new file(s): ${r.removed.slice(0, 5).join(", ")}${r.removed.length > 5 ? "…" : ""}`);
+    this.pendingShell.push("[codemax] The user reverted the file changes from the last turn with /undo. The working tree is back to the state before that turn.");
+  }
+
+  private async showCheckpoints() {
+    const list = await listCheckpoints(this.cwd, 10);
+    if (!list.length) return this.transcript.note("no checkpoints yet");
+    for (const c of list) this.transcript.note(`${fmtTime(c.ts)}  ${c.sha.slice(0, 8)}  ${c.label}`);
+    this.transcript.note("/undo restores the most recent one");
+  }
+
+  private routeFor(text: string): AgentId | null {
+    for (const r of this.config.routes ?? []) {
+      try {
+        if (new RegExp(r.match, "i").test(text) && this.detect.get(r.agent)?.engine) return r.agent;
+      } catch {
+        /* bad regex in config */
+      }
+    }
+    return null;
+  }
+
+  private async ask(args: string) {
+    const [id, ...rest] = args.trim().split(/\s+/);
+    const msg = rest.join(" ");
+    if (!id || !msg) return this.transcript.note("usage: /ask <agent> <message>  e.g. /ask codex review the last commit", C.warn);
+    if (!this.detect.get(id as AgentId)?.engine) return this.transcript.note(`no protocol engine for "${id}"`, C.warn);
+    await this.askAgent(id as AgentId, msg, `asked ${id}`);
+  }
+
+  /** One message to another agent in a throwaway session; the current agent stays active. */
+  private async askAgent(agent: AgentId, text: string, why: string) {
+    const blocked = this.checkBlockers(agent);
+    if (blocked.length) return this.transcript.error(`${agent} not started: ${blocked[0]!.message}`);
+    const adapter = getAdapter(agent);
+    const engine = this.engineFactory(agent);
+    const side: Active = { agent, name: adapter.name, engine, turn: null, replay: null, unsubscribe: () => {}, commands: [] };
+    this.side.add(side);
+    side.unsubscribe = engine.onEvent((e) => this.onEngineEvent(side, e));
+    this.transcript.divider(`${why} · ${adapter.name}`);
+    this.transcript.user(text);
+    try {
+      await engine.start({ cwd: this.cwd });
+      const brief = this.ledger.turns().length ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: this.active?.agent, config: this.config }) : "";
+      const body = this.withAttachments(text);
+      await this.checkpoint(side, text);
+      this.ledger.addTurns([{ ts: Date.now(), agent, sessionId: engine.session?.id ?? "?", role: "user", text }]);
+      await this.runTurn(side, brief ? `${brief}\n\n## This message (answer it; the user stays with ${this.active?.name ?? "another agent"})\n${body}` : body);
+    } catch (e: any) {
+      this.transcript.error(`${adapter.name}: ${e?.message ?? e}`);
+    } finally {
+      side.unsubscribe();
+      this.side.delete(side);
+      await engine.close().catch(() => {});
+      if (this.active) this.transcript.divider(`back to ${this.active.name}`);
+    }
+  }
+
+  private showBudget() {
+    const b = this.config.budgets ?? {};
+    const keys = Object.keys(b) as BudgetKey[];
+    if (!keys.length) return this.transcript.note('no budgets set · add "budgets": {"claude": 20, "all": 50} (USD per day) to ~/.codemax/config.json');
+    for (const k of keys) {
+      const spent = this.today.get(k) ?? 0;
+      this.transcript.note(`${k.padEnd(8)} ${fmtUsd(spent)} of ${fmtUsd(b[k])} today (${Math.round((spent / b[k]!) * 100)}%)`);
+    }
+  }
+
+  private checkBudget(agent: AgentId) {
+    const b = this.config.budgets ?? {};
+    for (const k of [agent, "all"] as BudgetKey[]) {
+      const level = budgetLevel(this.today.get(k) ?? 0, b[k]);
+      if (level === "ok" || this.budgetNotified.get(k) === level || (level === "warn" && this.budgetNotified.get(k) === "over")) continue;
+      this.budgetNotified.set(k, level);
+      const spent = fmtUsd(this.today.get(k) ?? 0);
+      const label = k === "all" ? "all agents" : getAdapter(k).name;
+      if (level === "warn") this.transcript.note(`${label} has used ${spent} of its ${fmtUsd(b[k])} daily budget (80%+)`, C.warn);
+      else this.offerHandoff(agent, `${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, k === "all");
+    }
+  }
+
+  /** Best agent to continue on: config order, installed with an engine, not exhausted or over budget. */
+  private nextAgent(from: AgentId): AgentId | null {
+    const b = this.config.budgets ?? {};
+    for (const a of listAdapters(this.config.order)) {
+      if (a.id === from) continue;
+      const d = this.detect.get(a.id);
+      if (!d?.installed || !d.engine) continue;
+      if (isExhausted(this.quota.get(a.id))) continue;
+      if (budgetLevel(this.today.get(a.id) ?? 0, b[a.id]) === "over") continue;
+      return a.id;
+    }
+    return null;
+  }
+
+  /** One-key handoff offer: Enter continues the task in the next agent. */
+  private pendingOffer: { from: AgentId; reason: string; allAgents: boolean } | null = null;
+
+  private offerHandoff(from: AgentId, reason: string, allAgents = false) {
+    // Never interrupt a running turn: show the offer when it ends.
+    if (this.active?.turn || this.permission) {
+      if (!this.pendingOffer) this.transcript.note(`${reason} · you'll be offered a handoff when this turn ends`, C.warn);
+      this.pendingOffer = { from, reason, allAgents };
+      return;
+    }
+    if (this.paletteKind === "handoff") return;
+    const next = allAgents ? null : this.nextAgent(from);
+    this.transcript.note(reason, C.warn);
+    if (!next) {
+      this.transcript.note(allAgents ? "every agent shares that budget · raise it in ~/.codemax/config.json to continue" : "no other agent is available · /switch to pick one anyway", C.warn);
+      return;
+    }
+    this.closePalette();
+    const items: PaletteItem[] = [
+      { label: `Continue in ${getAdapter(next).name}`, description: "hand over the conversation and the unfinished request", value: next },
+      ...listAdapters(this.config.order)
+        .filter((a) => a.id !== next && a.id !== from && this.detect.get(a.id)?.engine)
+        .map((a) => ({ label: `Continue in ${a.name}`, description: isExhausted(this.quota.get(a.id)) ? "out of quota" : "", value: a.id, disabled: isExhausted(this.quota.get(a.id)) })),
+      { label: `Stay on ${getAdapter(from).name}`, description: "keep going here anyway", value: "__stay" },
+    ];
+    this.paletteKind = "handoff";
+    this.palette = new Palette(this.renderer, {
+      title: `${reason} · Enter to continue in ${getAdapter(next).name}`,
+      items,
+      onPick: (it) => {
+        this.closePalette();
+        if (it.value !== "__stay") void this.switchTo(it.value as AgentId, false, { resumeTask: true });
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    // keep the offered order (Continue first), not alphabetical
+    (this.palette as any).opts.items.forEach((it: PaletteItem, i: number) => (it.weight = 100 - i));
+    this.palette.setFilter("");
+    this.renderer.root.add(this.palette.box);
+  }
+
+  private async openFilePalette(filter: string) {
+    if (!this.projectFiles) this.projectFiles = await listProjectFiles(this.cwd).catch(() => []);
+    if (this.paletteKind === "files" && this.palette) return this.palette.setFilter(filter);
+    this.closePalette(false);
+    this.paletteKind = "files";
+    this.palette = new Palette(this.renderer, {
+      title: "Attach a file · Tab or Enter to insert · Esc to cancel",
+      items: this.projectFiles.map((f) => ({ label: f, value: f })),
+      filter,
+      tabAccepts: true,
+      onPick: (it) => {
+        const text = this.input.plainText.replace(MENTION_RE, (_m, pre) => `${pre}@${it.value} `);
+        this.closePalette();
+        this.input.setText(text);
+        try {
+          (this.input as any).gotoBufferEnd?.();
+        } catch {
+          /* cursor helper missing */
+        }
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** Startup picker: resume a recent session or start fresh. Returns false when there is nothing to pick. */
+  private openPicker(defaultAgent: AgentId): boolean {
+    const sessions = Object.values(this.ledger.sessions()).filter((s): s is SessionRef => !!s && !!this.detect.get(s.agent)?.engine);
+    if (!sessions.length) return false;
+    sessions.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+    const turns = this.ledger.turns();
+    const items: PaletteItem[] = sessions.map((s, i) => {
+      const last = [...turns].reverse().find((t) => t.agent === s.agent && t.role === "user");
+      return {
+        label: `Resume ${getAdapter(s.agent).name}`,
+        description: `${ago(s.lastUsedAt)}${last ? ` · "${last.text.replace(/\s+/g, " ").slice(0, 60)}"` : ""}`,
+        value: `resume:${s.agent}`,
+        weight: 100 - i,
+      };
+    });
+    items.push({ label: `New session with ${getAdapter(defaultAgent).name}`, description: "start fresh (history stays in the ledger)", value: `new:${defaultAgent}`, weight: 0 });
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: "Resume a session · Enter to continue · Esc for the most recent",
+      items,
+      onPick: (it) => {
+        this.closePalette();
+        const [kind, agent] = it.value.split(":") as ["resume" | "new", AgentId];
+        void this.launch(agent, { fresh: kind === "new" });
+      },
+      onClose: () => {
+        this.closePalette();
+        void this.launch(sessions[0]!.agent, { fresh: false });
+      },
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+    return true;
   }
 
   /** Run one queued entry the same way as if it had just been typed. */
@@ -325,10 +574,8 @@ export class ChatApp {
 
   private async send(active: Active, text: string) {
     this.transcript.user(text);
-    if (this.pendingShell.length) {
-      text = `${text}\n\n[shell output the user ran in this repo]\n${this.pendingShell.join("\n\n")}`;
-      this.pendingShell = [];
-    }
+    text = this.withAttachments(text);
+    await this.checkpoint(active, text);
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
     await this.runTurn(active, text);
     await this.drainQueue(active);
@@ -355,6 +602,10 @@ export class ChatApp {
       { name: "/clear", description: "Clear the screen (history stays in the ledger)", run: () => this.clearScreen() },
       { name: "/help", description: "Keyboard shortcuts and commands", run: () => void (this.shortcuts.visible = true) },
       { name: "/new", description: "Start a fresh session with the current agent", run: () => void (this.active && this.switchTo(this.active.agent, true)) },
+      { name: "/undo", description: "Revert the files changed by the last agent turn", run: () => void this.undo() },
+      { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
+      { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
+      { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
   }
@@ -489,7 +740,7 @@ export class ChatApp {
 
   // ---------- palette ----------
 
-  private paletteKind: "commands" | "switch" | "modes" | null = null;
+  private paletteKind: "commands" | "switch" | "modes" | "files" | "handoff" | "picker" | null = null;
 
   private paletteAnchor = () => ({ top: this.inputWrap.y, width: this.renderer.width });
 
@@ -580,7 +831,7 @@ export class ChatApp {
     this.renderer.root.add(this.palette.box);
   }
 
-  private closePalette() {
+  private closePalette(_focus = true) {
     this.palette?.destroy();
     this.palette = null;
     this.paletteKind = null;
@@ -671,10 +922,15 @@ export class ChatApp {
       }
     }
     this.renderFooter();
+    const offer = this.pendingOffer;
+    if (offer && this.active === active) {
+      this.pendingOffer = null;
+      this.offerHandoff(offer.from, offer.reason, offer.allAgents);
+    }
   }
 
   private onEngineEvent(active: Active, e: EngineEvent) {
-    if (this.active !== active && e.type !== "permission_request") return;
+    if (this.active !== active && !this.side.has(active) && e.type !== "permission_request") return;
     const target = () => active.turn?.block ?? (active.replay ??= this.transcript.agent());
     switch (e.type) {
       case "text_delta":
@@ -719,11 +975,14 @@ export class ChatApp {
           this.ledger.addUsage(rec);
           this.sessionCost += recordCost(rec).usd;
           this.sessionTokens += rec.input + rec.output + rec.cacheRead + rec.cacheWrite;
+          addSpend(this.today, rec);
           this.renderFooter();
+          this.checkBudget(active.agent);
         }
         break;
       }
       case "session":
+        if (this.side.has(active)) break; // /ask sessions are throwaway, not resumable
         this.ledger.saveSession({ agent: active.agent, id: e.ref.id, cwd: this.cwd, startedAt: e.ref.startedAt, lastUsedAt: Date.now() } as SessionRef);
         break;
       case "error":
@@ -772,8 +1031,7 @@ export class ChatApp {
     this.renderFooter();
     if (isExhausted(q) && !isExhausted(prev)) {
       this.ledger.addEvent({ kind: "quota", agent: q.agent, detail: q.detail });
-      this.transcript.note(`${q.agent} is out of quota${q.resetsAt ? ` · resets ${fmtTime(q.resetsAt)}` : ""} — /switch to continue elsewhere`, C.warn);
-      if (this.config.autoSwitch && !this.palette && !this.permission) this.openSwitch();
+      if (this.config.autoSwitch && (!this.active || this.active.agent === q.agent)) this.offerHandoff(q.agent, `${getAdapter(q.agent).name} is out of quota${q.resetsAt ? ` until ${fmtTime(q.resetsAt)}` : ""}`);
     }
   }
 
@@ -841,7 +1099,9 @@ export class ChatApp {
     else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
     if (a) right.push({ text: `${a.name}${a.engine.info?.currentModel ? ` · ${shortModelName(a.engine.info.currentModel)}` : ""}`, prio: 2 });
-    if (this.sessionCost > 0 || this.sessionTokens > 0) right.push({ text: `${fmtUsd(this.sessionCost)} /usage`, prio: 1 });
+    const bk: BudgetKey | null = a && this.config.budgets?.[a.agent] ? a.agent : this.config.budgets?.all ? "all" : null;
+    if (bk) right.push({ text: `${fmtUsd(this.today.get(bk) ?? 0)}/${fmtUsd(this.config.budgets[bk])} today`, prio: 1 });
+    else if (this.sessionCost > 0 || this.sessionTokens > 0) right.push({ text: `${fmtUsd(this.sessionCost)} /usage`, prio: 1 });
     const quotas = [...this.quota.values()].map((q) => [q.agent, quotaLabel(q)] as const).filter(([, l]) => l).map(([ag, l]) => `${ag} ${l}`).slice(0, 2);
     if (quotas.length) right.push({ text: quotas.join(" · "), prio: 2 });
     right.push({ text: `${this.config.hotkeys.map((h) => h.toLowerCase()).join(" · ")} agents`, prio: 4 });
@@ -875,13 +1135,13 @@ export class ChatApp {
     );
   }
 
-  private async switchTo(agent: AgentId, fresh: boolean) {
+  private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean } = {}) {
     if (!hasEngine(agent)) return this.transcript.note(`${agent} has no protocol engine; run codemax --tui for it`, C.warn);
     this.switching = true;
     const prev = this.active;
     let from: AgentId | undefined;
     const pq = prev ? this.quota.get(prev.agent) : undefined;
-    const nearLimit = isExhausted(pq) || (typeof pq?.usedPercent === "number" && pq.usedPercent >= 85);
+    const nearLimit = o.resumeTask || isExhausted(pq) || (typeof pq?.usedPercent === "number" && pq.usedPercent >= 85);
     if (prev && !prev.turn && this.config.summarizeOnSwitch && !nearLimit && this.ledger.turns().length >= 4) {
       const timer = setTimeout(() => void prev.engine.cancel(), 30_000);
       await this.compact({ quiet: true }).catch(() => false);
@@ -897,7 +1157,8 @@ export class ChatApp {
       this.ledger.addEvent({ kind: "note", agent: from, detail: "stopped for switch", diffStat: await diffStat(this.cwd) });
     }
     const fromQ = from ? this.quota.get(from) : undefined;
-    const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota` : undefined;
+    const overBudget = from && budgetLevel(this.today.get(from) ?? 0, this.config.budgets?.[from]) === "over";
+    const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota mid-task; finish the last user request` : overBudget ? `${from} hit its daily budget; finish the last user request` : o.resumeTask ? `${from} stopped; finish the last user request` : undefined;
     await this.launch(agent, { fresh, from, reason });
     this.switching = false;
   }
@@ -933,11 +1194,11 @@ function ago(ts: number): string {
   return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
 }
 
-export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean) {
+export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
   const app = new ChatApp(renderer, config, ledger, cwd);
   try {
-    await app.start(agent, fresh);
+    await app.start(agent, fresh, { pick });
   } finally {
     renderer.destroy();
     try {
