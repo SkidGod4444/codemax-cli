@@ -80,7 +80,6 @@ cd codemax-cli && bun install && bun link
 | Grok | SuperGrok | Supported |
 | Cursor Agent | Cursor plans | Supported (needs Cursor Agent 2026.10 or newer). Changing its model with `/model` also changes Cursor's own default. |
 | Antigravity CLI | Google AI plans | Supported. It has no ACP mode of its own, so codemax offers to download Google's official ACP server for it (about 110 MB, once, from dl.google.com) the first time you switch to it, and signs in with your Google account (a browser may open once). It reports context size but not token counts, so `/usage` shows input only. |
-| Gemini CLI | Google AI plans | Replaced by Antigravity CLI for Google AI plans; still works if installed |
 | Copilot CLI | GitHub Copilot plans | In its own UI via `codemax --tui` |
 
 ## Everyday keys
@@ -112,7 +111,7 @@ cd codemax-cli && bun install && bun link
 
 | Key | Default | What it does |
 |---|---|---|
-| `order` | `["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot", "gemini"]` | Which agent comes next on a handoff |
+| `order` | `["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot"]` | Which agent comes next on a handoff |
 | `budgets` | `{}` | Daily limit per agent, e.g. `{"claude": 20, "all": 50}` |
 | `routes` | `[]` | Send matching messages to a specific agent |
 | `checkpoints` | `true` | Snapshots for `/undo` |

@@ -44,7 +44,7 @@ export interface AcpEngineOptions {
 
 /**
  * Generic Agent Client Protocol engine. Works for any agent that speaks ACP
- * over stdio: Claude Code (via the Zed adapter), OpenCode, Grok, Gemini CLI.
+ * over stdio: Claude Code (via the Zed adapter), OpenCode, Grok, Cursor, Antigravity.
  */
 export class AcpEngine implements Engine {
   readonly agent: AgentId;

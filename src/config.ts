@@ -62,7 +62,7 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-  order: ["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot", "gemini"],
+  order: ["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot"],
   hotkeys: ["ctrl+/", "ctrl+^"],
   autoSwitch: true,
   agentArgs: {},

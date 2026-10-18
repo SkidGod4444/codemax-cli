@@ -1,4 +1,4 @@
-export type AgentId = "claude" | "codex" | "opencode" | "cursor" | "grok" | "antigravity" | "gemini" | "copilot" | "fake";
+export type AgentId = "claude" | "codex" | "opencode" | "cursor" | "grok" | "antigravity" | "copilot" | "fake";
 
 export interface SessionRef {
   agent: AgentId;

@@ -188,7 +188,7 @@ export default function Home() {
               Every AI coding plan you pay for. One terminal.
             </h1>
             <p className="mt-6 max-w-md text-[17px] leading-relaxed text-pretty text-[var(--ink-2)]">
-              Use Claude, Codex, Grok and more side by side. When one hits its limit, the next carries on with your task — same context, no restart.
+              Use Claude, Codex, Antigravity and more side by side. When one hits its limit, the next carries on with your task — same context, no restart.
             </p>
             <div className="mt-9 flex flex-col gap-3 sm:flex-row">
               <Button size="lg" className="rounded-none px-6" render={<a href="#start" />}>

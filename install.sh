@@ -125,7 +125,7 @@ ok "codemax → $BUN_HOME/bin/codemax"
 
 # ── agents already on this machine
 found=""
-for a in claude codex opencode grok agy gemini cursor-agent copilot; do
+for a in claude codex opencode grok agy cursor-agent copilot; do
   command -v "$a" >/dev/null 2>&1 && found="$found $a"
 done
 say ""

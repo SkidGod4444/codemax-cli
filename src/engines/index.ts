@@ -122,11 +122,6 @@ const factories: EngineFactory[] = [
     available: async () => !!Bun.which("agy") && !!antigravityServer(),
     create: () => new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: antigravityServer()!.cmd, plainPipes: true, signIn: ["oauth-personal", "oauth-business"] }),
   },
-  {
-    agent: "gemini",
-    available: async () => !!Bun.which("gemini"),
-    create: () => new AcpEngine({ agent: "gemini", name: "Gemini CLI", cmd: ["gemini", "--experimental-acp"] }),
-  },
 ];
 
 /**

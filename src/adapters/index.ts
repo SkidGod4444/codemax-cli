@@ -1,9 +1,9 @@
 import type { Adapter, AgentId } from "./types.ts";
 import { claude } from "./claude.ts";
 import { codex } from "./codex.ts";
-import { opencode, cursor, grok, antigravity, gemini, copilot, fake } from "./simple.ts";
+import { opencode, cursor, grok, antigravity, copilot, fake } from "./simple.ts";
 
-const real: Adapter[] = [claude, codex, opencode, cursor, grok, antigravity, gemini, copilot];
+const real: Adapter[] = [claude, codex, opencode, cursor, grok, antigravity, copilot];
 
 /**
  * The adapters, read at call time: tests set CODEMAX_FAKE_AGENT after another

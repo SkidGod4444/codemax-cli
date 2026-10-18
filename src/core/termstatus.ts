@@ -7,7 +7,8 @@ import type { AgentId } from "../adapters/types.ts";
  *
  * - Warp: its "cli-agent" channel (OSC 777 with the title `warp://cli-agent`
  *   and a JSON body). Warp only has built-in logos, so the tab shows the agent
- *   codemax is driving (Claude Code, Codex, Gemini, OpenCode, Cursor, Copilot);
+ *   codemax is driving (Claude Code, Codex, OpenCode, Cursor, Copilot, and
+ *   Antigravity under Warp's Gemini badge, Google's closest logo there);
  *   other agents get status without a badge. Warp raises its own notifications
  *   from these events, so codemax sends none of its own there.
  * - Other terminals: OSC 7501 program status (working / blocked / done), which
@@ -23,7 +24,7 @@ export interface TerminalSink {
 }
 
 /** Agent names Warp has a logo for (checked against Warp 2026.09). */
-export const WARP_AGENTS: Partial<Record<AgentId, string>> = { claude: "claude", codex: "codex", gemini: "gemini", opencode: "opencode", cursor: "cursor", copilot: "copilot" };
+export const WARP_AGENTS: Partial<Record<AgentId, string>> = { claude: "claude", codex: "codex", antigravity: "gemini", opencode: "opencode", cursor: "cursor", copilot: "copilot" };
 
 // Warp builds that advertise the protocol but drop it (from Warp's own adapters).
 const WARP_BROKEN: Record<string, string> = { stable: "v0.2026.03.25.08.24.stable_05", preview: "v0.2026.03.25.08.24.preview_05" };
