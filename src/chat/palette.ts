@@ -49,10 +49,10 @@ export class Palette {
     this.filter = opts.filter ?? "";
     this.maxRows = opts.maxRows ?? 8;
     this.box = new BoxRenderable(renderer, { id: `palette-${Date.now()}`, position: "absolute", left: 0, top: 0, width: "100%", zIndex: 800, flexDirection: "column", paddingX: 1, backgroundColor: C.panel });
-    this.titleRow = new TextRenderable(renderer, { content: "", fg: C.dim, bg: C.panel, wrapMode: "none", truncate: true, width: "100%" });
+    this.titleRow = new TextRenderable(renderer, { content: "", fg: C.panelDim, bg: C.panel, wrapMode: "none", truncate: true, width: "100%" });
     this.box.add(this.titleRow);
     for (let i = 0; i < this.maxRows; i++) {
-      const t = new TextRenderable(renderer, { content: "", bg: C.panel, wrapMode: "none", truncate: true, width: "100%" });
+      const t = new TextRenderable(renderer, { content: "", fg: C.panelText, bg: C.panel, wrapMode: "none", truncate: true, width: "100%" });
       this.rows.push(t);
       this.box.add(t);
     }
@@ -104,7 +104,8 @@ export class Palette {
         if (i === 0 && shown === 0) {
           row.visible = true;
           row.content = this.filter ? `  no matches for "${this.filter}"` : "  nothing here";
-          row.fg = C.dim;
+          row.fg = C.panelDim;
+          row.bg = C.panel;
           return;
         }
         row.visible = false;
@@ -117,7 +118,8 @@ export class Palette {
       const hint = it.hint ? `  ${it.hint}` : "";
       const bodyW = Math.max(10, width - 2 - 2 - labelW - hint.length);
       row.content = `${sel ? G.prompt : " "} ${label}${desc.slice(0, bodyW).padEnd(bodyW)}${hint}`;
-      row.fg = it.disabled ? C.dimmer : sel ? C.accent : undefined;
+      row.fg = it.disabled ? C.panelDim : sel ? C.selFg : C.panelText;
+      row.bg = sel ? C.selBg : C.panel;
     });
   }
 

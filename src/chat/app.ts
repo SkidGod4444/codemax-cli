@@ -1,10 +1,10 @@
 import { BoxRenderable, TextRenderable, TextareaRenderable, createCliRenderer, type CliRenderer, type KeyEvent } from "@opentui/core";
 import type { Config } from "../config.ts";
-import { hotkeyLabel } from "../config.ts";
+import { hotkeyLabel, saveConfigKey } from "../config.ts";
 import type { AgentId, QuotaStatus, SessionRef } from "../adapters/types.ts";
 import { listAdapters, getAdapter } from "../adapters/index.ts";
 import { Ledger } from "../core/ledger.ts";
-import { buildBrief } from "../core/brief.ts";
+import { buildBrief, buildCatchup } from "../core/brief.ts";
 import { diffStat } from "../core/git.ts";
 import { isExhausted, quotaLabel } from "../core/quota.ts";
 import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
@@ -15,7 +15,7 @@ import { blockers } from "../core/doctor.ts";
 import { Transcript, type AgentBlock } from "./transcript.ts";
 import { PermissionDialog } from "./permission.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
-import { C, DONE_VERBS, G, VERBS, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
+import { C, DONE_VERBS, G, TIPS, VERBS, applyTheme, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
 import { refreshLivePricesIfStale } from "../core/prices-live.ts";
@@ -23,7 +23,9 @@ import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budge
 import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, type Checkpoint } from "../core/checkpoint.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { shellArgv } from "../core/spawn.ts";
+import { platformArgv, shellArgv } from "../core/spawn.ts";
+import { cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
+import { TurnRecorder } from "../core/journal.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -33,11 +35,13 @@ interface Active {
   agent: AgentId;
   name: string;
   engine: Engine;
-  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string } | null;
+  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder } | null;
   replay: AgentBlock | null;
   unsubscribe: () => void;
   mode?: string;
   commands: { name: string; description?: string }[];
+  /** Context window fill, when the agent reports it. */
+  context?: { used: number; size: number };
 }
 
 interface Builtin {
@@ -83,11 +87,15 @@ export class ChatApp {
   private queue: string[] = [];
   private lastCtrlC = 0;
   private switching = false;
+  /** Set by quit(); async work that resumes afterwards (a handoff being built) stops. */
+  private closed = false;
   private resolveDone!: () => void;
   readonly done: Promise<void>;
   /** Test hooks. */
   engineFactory: (agent: AgentId) => Engine = createEngine;
   checkBlockers: (agent: AgentId) => ReturnType<typeof blockers> = blockers;
+  /** Copy-on-select target (tests swap it to keep the real clipboard untouched). */
+  copyText: (text: string) => Promise<boolean> = (text) => copyToClipboard(this.renderer, text);
 
   constructor(
     readonly renderer: CliRenderer,
@@ -107,7 +115,7 @@ export class ChatApp {
     root.add(this.working);
     this.dialogHost = new BoxRenderable(renderer, { id: "dialog-host", width: "100%", flexShrink: 0, flexDirection: "column" });
     root.add(this.dialogHost);
-    this.inputWrap = new BoxRenderable(renderer, { id: "input-wrap", width: "100%", flexShrink: 0, flexDirection: "column", border: ["top", "bottom"], borderStyle: "single", borderColor: C.dimmer });
+    this.inputWrap = new BoxRenderable(renderer, { id: "input-wrap", width: "100%", flexShrink: 0, flexDirection: "column", border: ["top", "bottom"], borderStyle: "single", borderColor: C.accent });
     const inputRow = new BoxRenderable(renderer, { id: "input-row", width: "100%", flexDirection: "row" });
     inputRow.add(new TextRenderable(renderer, { id: "input-prompt", content: `${G.prompt} `, width: 2, fg: C.accent }));
     this.input = new TextareaRenderable(renderer, {
@@ -135,6 +143,7 @@ export class ChatApp {
       "/mode to set permissions  shift + ⏎ for newline                     ? to toggle this help",
       "! to run a shell command  /model to pick a model                    /compact for a handoff summary",
       "@ to attach a file        /undo reverts the last turn's edits        /ask <agent> <msg> for a one-off",
+      "ctrl + o expands output   ctrl + ^ switches agent                    /theme dark | light | auto",
     ])
       this.shortcuts.add(new TextRenderable(renderer, { content: l, fg: C.dim, wrapMode: "none", truncate: true }));
     root.add(this.shortcuts);
@@ -143,6 +152,12 @@ export class ChatApp {
     footer.add(this.footerText);
     root.add(footer);
     renderer.root.add(root);
+    // Select text with the mouse to copy it (like a terminal's copy-on-select).
+    renderer.on("selection", (sel: { getSelectedText(): string } | null) => {
+      const text = sel?.getSelectedText?.() ?? "";
+      if (!text.trim()) return;
+      void this.copyText(text).then((ok) => this.setFlash(ok ? `copied ${text.length} chars` : "could not copy: no clipboard available"));
+    });
 
     renderer.keyInput.on("keypress", this.onKey);
     renderer.on("resize", () => this.palette?.render());
@@ -206,6 +221,11 @@ export class ChatApp {
         key.stopPropagation();
         this.input.clear();
       }
+      return;
+    }
+    if (key.name === "o" && key.ctrl) {
+      key.stopPropagation();
+      this.setFlash(this.transcript.toggleExpanded() ? "showing full output · ctrl+o to collapse" : "output collapsed");
       return;
     }
     if (key.name === "c" && key.ctrl) {
@@ -349,10 +369,11 @@ export class ChatApp {
     return text;
   }
 
-  private async checkpoint(active: Active, text: string) {
-    if (!this.config.checkpoints) return;
+  private async checkpoint(active: Active, text: string): Promise<Checkpoint | null> {
+    if (!this.config.checkpoints) return null;
     const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${text.slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
     if (cp) this.checkpoints.push({ ...cp, agent: active.agent });
+    return cp;
   }
 
   private async undo() {
@@ -410,11 +431,13 @@ export class ChatApp {
     this.transcript.user(text);
     try {
       await engine.start({ cwd: this.cwd });
-      const brief = this.ledger.turns().length ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: this.active?.agent, config: this.config }) : "";
+      const brief = this.ledger.turns().length ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: this.active?.agent, config: this.config, purpose: "context" }) : "";
       const body = this.withAttachments(text);
       await this.checkpoint(side, text);
       this.ledger.addTurns([{ ts: Date.now(), agent, sessionId: engine.session?.id ?? "?", role: "user", text }]);
-      await this.runTurn(side, brief ? `${brief}\n\n## This message (answer it; the user stays with ${this.active?.name ?? "another agent"})\n${body}` : body);
+      // One-off answers are not task work: they stay out of the journal (a "done" turn here
+      // would split the current task in two).
+      await this.runTurn(side, brief ? `${brief}\n\n## This message (answer it; the user stays with ${this.active?.name ?? "another agent"})\n${body}` : body, { journal: false });
     } catch (e: any) {
       this.transcript.error(`${adapter.name}: ${e?.message ?? e}`);
     } finally {
@@ -577,9 +600,11 @@ export class ChatApp {
   private async send(active: Active, text: string) {
     this.transcript.user(text);
     text = this.withAttachments(text);
-    await this.checkpoint(active, text);
+    const cp = await this.checkpoint(active, text);
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
-    await this.runTurn(active, text);
+    const rec = new TurnRecorder(this.ledger.journal, active.agent);
+    rec.user(text, cp?.sha);
+    await this.runTurn(active, text, { rec });
     await this.drainQueue(active);
   }
 
@@ -595,6 +620,8 @@ export class ChatApp {
       { name: "/switch", description: "Switch to another agent (keeps the conversation)", run: () => this.openSwitch() },
       { name: "/mode", description: "Set how often the agent asks permission", run: (a) => this.openModes(a) },
       { name: "/model", description: "Pick the model for the current agent", run: (a) => this.openModels(a) },
+      { name: "/effort", description: "Reasoning effort for the current agent, when it offers one", run: (a) => this.openEffort(a) },
+      { name: "/task", description: "The shared task: request, plan, who did what, where it stopped, files changed", run: () => void this.showTask() },
       { name: "/compact", description: "Have the agent write a project summary used in every handoff", run: () => void this.compact() },
       { name: "/diff", description: "Uncommitted changes in this repo", run: () => void this.showDiff() },
       { name: "/agents", description: "Show agents, sessions and quota", run: () => this.openSwitch() },
@@ -608,8 +635,26 @@ export class ChatApp {
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
+      { name: "/theme", description: "Colour theme: /theme dark | light | auto (saved; restart to apply everywhere)", run: (a) => this.setThemePref(a) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
+  }
+
+  private setThemePref(arg: string) {
+    const v = arg.trim().toLowerCase();
+    if (v !== "dark" && v !== "light" && v !== "auto") {
+      this.transcript.note(`theme is ${this.config.theme ?? "auto"} · use /theme dark, /theme light or /theme auto`);
+      return;
+    }
+    this.config.theme = v;
+    try {
+      saveConfigKey("theme", v);
+    } catch {
+      /* read-only home: still applies for this run */
+    }
+    if (v !== "auto") applyTheme(v);
+    this.transcript.note(`theme set to ${v}; new lines use it now, everything after a restart`, C.accent);
+    this.renderFooter();
   }
 
   private async command(line: string) {
@@ -660,10 +705,15 @@ export class ChatApp {
     if (!a) return;
     const models = a.engine.info?.models ?? [];
     if (!a.engine.setModel || !models.length) return this.transcript.note(`${a.name} does not expose model choice over its protocol`, C.dim);
+    if (models.length === 1 && !arg) {
+      const effort = this.effortOption(a);
+      return this.transcript.note(`${a.name} offers one model on your plan: ${models[0]!.name}${effort ? ` · /effort changes its reasoning effort (now ${effort.current})` : ""}`);
+    }
     const apply = async (id: string) => {
       try {
         await a.engine.setModel!(id);
         this.transcript.note(`model: ${id}`);
+        if (a.agent === "cursor") this.transcript.note("Cursor saves this as its default model, so Cursor uses it outside codemax too", C.warn);
         this.renderFooter();
       } catch (e: any) {
         this.transcript.error(`could not switch model: ${e?.message ?? e}`);
@@ -675,6 +725,45 @@ export class ChatApp {
     this.palette = new Palette(this.renderer, {
       title: `Model for ${a.name}`,
       items: models.map((m) => ({ label: m.id, description: `${m.name !== m.id ? m.name : ""}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id })),
+      onPick: (it) => {
+        this.closePalette();
+        void apply(it.value);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  private effortOption(a: Active) {
+    return a.engine.info?.options?.find((o) => o.category === "thought_level" || /effort|reasoning/i.test(o.id));
+  }
+
+  /** /effort: reasoning effort, for agents that expose it (Grok, Cursor variants). */
+  private openEffort(arg: string) {
+    const a = this.active;
+    if (!a) return;
+    const o = this.effortOption(a);
+    if (!o || !a.engine.setOption) return this.transcript.note(`${a.name} does not expose reasoning effort`, C.dim);
+    const apply = async (value: string) => {
+      try {
+        await a.engine.setOption!(o.id, value);
+        this.transcript.note(`${o.name.toLowerCase()}: ${value}`);
+        this.renderFooter();
+      } catch (e: any) {
+        this.transcript.error(`could not change ${o.name.toLowerCase()}: ${e?.message ?? e}`);
+      }
+    };
+    const want = arg.trim().toLowerCase();
+    if (want) {
+      const v = o.values.find((x) => x.value.toLowerCase() === want || x.name.toLowerCase() === want);
+      if (v) return void apply(v.value);
+      return this.transcript.note(`unknown ${o.name.toLowerCase()} "${arg}" (${o.values.map((x) => x.value).join(", ")})`, C.warn);
+    }
+    this.closePalette();
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `${o.name} for ${a.name}`,
+      items: o.values.map((v) => ({ label: v.value, description: `${v.name !== v.value ? v.name : ""}${v.value === o.current ? "  (current)" : ""}${v.description ? ` · ${v.description}` : ""}`, value: v.value })),
       onPick: (it) => {
         this.closePalette();
         void apply(it.value);
@@ -711,6 +800,34 @@ export class ChatApp {
     }
     block.footer("no summary saved");
     return false;
+  }
+
+  private async showTask() {
+    const j = this.ledger.journal;
+    const steps = j.steps();
+    const task = j.task(steps);
+    if (!task.request) return this.transcript.note("no task yet · send a request and every agent's steps are recorded here");
+    const t = (ts: number) => fmtTime(ts);
+    const lastEnd = [...task.steps].reverse().find((s) => s.kind === "end") as Extract<typeof steps[number], { kind: "end" }> | undefined;
+    const plan = [...task.steps].reverse().find((s) => s.kind === "plan") as Extract<typeof steps[number], { kind: "plan" }> | undefined;
+    const tools = task.steps.filter((s) => s.kind === "tool");
+    const byAgent = new Map<string, number>();
+    for (const s of tools) byAgent.set(s.agent, (byAgent.get(s.agent) ?? 0) + 1);
+    const status = !lastEnd ? "just started"
+      : lastEnd.outcome === "done" ? (plan?.entries.some((e) => e.status !== "completed") ? `in progress · ${lastEnd.agent} finished a turn at ${t(lastEnd.ts)}` : `done · ${lastEnd.agent} at ${t(lastEnd.ts)}`)
+      : lastEnd.outcome === "limit" ? `stopped · ${lastEnd.agent} hit its limit at ${t(lastEnd.ts)} · /switch to continue elsewhere`
+      : lastEnd.outcome === "cancelled" ? `paused · interrupted at ${t(lastEnd.ts)}`
+      : `stopped · ${lastEnd.agent} hit an error at ${t(lastEnd.ts)}`;
+    this.transcript.note(`task: "${task.request.text.replace(/\s+/g, " ").slice(0, 120)}" · started ${t(task.request.ts)}`, C.accent);
+    this.transcript.note(`status: ${status}`);
+    if (task.followUps.length) this.transcript.note(`follow-ups: ${task.followUps.length}`);
+    this.transcript.note(`steps: ${[...byAgent].map(([a, n]) => `${a} ${n}`).join(" · ") || "none yet"}`);
+    if (plan) for (const e of plan.entries) this.transcript.note(`${e.status === "completed" ? G.done_ : e.status === "in_progress" ? G.doing : G.todo} ${e.content}`, e.status === "in_progress" ? C.accent : C.dim);
+    const inFlight = (lastEnd?.inFlight ?? []).map((id) => tools.find((s) => s.id === id)).filter(Boolean) as { title: string }[];
+    for (const f of inFlight) this.transcript.note(`in flight when it stopped: ${f.title}`, C.warn);
+    const stat = task.request.checkpoint ? await checkpointDiffStat(this.cwd, task.request.checkpoint).catch(() => "") : "";
+    if (!task.request.checkpoint) this.transcript.note("file changes unknown: snapshots are off (checkpoints: false) or this is not a git repo");
+    else this.transcript.note(stat.trim() ? `changed since the task started:\n${stat.trim()}` : "no file changes since the task started");
   }
 
   private showUsage() {
@@ -882,11 +999,26 @@ export class ChatApp {
       this.setWorking(null);
       this.renderFooter();
       this.setTitle();
-      const hasHistory = this.ledger.turns().length > 0 || !!o.from;
-      if (hasHistory && (o.from || !resumed)) {
-        const brief = await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: o.from, reason: o.reason, config: this.config });
-        this.transcript.note(`handing over ${this.ledger.turns().length} earlier turns and the repo state (${brief.length} chars)`);
-        await this.runTurn(active, brief, { record: false });
+      // Only brief the agent when there is something to hand over: a brief with
+      // nothing in it costs a turn (and quota) for no context.
+      const hasHistory = this.ledger.turns().length > 0 || this.ledger.journal.steps().some((s) => s.kind === "user");
+      if (hasHistory) {
+        const input = { ledger: this.ledger, cwd: this.cwd, to: agent, from: o.from, reason: o.reason, config: this.config };
+        // A resumed session already remembers its own work: tell it only what others did since.
+        const catchup = resumed ? await buildCatchup(input) : null;
+        const packet = resumed ? catchup : await buildBrief(input);
+        if (this.closed || this.active !== active) return;
+        if (packet) {
+          const task = this.ledger.journal.task();
+          const what = resumed ? "catching it up on what the other agents did" : task.request ? `handing over the task: ${task.steps.filter((s) => s.kind === "tool").length} steps, the plan and the code diff` : "handing over the conversation and the repo state";
+          this.transcript.note(`${what} (${packet.length} chars)`);
+          // Snapshot first: the new agent may edit files in this turn, and both /undo and a
+          // later catch-up need the state from before it started.
+          const cp = await this.checkpoint(active, `handoff to ${agent}`);
+          const rec = new TurnRecorder(this.ledger.journal, agent);
+          rec.handoff({ from: o.from, reason: o.reason, mode: resumed ? "catchup" : "packet", chars: packet.length, checkpoint: cp?.sha });
+          await this.runTurn(active, packet, { record: false, rec });
+        }
       }
       await this.drainQueue(active);
     } catch (e: any) {
@@ -902,12 +1034,18 @@ export class ChatApp {
     }
   }
 
-  private async runTurn(active: Active, text: string, o: { record?: boolean } = {}) {
+  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean } = {}) {
     const block = this.transcript.agent();
-    active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS) };
+    const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
+    active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS), rec };
     this.startSpinner(active);
     this.setTitle(`✳ ${active.name} working`);
     const stop = await active.engine.prompt(text);
+    if (this.closed) {
+      active.turn?.rec?.end(stop);
+      active.turn = null;
+      return;
+    }
     const turn = active.turn;
     active.turn = null;
     this.stopSpinner();
@@ -916,8 +1054,14 @@ export class ChatApp {
     if (turn) {
       const dur = fmtDuration(Date.now() - turn.startedAt);
       block.footer(stop === "cancelled" ? `Interrupted after ${dur}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())}`);
-      if (o.record !== false) {
-        const reply = block.text().trim();
+      const reply = block.text().trim();
+      if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
+      turn.rec?.end(stop);
+      if (isLimitNotice(reply)) {
+        // The agent ended the turn with only a limit notice: treat it as running out, and leave
+        // the user's request unanswered in the ledger so the next agent is asked to finish it.
+        this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: reply.slice(0, 120), resetsAt: parseResetTime(reply), at: Date.now() });
+      } else if (o.record !== false) {
         if (reply || turn.tools.size) {
           this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "assistant", text: reply, tools: turn.tools.size ? [...turn.tools] : undefined }]);
         }
@@ -937,13 +1081,28 @@ export class ChatApp {
     switch (e.type) {
       case "text_delta":
         if (active.turn) active.turn.chars += e.text.length;
-        target().append(e.text);
+        active.turn?.rec?.textDelta(e.text, e.messageId);
+        target().append(e.text, e.messageId);
+        break;
+      case "thought_delta":
+        if (active.turn) {
+          active.turn.chars += e.text.length;
+          active.turn.verb = "Thinking";
+        }
+        active.turn?.rec?.thoughtDelta(e.text);
+        target().thought(e.text, e.messageId);
+        break;
+      case "plan":
+        active.turn?.rec?.plan(e.entries);
+        target().plan(e.entries);
         break;
       case "tool_call":
         active.turn?.tools.add(e.title.split(/[\s(]/)[0] ?? e.title);
+        active.turn?.rec?.tool(e.id, { title: e.title, kind: e.kind, status: e.status, input: e.input, output: e.output, files: e.files });
         target().tool(e.id, e.title, e.status, e.detail);
         break;
       case "tool_update":
+        active.turn?.rec?.tool(e.id, { title: e.title, status: e.status, input: e.input, output: e.output, files: e.files });
         target().toolUpdate(e.id, e.status, e.title, e.detail);
         break;
       case "permission_request":
@@ -960,9 +1119,14 @@ export class ChatApp {
         break;
       case "usage": {
         if (active.turn && typeof e.outputTokens === "number") active.turn.tokens += e.outputTokens;
+        if (typeof e.contextUsed === "number" && typeof e.contextSize === "number" && e.contextSize > 0) {
+          active.context = { used: e.contextUsed, size: e.contextSize };
+          this.renderFooter();
+        }
         if (typeof e.usedPercent === "number") this.onQuota({ agent: active.agent, usedPercent: e.usedPercent, exhausted: e.usedPercent >= 100, source: "probe", at: Date.now() });
         const hasTokens = (e.inputTokens ?? 0) + (e.outputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheWriteTokens ?? 0) > 0;
-        if (hasTokens || typeof e.costUsd === "number") {
+        // A zero cost with no tokens (free models report cost 0 on every update) is not usage.
+        if (hasTokens || (e.costUsd ?? 0) > 0) {
           const rec = priceRecord({
             ts: Date.now(),
             agent: active.agent,
@@ -989,7 +1153,9 @@ export class ChatApp {
         break;
       case "error":
         this.transcript.error(`${active.name}: ${e.message.slice(0, 500)}`);
-        if (e.kind === "quota") this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: e.message.slice(0, 120), at: Date.now() });
+        if (e.kind === "quota") active.turn?.rec?.markLimit(cleanError(e.message));
+        else active.turn?.rec?.markError(cleanError(e.message));
+        if (e.kind === "quota") this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: e.message.slice(0, 120), resetsAt: parseResetTime(e.message), at: Date.now() });
         if (e.kind === "crashed" && this.active === active && !this.switching) {
           active.turn = null;
           this.stopSpinner();
@@ -1050,7 +1216,11 @@ export class ChatApp {
       const approx = t.tokens || Math.round(t.chars / 4);
       const tok = approx ? ` · ↓ ${t.tokens ? "" : "~"}${approx} tokens` : "";
       if (this.permission) this.setWorking(`${glyph} Waiting for your approval (${secs}) · esc to say no`);
-      else this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · esc to interrupt`);
+      else {
+        const elapsed = Date.now() - t.startedAt;
+        const tip = elapsed > 8000 ? `  ⎿  tip: ${pick(TIPS, Math.floor(t.startedAt / 1000))}` : "";
+        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · esc to interrupt${tip}`);
+      }
     }, 120);
   }
 
@@ -1100,7 +1270,9 @@ export class ChatApp {
     else if (this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
     else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
-    if (a) right.push({ text: `${a.name}${a.engine.info?.currentModel ? ` · ${shortModelName(a.engine.info.currentModel)}` : ""}`, prio: 2 });
+    const effort = a ? this.effortOption(a)?.current : undefined;
+    if (a) right.push({ text: `${a.name}${a.engine.info?.currentModel ? ` · ${shortModelName(a.engine.info.currentModel)}` : ""}${effort ? ` ${effort}` : ""}`, prio: 2 });
+    if (a?.context) right.push({ text: `ctx ${Math.min(100, Math.round((a.context.used / a.context.size) * 100))}%`, prio: 1 });
     const bk: BudgetKey | null = a && this.config.budgets?.[a.agent] ? a.agent : this.config.budgets?.all ? "all" : null;
     if (bk) right.push({ text: `${fmtUsd(this.today.get(bk) ?? 0)}/${fmtUsd(this.config.budgets[bk])} today`, prio: 1 });
     else if (this.sessionCost > 0 || this.sessionTokens > 0) right.push({ text: `${fmtUsd(this.sessionCost)} /usage`, prio: 1 });
@@ -1144,7 +1316,10 @@ export class ChatApp {
     let from: AgentId | undefined;
     const pq = prev ? this.quota.get(prev.agent) : undefined;
     const nearLimit = o.resumeTask || isExhausted(pq) || (typeof pq?.usedPercent === "number" && pq.usedPercent >= 85);
-    if (prev && !prev.turn && this.config.summarizeOnSwitch && !nearLimit && this.ledger.turns().length >= 4) {
+    // The step journal hands over the whole task; a summary turn would only spend the
+    // outgoing agent's quota. Summaries are still written for older, journal-less ledgers.
+    const journaled = this.ledger.journal.steps().some((s) => s.kind === "user");
+    if (prev && !prev.turn && this.config.summarizeOnSwitch && !nearLimit && !journaled && this.ledger.turns().length >= 4) {
       const timer = setTimeout(() => void prev.engine.cancel(), 30_000);
       await this.compact({ quiet: true }).catch(() => false);
       clearTimeout(timer);
@@ -1160,12 +1335,16 @@ export class ChatApp {
     }
     const fromQ = from ? this.quota.get(from) : undefined;
     const overBudget = from && budgetLevel(this.today.get(from) ?? 0, this.config.budgets?.[from]) === "over";
-    const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota mid-task; finish the last user request` : overBudget ? `${from} hit its daily budget; finish the last user request` : o.resumeTask ? `${from} stopped; finish the last user request` : undefined;
+    // Only ask the next agent to finish a request when one is actually unanswered.
+    const lastTurn = this.ledger.turns().at(-1);
+    const pending = lastTurn?.role === "user" ? "; finish the last user request" : "";
+    const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota${pending ? " mid-task" : ""}${pending}` : overBudget ? `${from} hit its daily budget${pending}` : o.resumeTask ? `${from} stopped${pending}` : undefined;
     await this.launch(agent, { fresh, from, reason });
     this.switching = false;
   }
 
   async quit() {
+    this.closed = true;
     this.switching = true;
     const a = this.active;
     this.closePalette();
@@ -1185,7 +1364,9 @@ export class ChatApp {
 }
 
 function shortModelName(m: string): string {
-  return m.replace(/^claude-/, "").replace(/^(anthropic|openai|xai|google)\//, "");
+  // Cursor appends settings in brackets: "claude-opus-5-5[context=300k,effort=medium]".
+  const name = m.replace(/\[.*\]$/, "").replace(/^claude-/, "").replace(/^(anthropic|openai|xai|google|opencode)\//, "");
+  return !name || name === "default" ? "auto" : name;
 }
 
 function ago(ts: number): string {
@@ -1198,6 +1379,8 @@ function ago(ts: number): string {
 
 export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
+  const pref = config.theme ?? "auto";
+  applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
   const app = new ChatApp(renderer, config, ledger, cwd);
   try {
     await app.start(agent, fresh, { pick });
@@ -1210,4 +1393,30 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
     }
   }
   process.stdout.write(`codemax: bye. ledger at ${ledger.dir}\n`);
+}
+
+/** Copy text: the OS clipboard tool when there is one, plus OSC 52 (works over SSH and in most terminals). */
+async function copyToClipboard(renderer: CliRenderer, text: string): Promise<boolean> {
+  let osc = false;
+  try {
+    osc = renderer.copyToClipboardOSC52(text);
+  } catch {
+    /* terminal without OSC 52 */
+  }
+  const tools: string[][] =
+    process.platform === "darwin" ? [["pbcopy"]]
+    : process.platform === "win32" ? [["clip"]]
+    : [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]];
+  for (const cmd of tools) {
+    if (!Bun.which(cmd[0]!)) continue;
+    try {
+      const p = Bun.spawn(platformArgv(cmd), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+      p.stdin.write(text);
+      await p.stdin.end();
+      if ((await p.exited) === 0) return true;
+    } catch {
+      /* try the next tool */
+    }
+  }
+  return osc;
 }

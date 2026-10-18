@@ -28,8 +28,13 @@ export interface Config {
   checkpoints: boolean;
   /** Refresh the public price list weekly for /usage (set false to stay offline). */
   priceUpdates: boolean;
-  /** Max turns and chars included in a handoff brief. */
-  brief: { turns: number; maxChars: number; turnChars: number };
+  /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
+  theme: "auto" | "dark" | "light";
+  /**
+   * Handoff size. `resumeChars` bounds the resume packet (task, plan, steps, code diff);
+   * the others bound the older turn-summary brief used when there is no step journal.
+   */
+  brief: { turns: number; maxChars: number; turnChars: number; resumeChars: number };
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -43,7 +48,8 @@ export const DEFAULT_CONFIG: Config = {
   checkpoints: true,
   summarizeOnSwitch: true,
   bellAfterSeconds: 20,
-  brief: { turns: 10, maxChars: 8000, turnChars: 1200 },
+  theme: "auto",
+  brief: { turns: 10, maxChars: 8000, turnChars: 1200, resumeChars: 24000 },
 };
 
 export const CONFIG_PATH = join(CODEMAX_HOME, "config.json");
@@ -70,6 +76,19 @@ export function loadConfig(): Config {
   } catch {
     return structuredClone(DEFAULT_CONFIG);
   }
+}
+
+/** Write one setting back to config.json, leaving every other key as the user wrote it. */
+export function saveConfigKey<K extends keyof Config>(key: K, value: Config[K]) {
+  ensureDir(CODEMAX_HOME);
+  let raw: Record<string, unknown> = {};
+  try {
+    if (existsSync(CONFIG_PATH)) raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+  } catch {
+    return; // unreadable config: do not overwrite what the user wrote
+  }
+  raw[key] = value;
+  writeFileSync(CONFIG_PATH, JSON.stringify(raw, null, 2) + "\n");
 }
 
 export function hotkeyLabel(hotkeys: string[]): string {

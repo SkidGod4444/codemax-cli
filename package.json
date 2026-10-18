@@ -2,57 +2,64 @@
   "name": "codemax-cli",
   "version": "0.1.0",
   "description": "One terminal for every coding agent you pay for: drive Claude Code, Codex, OpenCode, Grok and Gemini CLI from one chat, on your subscriptions, with context that survives switching agents.",
-  "type": "module",
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "ai",
+    "claude-code",
+    "cli",
+    "codex",
+    "coding-agent",
+    "gemini-cli",
+    "grok",
+    "opencode",
+    "terminal",
+    "tui"
+  ],
+  "homepage": "https://github.com/SkidGod4444/codemax-cli#readme",
+  "bugs": {
+    "url": "https://github.com/SkidGod4444/codemax-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SkidGod4444/codemax-cli.git"
+  },
   "license": "AGPL-3.0-only",
+  "author": "Saidev Dhal",
+  "type": "module",
   "bin": {
-    "codemax": "./bin/codemax"
+    "codemax": "./bin/codemax.cjs"
   },
   "files": [
     "bin",
     "src",
     "README.md",
-    "PLAN.md",
     "LICENSE",
     "NOTICE",
     "TRADEMARKS.md"
   ],
   "engines": {
+    "node": ">=18",
     "bun": ">=1.3.0"
   },
   "scripts": {
     "dev": "bun src/cli.ts",
     "typecheck": "bun x tsc --noEmit",
     "test": "bun test",
-    "build": "bun build --compile --minify src/cli.ts --outfile dist/codemax && (test \"$(uname)\" != Darwin || codesign --force --sign - dist/codemax)"
+    "build": "bun build --compile --minify src/cli.ts --outfile dist/codemax && (test \"$(uname)\" != Darwin || codesign --force --sign - dist/codemax)",
+    "prepublishOnly": "bun run typecheck && bun test"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.9.0",
+    "@opentui/core": "0.6.6",
+    "@zed-industries/claude-code-acp": "0.16.2",
+    "bun": "^1.3.5"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.6.0"
   },
-  "dependencies": {
-    "@agentclientprotocol/sdk": "1.9.0",
-    "@opentui/core": "0.6.6",
-    "@zed-industries/claude-code-acp": "0.16.2"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/SkidGod4444/codemax-cli.git"
-  },
-  "homepage": "https://github.com/SkidGod4444/codemax-cli#readme",
-  "bugs": {
-    "url": "https://github.com/SkidGod4444/codemax-cli/issues"
-  },
-  "author": "Saidev Dhal",
-  "keywords": [
-    "coding-agent",
-    "claude-code",
-    "codex",
-    "opencode",
-    "grok",
-    "gemini-cli",
-    "acp",
-    "agent-client-protocol",
-    "tui",
-    "cli"
-  ]
+  "publishConfig": {
+    "access": "public"
+  }
 }

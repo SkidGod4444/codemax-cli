@@ -8,7 +8,7 @@ export const contentType = "image/png";
 
 const HEAD_1 = "Every AI coding plan";
 const HEAD_2 = "you pay for. One terminal.";
-const AGENTS = "Claude Code · Codex · OpenCode · Grok";
+const AGENTS = "Claude Code · Codex · OpenCode · Grok · Cursor";
 const TAG = "FREE · OPEN SOURCE · NO API KEYS";
 
 /** A tufted button where seams cross, matching the site. */

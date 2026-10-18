@@ -2,10 +2,15 @@ import type { AgentId } from "../adapters/types.ts";
 
 /** One normalized stream that every protocol (ACP, Codex app-server, …) is mapped onto. */
 export type EngineEvent =
-  | { type: "text_delta"; text: string }
-  | { type: "thought_delta"; text: string }
-  | { type: "tool_call"; id: string; title: string; kind?: string; status: ToolStatus; detail?: string }
-  | { type: "tool_update"; id: string; status?: ToolStatus; title?: string; detail?: string }
+  /** `messageId` changes between separate agent messages (e.g. before and after a tool call). */
+  | { type: "text_delta"; text: string; messageId?: string }
+  | { type: "thought_delta"; text: string; messageId?: string }
+  /**
+   * `detail` is a short display string. `input` (the tool's raw arguments), `output`
+   * (its full text result) and `files` are carried uncut for the journal, which caps them.
+   */
+  | { type: "tool_call"; id: string; title: string; kind?: string; status: ToolStatus; detail?: string; input?: unknown; output?: string; files?: string[] }
+  | { type: "tool_update"; id: string; status?: ToolStatus; title?: string; detail?: string; input?: unknown; output?: string; files?: string[] }
   | { type: "permission_request"; request: PermissionRequest }
   | { type: "plan"; entries: { content: string; status: string; priority?: string }[] }
   | { type: "mode"; modeId: string }
@@ -83,6 +88,17 @@ export interface EngineInfo {
   currentModel?: string;
   /** Subscription plan name when the agent reports one (e.g. "chatgpt pro"). */
   plan?: string;
+  /** Other settings the agent exposes as selects, e.g. Grok's reasoning effort. */
+  options?: EngineOption[];
+}
+
+export interface EngineOption {
+  id: string;
+  name: string;
+  /** ACP category, e.g. "thought_level" for reasoning effort. */
+  category?: string;
+  current?: string;
+  values: { value: string; name: string; description?: string }[];
 }
 
 /**
@@ -102,6 +118,8 @@ export interface Engine {
   cancel(): Promise<void>;
   setMode?(modeId: string): Promise<void>;
   setModel?(modelId: string): Promise<void>;
+  /** Change one of `info.options` (e.g. reasoning effort). */
+  setOption?(optionId: string, value: string): Promise<void>;
   close(): Promise<void>;
 }
 

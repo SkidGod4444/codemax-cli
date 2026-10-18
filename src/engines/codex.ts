@@ -2,6 +2,7 @@ import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason, ToolStatus } from "./types.ts";
 import { agentEnv } from "./env.ts";
 import { platformArgv } from "../core/spawn.ts";
+import { classifyError } from "./errors.ts";
 
 export interface CodexEngineOptions {
   /** Command for the app server. Default: codex app-server. */
@@ -200,8 +201,12 @@ export class CodexEngine implements Engine {
         const status: ToolStatus = method === "item/started" ? "in_progress" : it.status === "failed" || it.status === "declined" ? "failed" : method === "item/completed" ? "completed" : "in_progress";
         const title = it.type === "commandExecution" ? `$ ${Array.isArray(it.command) ? it.command.join(" ") : it.command ?? ""}` : it.type === "fileChange" ? `edit ${(it.changes ?? []).map((c: any) => c.path).join(", ")}` : it.type === "mcpToolCall" ? `${it.server}/${it.tool}` : it.type ?? "tool";
         const detail = it.aggregatedOutput ? String(it.aggregatedOutput).slice(-800) : undefined;
-        if (method === "item/started") this.emit({ type: "tool_call", id: it.id, title, kind: it.type, status, detail });
-        else this.emit({ type: "tool_update", id: it.id, status, title, detail });
+        const files = it.type === "fileChange" ? (it.changes ?? []).map((c: any) => c.path).filter(Boolean) : undefined;
+        const input = it.type === "commandExecution" ? { command: Array.isArray(it.command) ? it.command.join(" ") : it.command, cwd: it.cwd } : it.type === "mcpToolCall" ? it.arguments : undefined;
+        const changeDiffs = it.type === "fileChange" ? (it.changes ?? []).map((c: any) => c.diff ?? c.unified_diff ?? "").filter(Boolean).join("\n") : "";
+        const output = it.aggregatedOutput ? String(it.aggregatedOutput) : changeDiffs || undefined;
+        if (method === "item/started") this.emit({ type: "tool_call", id: it.id, title, kind: it.type, status, detail, input, files });
+        else this.emit({ type: "tool_update", id: it.id, status, title, detail, input, files, output });
         break;
       }
       case "item/commandExecution/outputDelta":
@@ -320,8 +325,6 @@ export class CodexEngine implements Engine {
   }
 }
 
-function classify(msg: string): "quota" | "auth" | "protocol" | "other" {
-  if (/usage limit|quota|rate.?limit|too many requests|429/i.test(msg)) return "quota";
-  if (/auth|login|unauthori|401/i.test(msg)) return "auth";
-  return "other";
+function classify(msg: string) {
+  return classifyError(msg);
 }

@@ -122,6 +122,18 @@ export async function checkpointDiffStat(cwd: string, sha: string): Promise<stri
   return (await run(cwd, ["diff", "--stat", sha, now])).out;
 }
 
+/**
+ * The full code change between a checkpoint and the working tree now, new files
+ * included (the snapshot uses a private index, so the user's staging is untouched).
+ */
+export async function checkpointDiff(cwd: string, sha: string): Promise<string> {
+  const dir = await gitDir(cwd);
+  if (!dir) return "";
+  const now = await treeOfWorkingDir(cwd, join(dir, "codemax-restore-index"));
+  if (!now) return "";
+  return (await run(cwd, ["diff", "--no-color", "--no-ext-diff", "-M", sha, now])).out;
+}
+
 export function ensureDirFor(path: string) {
   mkdirSync(dirname(path), { recursive: true });
 }

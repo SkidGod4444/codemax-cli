@@ -28,10 +28,10 @@ export class MenuOverlay {
       zIndex: 1000,
       border: true,
       borderStyle: "rounded",
-      borderColor: "#22d3ee",
-      backgroundColor: "#0b1020",
+      borderColor: "#ff4f86",
+      backgroundColor: "#3a0d25",
       title: " codemax ",
-      titleColor: "#22d3ee",
+      titleColor: "#ff4f86",
       paddingX: 1,
       flexDirection: "column",
     });
@@ -53,7 +53,7 @@ export class MenuOverlay {
     this.box.width = width;
     const out: { text: string; fg?: string }[] = [];
     out.push({ text: this.state.title, fg: "#94a3b8" });
-    if (this.state.notice) out.push({ text: `! ${this.state.notice}`, fg: "#fbbf24" });
+    if (this.state.notice) out.push({ text: `! ${this.state.notice}`, fg: "#ff9dbb" });
     out.push({ text: "" });
     this.state.rows.slice(0, ROWS_MAX).forEach((r, i) => {
       const sel = i === this.cursor;
@@ -62,7 +62,7 @@ export class MenuOverlay {
       const sess = r.session ? `session ${r.session.id.slice(0, 8)}… ${ago(r.session.lastUsedAt)}` : "no session";
       const q = quotaLabel(r.quota);
       const line = `${sel ? "›" : " "} ${i + 1}. ${pad(name, 24)} ${pad(inst, 24)} ${pad(sess, 30)} ${q}`;
-      out.push({ text: line.slice(0, width - 4), fg: sel ? "#22d3ee" : !r.installed ? "#64748b" : isExhausted(r.quota) ? "#f87171" : "#e5e7eb" });
+      out.push({ text: line.slice(0, width - 4), fg: sel ? "#ff4f86" : !r.installed ? "#64748b" : isExhausted(r.quota) ? "#ec3570" : "#e5e7eb" });
     });
     out.push({ text: "" });
     out.push({ text: `↑/↓ or 1-9 pick · Enter switch · f: ${this.fresh ? "fresh session" : "resume if a session exists"}`, fg: "#94a3b8" });

@@ -5,15 +5,15 @@
 <p align="center"><b>Every AI coding plan you pay for. One terminal.</b></p>
 
 <p align="center">
-  Claude Code · Codex · OpenCode · Grok · Gemini CLI
+  Claude Code · Codex · OpenCode · Grok · Cursor · Gemini CLI
 </p>
 
 ---
 
 ## What you get
 
-- **Never stop at a usage limit.** When one agent runs out, press Enter and the next one finishes the same task.
-- **One conversation across every agent.** Your history, project context and changes follow you when you switch.
+- **Never stop at a usage limit.** When one agent runs out, press Enter and the next one resumes the same task exactly where it stopped: same plan, the step that was in flight, and the real code changes so far.
+- **One shared task across every agent.** Every step each agent takes is recorded, so a switch is a resume, not a summary. An agent you return to is caught up on what the others did.
 - **Only the subscriptions you already pay for.** No API keys, no per-token bills, no new account.
 - **Every agent asks before acting.** Edits and commands wait for your approval, just like in each agent's own app.
 - **Undo any turn.** Roll back the files a reply changed with `/undo`.
@@ -70,8 +70,9 @@ cd codemax-cli && bun install && bun link
 | Codex | ChatGPT Plus / Pro | Supported |
 | OpenCode | Your OpenCode login | Supported |
 | Grok | SuperGrok | Supported |
+| Cursor Agent | Cursor plans | Supported (needs Cursor Agent 2026.10 or newer). Changing its model with `/model` also changes Cursor's own default. |
 | Gemini CLI | Google AI plans | Early, untested |
-| Cursor, Copilot | Your plan | In their own UI via `codemax --tui` |
+| Copilot CLI | GitHub Copilot plans | In its own UI via `codemax --tui` |
 
 ## Everyday keys
 
@@ -80,9 +81,13 @@ cd codemax-cli && bun install && bun link
 | `/switch` or **Ctrl+^** | Move to another agent, conversation included |
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
+| `/task` | The shared task: plan, who did what, where it stopped, files changed |
 | `/undo` | Revert the last turn's changes |
 | `/usage`, `/budget` | Usage and spend per agent |
-| `/model`, **Shift+Tab** | Pick the model, cycle permission mode |
+| `/model`, `/effort`, **Shift+Tab** | Pick the model or reasoning effort, cycle permission mode |
+| **Ctrl+O** | Expand cut-off tool output and thinking |
+| Select with the mouse | Copies the text to your clipboard |
+| `/theme dark`, `light`, `auto` | Colour theme (auto follows your terminal) |
 | **Esc** | Stop the current turn |
 | `/` | All commands |
 
@@ -98,7 +103,7 @@ cd codemax-cli && bun install && bun link
 | `routes` | `[]` | Send matching messages to a specific agent |
 | `checkpoints` | `true` | Snapshots for `/undo` |
 | `autoSwitch` | `true` | Offer a handoff when an agent runs out |
-| `summarizeOnSwitch` | `true` | Brief the next agent with a summary |
+| `summarizeOnSwitch` | `true` | Ask the outgoing agent for a summary before a switch. Only used for history recorded before the step journal; otherwise the next agent resumes from the recorded steps |
 | `priceUpdates` | `true` | Weekly price list refresh |
 | `hotkeys` | `["ctrl+/", "ctrl+^"]` | Keys that open the agent switcher |
 

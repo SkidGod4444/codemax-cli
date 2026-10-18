@@ -1,8 +1,9 @@
 import { ClientSideConnection, ndJsonStream, type Client, type Stream } from "@agentclientprotocol/sdk";
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason } from "./types.ts";
 import { agentEnv } from "./env.ts";
 import { platformArgv } from "../core/spawn.ts";
+import { classifyError } from "./errors.ts";
 
 export interface UsageSample {
   model?: string;
@@ -46,6 +47,10 @@ export class AcpEngine implements Engine {
   private turnActive = false;
   private tail: { read(): UsageSample[] } | null = null;
   private lastAgentCost = 0;
+  /** Agents that expose model/mode as ACP config options (OpenCode) are switched through them. */
+  private configIds: { model?: string; mode?: string } = {};
+  /** Context fill from the latest usage_update this turn; a token fallback for agents with no usage. */
+  private turnContext = 0;
 
   constructor(private opts: AcpEngineOptions) {
     this.agent = opts.agent;
@@ -77,16 +82,19 @@ export class AcpEngine implements Engine {
     let sessionId: string;
     let modes: any;
     let models: any;
+    let config: any;
     if (o.resume) {
       try {
         const r: any = await this.conn.loadSession({ sessionId: o.resume.id, cwd: o.cwd, mcpServers: [] });
         sessionId = o.resume.id;
         modes = r?.modes;
         models = r?.models;
+        config = r?.configOptions;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new session` });
         const s: any = await this.conn.newSession({ cwd: o.cwd, mcpServers: [] });
         sessionId = s.sessionId;
+        config = s.configOptions;
         modes = s.modes;
         models = s.models;
       }
@@ -95,6 +103,18 @@ export class AcpEngine implements Engine {
       sessionId = s.sessionId;
       modes = s.modes;
       models = s.models;
+      config = s.configOptions;
+    }
+    // ACP config options (OpenCode): a "model" / "mode" select stands in for models/modes.
+    const opt = (cat: string) => (Array.isArray(config) ? config.find((c: any) => c?.category === cat || c?.id === cat) : undefined);
+    const modelOpt = opt("model"), modeOpt = opt("mode");
+    if (modelOpt) this.configIds.model = modelOpt.id;
+    if (modeOpt) this.configIds.mode = modeOpt.id;
+    if (!models && modelOpt) {
+      models = { currentModelId: modelOpt.currentValue, availableModels: (modelOpt.options ?? []).map((x: any) => ({ modelId: x.value, name: x.name ?? x.value })) };
+    }
+    if (!modes && modeOpt) {
+      modes = { currentModeId: modeOpt.currentValue, availableModes: (modeOpt.options ?? []).map((x: any) => ({ id: x.value, name: x.name ?? x.value, description: x.description })) };
     }
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.tail = this.opts.usageTail?.(this.session) ?? null;
@@ -107,6 +127,7 @@ export class AcpEngine implements Engine {
       currentMode: modes?.currentModeId,
       models: (models?.availableModels ?? []).map((m: any) => ({ id: m.modelId ?? m.id, name: m.name ?? m.modelId ?? m.id })),
       currentModel: models?.currentModelId,
+      options: extraOptions(config),
     };
     this.emit({ type: "session", ref: this.session });
     if (this.info.currentMode) this.emit({ type: "mode", modeId: this.info.currentMode });
@@ -155,16 +176,16 @@ export class AcpEngine implements Engine {
   private onUpdate(u: any) {
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        if (u.content?.type === "text") this.emit({ type: "text_delta", text: u.content.text });
+        if (u.content?.type === "text") this.emit({ type: "text_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "agent_thought_chunk":
-        if (u.content?.type === "text") this.emit({ type: "thought_delta", text: u.content.text });
+        if (u.content?.type === "text") this.emit({ type: "thought_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "tool_call":
-        this.emit({ type: "tool_call", id: u.toolCallId, title: u.title ?? u.toolCallId, kind: u.kind, status: mapStatus(u.status), detail: summarize(u) });
+        this.emit({ type: "tool_call", id: u.toolCallId, title: u.title ?? u.toolCallId, kind: u.kind, status: mapStatus(u.status), detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
       case "tool_call_update":
-        this.emit({ type: "tool_update", id: u.toolCallId, status: u.status ? mapStatus(u.status) : undefined, title: u.title, detail: summarize(u) });
+        this.emit({ type: "tool_update", id: u.toolCallId, status: u.status ? mapStatus(u.status) : undefined, title: u.title, detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
       case "plan":
         this.emit({ type: "plan", entries: (u.entries ?? []).map((e: any) => ({ content: e.content, status: e.status, priority: e.priority })) });
@@ -180,8 +201,10 @@ export class AcpEngine implements Engine {
         const total = typeof u.cost?.amount === "number" ? u.cost.amount : undefined;
         const delta = total !== undefined ? Math.max(0, total - this.lastAgentCost) : undefined;
         if (total !== undefined) this.lastAgentCost = total;
-        // Without per-call token counts, the context submitted this turn is the closest input figure.
-        this.emit({ type: "usage", inputTokens: typeof u.used === "number" ? u.used : undefined, contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.info?.currentModel ?? `${this.opts.name.toLowerCase()} default model` });
+        // `used` is how full the context window is, not tokens spent: it feeds the context meter.
+        // Token counts come from the prompt response (or session files) at turn end.
+        if (typeof u.used === "number") this.turnContext = u.used;
+        this.emit({ type: "usage", contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.currentModelName() });
         break;
       }
       default:
@@ -192,17 +215,19 @@ export class AcpEngine implements Engine {
   async prompt(text: string): Promise<StopReason> {
     if (!this.conn || !this.session) throw new Error("engine not started");
     this.turnActive = true;
+    this.turnContext = 0;
     try {
-      const res = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] });
+      const res: any = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] });
       this.session.lastUsedAt = Date.now();
       this.flushUsage();
+      this.emitTurnUsage(res?.usage);
       const reason = mapStop(res.stopReason);
       this.emit({ type: "turn_end", stopReason: reason });
       return reason;
     } catch (e: any) {
       const message = e?.message ?? String(e);
       const data = JSON.stringify(e?.data ?? "");
-      const kind = /usage limit|quota|rate.?limit|429|insufficient/i.test(message + data) ? "quota" : /auth|login|unauthori|401/i.test(message + data) ? "auth" : "protocol";
+      const kind = classifyError(`${message} ${data}`);
       this.emit({ type: "error", kind, message: `${message} ${data}`.trim() });
       this.emit({ type: "turn_end", stopReason: "error" });
       return "error";
@@ -213,6 +238,32 @@ export class AcpEngine implements Engine {
 
   answerPermission(requestId: string, optionId: string) {
     this.pendingPermissions.get(requestId)?.(optionId);
+  }
+
+  private currentModelName(): string {
+    const id = this.info?.currentModel;
+    return id ?? `${this.opts.name.toLowerCase()} default model`;
+  }
+
+  /**
+   * Per-turn token counts from the ACP prompt response (OpenCode reports
+   * inputTokens / outputTokens / thoughtTokens / cachedReadTokens). Agents
+   * with session-file usage (Claude Code, Grok) are counted by the tail
+   * instead; with neither, the context fill is the closest input figure.
+   */
+  private emitTurnUsage(u: any) {
+    if (this.tail) return;
+    const n = (v: unknown) => (typeof v === "number" && v > 0 ? v : 0);
+    if (u && typeof u === "object") {
+      const cacheRead = n(u.cachedReadTokens ?? u.cacheReadTokens);
+      const input = Math.max(0, n(u.inputTokens) - cacheRead);
+      const output = n(u.outputTokens) + n(u.thoughtTokens ?? u.reasoningTokens);
+      if (input + output + cacheRead > 0) {
+        this.emit({ type: "usage", inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: n(u.cachedWriteTokens ?? u.cacheWriteTokens), model: this.currentModelName() });
+        return;
+      }
+    }
+    if (this.turnContext > 0) this.emit({ type: "usage", inputTokens: this.turnContext, model: this.currentModelName() });
   }
 
   /** Emit usage appended to the agent's session files since the last check. */
@@ -233,13 +284,25 @@ export class AcpEngine implements Engine {
 
   async setModel(modelId: string) {
     if (!this.conn || !this.session) return;
-    await (this.conn as any).unstable_setSessionModel({ sessionId: this.session.id, modelId });
+    // The current protocol switches models through a config option (Grok, Cursor, OpenCode).
+    // Agents that only list models (the Claude adapter) take the older session/set_model call,
+    // which this SDK no longer wraps, so it is sent as a raw method.
+    if (this.configIds.model) await this.conn.setSessionConfigOption({ sessionId: this.session.id, configId: this.configIds.model, value: modelId } as any);
+    else await this.conn.extMethod("session/set_model", { sessionId: this.session.id, modelId });
     if (this.info) this.info.currentModel = modelId;
+  }
+
+  async setOption(optionId: string, value: string) {
+    if (!this.conn || !this.session) return;
+    await this.conn.setSessionConfigOption({ sessionId: this.session.id, configId: optionId, value } as any);
+    const o = this.info?.options?.find((x) => x.id === optionId);
+    if (o) o.current = value;
   }
 
   async setMode(modeId: string) {
     if (!this.conn || !this.session) return;
-    await this.conn.setSessionMode({ sessionId: this.session.id, modeId });
+    if (this.configIds.mode) await this.conn.setSessionConfigOption({ sessionId: this.session.id, configId: this.configIds.mode, value: modeId } as any);
+    else await this.conn.setSessionMode({ sessionId: this.session.id, modeId });
     if (this.info) this.info.currentMode = modeId;
     this.emit({ type: "mode", modeId });
   }
@@ -262,6 +325,20 @@ export class AcpEngine implements Engine {
   }
 }
 
+/** Select-type config options other than model and mode (those have their own commands). */
+function extraOptions(config: unknown): EngineOption[] {
+  if (!Array.isArray(config)) return [];
+  return config
+    .filter((c: any) => c && c.type === "select" && c.category !== "model" && c.category !== "mode" && c.id !== "model" && c.id !== "mode" && Array.isArray(c.options))
+    .map((c: any) => ({
+      id: String(c.id),
+      name: String(c.name ?? c.id),
+      category: c.category,
+      current: c.currentValue,
+      values: c.options.map((o: any) => ({ value: String(o.value), name: String(o.name ?? o.value), description: o.description })),
+    }));
+}
+
 function mapStatus(s: string | undefined): "pending" | "in_progress" | "completed" | "failed" {
   if (s === "in_progress" || s === "completed" || s === "failed") return s;
   return "pending";
@@ -277,6 +354,42 @@ function mapStop(s: string | undefined): StopReason {
     default:
       return "other";
   }
+}
+
+function paths(u: any): string[] | undefined {
+  const out = new Set<string>();
+  for (const l of u.locations ?? []) if (l?.path) out.add(l.path);
+  for (const c of u.content ?? []) if (c?.type === "diff" && c.path) out.add(c.path);
+  return out.size ? [...out] : undefined;
+}
+
+/** The whole result of a tool call: text content, unified-style diffs, raw output. Uncut. */
+function full(u: any): { output?: string } {
+  const parts: string[] = [];
+  for (const c of u.content ?? []) {
+    if (c?.type === "content" && c.content?.type === "text") parts.push(c.content.text);
+    else if (c?.type === "diff") parts.push(simpleDiff(c.path, c.oldText, c.newText));
+  }
+  if (!parts.length && u.rawOutput !== undefined) parts.push(typeof u.rawOutput === "string" ? u.rawOutput : JSON.stringify(u.rawOutput));
+  return parts.length ? { output: parts.join("\n") } : {};
+}
+
+/** A minimal line diff for ACP diff content (old/new file text): changed region with context. */
+export function simpleDiff(path: string, oldText: string | null | undefined, newText: string): string {
+  const a = (oldText ?? "").split("\n");
+  const b = (newText ?? "").split("\n");
+  if (!oldText) return [`--- /dev/null`, `+++ ${path}`, ...b.map((l) => `+${l}`)].join("\n");
+  let s = 0;
+  while (s < a.length && s < b.length && a[s] === b[s]) s++;
+  let ea = a.length - 1, eb = b.length - 1;
+  while (ea >= s && eb >= s && a[ea] === b[eb]) { ea--; eb--; }
+  const ctx = 2, from = Math.max(0, s - ctx);
+  const lines = [`--- ${path}`, `+++ ${path}`, `@@ line ${from + 1} @@`];
+  for (let i = from; i < s; i++) lines.push(` ${a[i]}`);
+  for (let i = s; i <= ea; i++) lines.push(`-${a[i]}`);
+  for (let i = s; i <= eb; i++) lines.push(`+${b[i]}`);
+  for (let i = ea + 1; i <= Math.min(a.length - 1, ea + ctx); i++) lines.push(` ${a[i]}`);
+  return lines.join("\n");
 }
 
 function summarize(u: any): string | undefined {

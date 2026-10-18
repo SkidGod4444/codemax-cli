@@ -56,8 +56,8 @@ export class App {
 
     const root = new BoxRenderable(renderer, { id: "codemax-root", width: "100%", height: "100%", flexDirection: "column" });
     this.paneHost = new BoxRenderable(renderer, { id: "codemax-pane-host", width: "100%", flexGrow: 1, flexShrink: 1, flexDirection: "column" });
-    const bar = new BoxRenderable(renderer, { id: "codemax-status", width: "100%", height: 1, backgroundColor: "#1e293b", paddingX: 1 });
-    this.statusText = new TextRenderable(renderer, { id: "codemax-status-text", content: "", fg: "#e2e8f0" });
+    const bar = new BoxRenderable(renderer, { id: "codemax-status", width: "100%", height: 1, backgroundColor: "#3a0d25", paddingX: 1 });
+    this.statusText = new TextRenderable(renderer, { id: "codemax-status-text", content: "", fg: "#ffffff" });
     bar.add(this.statusText);
     root.add(this.paneHost);
     root.add(bar);

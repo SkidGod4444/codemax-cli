@@ -39,8 +39,8 @@ export function styleMarkdown(text: string): StyledText {
 }
 
 function diffOrCode(line: string): TextChunk[] {
-  if (/^\+(?!\+\+)/.test(line)) return [fg("#4ade80")(`  ${line}`)];
-  if (/^-(?!--)/.test(line)) return [fg("#f87171")(`  ${line}`)];
+  if (/^\+(?!\+\+)/.test(line)) return [fg(C.diffAdd)(`  ${line}`)];
+  if (/^-(?!--)/.test(line)) return [fg(C.diffDel)(`  ${line}`)];
   if (/^@@/.test(line)) return [fg(C.accent)(`  ${line}`)];
   return [dim(`  ${line}`)];
 }
@@ -67,8 +67,8 @@ export function styleToolOutput(text: string): StyledText {
   const chunks: TextChunk[] = [];
   const lines = text.split("\n");
   lines.forEach((line, i) => {
-    if (/^\+(?!\+\+)/.test(line)) chunks.push(fg("#4ade80")(line));
-    else if (/^-(?!--)/.test(line)) chunks.push(fg("#f87171")(line));
+    if (/^\+(?!\+\+)/.test(line)) chunks.push(fg(C.diffAdd)(line));
+    else if (/^-(?!--)/.test(line)) chunks.push(fg(C.diffDel)(line));
     else if (/^@@/.test(line)) chunks.push(fg(C.accent)(line));
     else chunks.push(dim(line));
     if (i < lines.length - 1) chunks.push(...plain("\n"));

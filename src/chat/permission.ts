@@ -37,12 +37,12 @@ export class PermissionDialog {
       flexShrink: 0,
       border: true,
       borderStyle: "rounded",
-      borderColor: C.warn,
+      borderColor: C.accent,
       paddingX: 1,
       flexDirection: "column",
     });
     const what = request.title.length > 160 ? request.title.slice(0, 157) + "…" : request.title;
-    this.box.add(new TextRenderable(renderer, { content: `${agentName} wants to ${verb(request.kind, what)}`, fg: C.warn }));
+    this.box.add(new TextRenderable(renderer, { content: `${agentName} wants to ${verb(request.kind, what)}`, fg: C.accent }));
     this.box.add(new TextRenderable(renderer, { content: what, wrapMode: "word", width: "100%" }));
     const detail = request.detail && !request.title.includes(request.detail.split("\n")[0]!.replace(/^\w+: /, "")) ? request.detail : undefined;
     if (detail) this.box.add(new TextRenderable(renderer, { content: detail.slice(0, 500), fg: C.dim, wrapMode: "word", width: "100%" }));

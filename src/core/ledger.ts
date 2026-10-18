@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { ensureDir, projectDir } from "./paths.ts";
 import type { AgentId, QuotaStatus, SessionRef, Turn } from "../adapters/types.ts";
 import type { UsageRecord } from "./usage.ts";
+import { Journal } from "./journal.ts";
 
 export interface LedgerEvent {
   ts: number;
@@ -19,13 +20,16 @@ export interface LedgerEvent {
  *  - sessions.json   latest vendor session per agent (for native resume)
  *  - events.jsonl    switches, quota detections, notes
  *  - summary.md      optional hand- or agent-written compacted summary
+ *  - journal.jsonl   every step every agent took (see journal.ts); handoffs resume from it
  */
 export class Ledger {
   readonly dir: string;
+  readonly journal: Journal;
   private seen = new Set<string>();
 
   constructor(readonly cwd: string, dir?: string) {
     this.dir = ensureDir(dir ?? projectDir(cwd));
+    this.journal = new Journal(this.dir);
     for (const t of this.turns()) this.seen.add(turnKey(t));
   }
 

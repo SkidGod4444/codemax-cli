@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import type { AgentId } from "../adapters/types.ts";
@@ -43,16 +43,31 @@ const CLAUDE_ADAPTER_PKG = "@zed-industries/claude-code-acp@0.16.2";
  * fetched once by bunx and cached.
  */
 function claudeAdapterCmd(): string[] | null {
-  const candidates = [
-    join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-code-acp"),
-    join(process.cwd(), "node_modules", ".bin", "claude-code-acp"),
-  ];
-  for (const c of candidates) if (existsSync(c)) return [c];
+  const runningOnBun = basename(process.execPath).toLowerCase().startsWith("bun");
+  if (process.platform !== "win32") {
+    const candidates = [
+      join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-code-acp"),
+      join(process.cwd(), "node_modules", ".bin", "claude-code-acp"),
+    ];
+    for (const c of candidates) if (existsSync(c)) return [c];
+  }
+  // The installed package's own entry, run with this Bun: works where .bin shims
+  // do not (Windows) and when no `bun` is on PATH (installed through npm).
+  if (runningOnBun) {
+    try {
+      const pkgJson = Bun.resolveSync("@zed-industries/claude-code-acp/package.json", import.meta.dir);
+      const bin = JSON.parse(readFileSync(pkgJson, "utf8")).bin;
+      const entry = typeof bin === "string" ? bin : bin?.["claude-code-acp"];
+      if (entry && existsSync(join(dirname(pkgJson), entry))) return [process.execPath, join(dirname(pkgJson), entry)];
+    } catch {
+      /* not installed next to codemax */
+    }
+  }
   const onPath = Bun.which("claude-code-acp");
   if (onPath) return [onPath];
-  const bunx = Bun.which("bunx") ?? (Bun.which("bun") ? [Bun.which("bun")!, "x"] : null);
-  if (!bunx) return null;
-  return Array.isArray(bunx) ? [...bunx, CLAUDE_ADAPTER_PKG] : [bunx, CLAUDE_ADAPTER_PKG];
+  const bun = Bun.which("bun") ?? (runningOnBun ? process.execPath : null);
+  const bunx = Bun.which("bunx") ? [Bun.which("bunx")!] : bun ? [bun, "x"] : null;
+  return bunx ? [...bunx, CLAUDE_ADAPTER_PKG] : null;
 }
 
 const factories: EngineFactory[] = [
@@ -91,6 +106,13 @@ const factories: EngineFactory[] = [
     available: async () => !!Bun.which("grok"),
     // Grok takes its permission mode from the user's Claude Code settings; see grokPermissionNote().
     create: () => new AcpEngine({ agent: "grok", name: "Grok", cmd: ["grok", "agent", "stdio"], permissionPrompts: !grokPermissionNote(), usageTail: (s) => grokUsageTail(s.cwd, s.id) }),
+  },
+  {
+    agent: "cursor",
+    available: async () => !!Bun.which("cursor-agent"),
+    // `cursor-agent acp` (Cursor Agent 2026.10+) asks before shell commands and edits, and
+    // exposes its modes (agent / plan / ask) and models as ACP config options.
+    create: () => new AcpEngine({ agent: "cursor", name: "Cursor Agent", cmd: ["cursor-agent", "acp"] }),
   },
   {
     agent: "gemini",
