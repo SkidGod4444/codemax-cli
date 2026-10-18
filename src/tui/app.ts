@@ -68,10 +68,15 @@ export class App {
     this.setStatus("");
   }
 
-  async start(agent: AgentId, fresh: boolean) {
+  /** `explicit`: the user named this agent (--agent), so never start a different one. */
+  async start(agent: AgentId, fresh: boolean, o: { explicit?: boolean } = {}) {
     await this.refreshDetect();
-    const first = this.detect.get(agent)?.installed ? agent : this.firstInstalled();
+    const installed = this.detect.get(agent)?.installed;
+    if (!installed && o.explicit) throw new Error(`${agent} is not installed. Installed: ${this.installedList() || "none"}`);
+    const first = installed ? agent : this.firstInstalled();
     if (!first) throw new Error("no supported agent CLI found on PATH");
+    // Under tests a fallback must never reach a real agent (no logins, no quota).
+    if (first !== agent && process.env.NODE_ENV === "test") throw new Error(`test asked for ${agent}, which is not available; refusing to fall back to ${first}`);
     if (first !== agent) this.setStatus(`${agent} not found, starting ${first}`);
     await this.launch(getAdapter(first), { fresh });
     return this.done;
@@ -282,6 +287,10 @@ export class App {
     );
   }
 
+  private installedList(): string {
+    return [...this.detect.entries()].filter(([, d]) => d.installed).map(([id]) => id).join(", ");
+  }
+
   private firstInstalled(): AgentId | undefined {
     return listAdapters(this.config.order).find((a) => this.detect.get(a.id)?.installed)?.id;
   }
@@ -360,11 +369,11 @@ export class App {
 }
 
 /** Run codemax on the real terminal until the user quits. */
-export async function runApp(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean) {
+export async function runApp(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, explicit = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
   const app = new App(renderer, config, ledger, cwd);
   try {
-    await app.start(agent, fresh);
+    await app.start(agent, fresh, { explicit });
   } finally {
     renderer.destroy();
     try {

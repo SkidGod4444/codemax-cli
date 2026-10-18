@@ -4,6 +4,7 @@ import { diffStat, headLine, recentCommits } from "./git.ts";
 import { checkpointDiff } from "./checkpoint.ts";
 import { BRIEF_MARKER, type Ledger } from "./ledger.ts";
 import type { Step, StepOf } from "./journal.ts";
+import { fmtTime12 } from "./time.ts";
 
 export interface BriefInput {
   ledger: Ledger;
@@ -161,7 +162,7 @@ export async function buildCatchup(input: BriefInput): Promise<string | null> {
 function whereItStopped(steps: Step[], end: StepOf<"end"> | undefined): string[] {
   const out: string[] = [];
   if (!end) return ["The last agent had not finished its first turn."];
-  const when = new Date(end.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const when = fmtTime12(end.ts);
   const why =
     end.outcome === "limit" ? `ran out of its usage limit${end.detail ? ` ("${oneLine(end.detail, 140)}")` : ""}`
     : end.outcome === "cancelled" ? "was interrupted by the user"

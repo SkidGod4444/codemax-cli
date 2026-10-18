@@ -18,6 +18,7 @@ import { diagnose } from "./core/doctor.ts";
 import { renderUsageTable, sumCost } from "./core/usage.ts";
 import { fmtUsd, priceFor, priceProvenance, resetPriceCache } from "./core/pricing.ts";
 import { fetchLivePrices, loadLivePrices, LIVE_PRICES_PATH } from "./core/prices-live.ts";
+import { fmtDateTime12 } from "./core/time.ts";
 
 const HELP = `codemax — one terminal for all your coding agents
 
@@ -73,9 +74,9 @@ async function main(argv: string[]) {
         const orch = new Orchestrator(config, ledger, cwd);
         await orch.start(agent, args.includes("--fresh"));
       } else if (args.includes("--tui") || !hasEngine(agent)) {
-        await runApp(config, ledger, cwd, agent, args.includes("--fresh"));
+        await runApp(config, ledger, cwd, agent, args.includes("--fresh"), !!agentFlag);
       } else {
-        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag);
+        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag, !!agentFlag);
       }
       process.exit(0);
     }
@@ -105,7 +106,7 @@ async function main(argv: string[]) {
       const last = events.slice(-5);
       if (last.length) {
         console.log("recent events:");
-        for (const e of last) console.log(`  ${new Date(e.ts).toLocaleString()}  ${e.kind}  ${e.agent ?? ""}${e.to ? ` → ${e.to}` : ""}  ${e.detail ?? ""}`);
+        for (const e of last) console.log(`  ${fmtDateTime12(e.ts)}  ${e.kind}  ${e.agent ?? ""}${e.to ? ` → ${e.to}` : ""}  ${e.detail ?? ""}`);
       }
       return;
     }
@@ -114,7 +115,7 @@ async function main(argv: string[]) {
       const turns = new Ledger(cwd).turns().slice(-n);
       for (const t of turns) {
         const who = t.role === "user" ? "USER" : `${t.agent.toUpperCase()}`;
-        console.log(`\n[${new Date(t.ts).toLocaleTimeString()}] ${who}${t.tools?.length ? ` (tools: ${t.tools.join(", ")})` : ""}\n${t.text.slice(0, 600)}`);
+        console.log(`\n[${fmtDateTime12(t.ts)}] ${who}${t.tools?.length ? ` (tools: ${t.tools.join(", ")})` : ""}\n${t.text.slice(0, 600)}`);
       }
       return;
     }
@@ -218,7 +219,7 @@ async function main(argv: string[]) {
       }
       const all = ledger.quota();
       if (!Object.keys(all).length) return console.log("no quota state recorded");
-      for (const q of Object.values(all)) console.log(`${q.agent.padEnd(9)} ${quotaLabel(q) || "ok"}  (${q.source}, ${new Date(q.at).toLocaleString()}${q.detail ? `, ${q.detail}` : ""})`);
+      for (const q of Object.values(all)) console.log(`${q.agent.padEnd(9)} ${quotaLabel(q) || "ok"}  (${q.source}, ${fmtDateTime12(q.at)}${q.detail ? `, ${q.detail}` : ""})`);
       return;
     }
     case "keys": {

@@ -61,3 +61,25 @@ test("installer, source and standalone installs check GitHub releases; npm insta
   expect(await checkForUpdate("0.1.3", { fetchImpl: both, force: true, source: "npm" })).toBeNull();
   expect(urls[0]).toContain("api.github.com/repos/SkidGod4444/codemax-cli/releases/latest");
 });
+
+test("model menus put the newest models first, Default/Auto pinned, ties in the agent's order", async () => {
+  const { sortModels, modelVersion } = await import("../src/chat/models.ts");
+  expect(modelVersion({ id: "claude-haiku-4-5-20251001", name: "claude-haiku-4-5-20251001" })).toBe(4.05);
+  expect(modelVersion({ id: "x", name: "GPT-6.1-Sol" })).toBe(6.01);
+  const out = sortModels([
+    { id: "gpt-5.6-luna", name: "GPT-5.6-Luna" },
+    { id: "default[]", name: "Auto" },
+    { id: "gpt-6-sol", name: "GPT-6-Sol" },
+    { id: "gpt-6.1-sol", name: "GPT-6.1-Sol" },
+    { id: "composer-2.5", name: "composer-2.5" },
+    { id: "mystery", name: "Mystery" },
+  ]).map((m) => m.name);
+  expect(out).toEqual(["Auto", "GPT-6.1-Sol", "GPT-6-Sol", "GPT-5.6-Luna", "composer-2.5", "Mystery"]);
+});
+
+test("times are always 12-hour, whatever the system locale", async () => {
+  const { fmtTime12, fmtDateTime12 } = await import("../src/core/time.ts");
+  expect(fmtTime12(new Date(2026, 9, 18, 19, 25).getTime())).toBe("7:25 PM");
+  expect(fmtTime12(new Date(2026, 9, 18, 0, 5).getTime())).toBe("12:05 AM");
+  expect(fmtDateTime12(new Date(2026, 9, 18, 19, 25).getTime())).toBe("Oct 18, 7:25 PM");
+});

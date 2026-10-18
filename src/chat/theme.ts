@@ -1,3 +1,4 @@
+import { fmtTime12 } from "../core/time.ts";
 /**
  * Glyphs and colours. The codemax brand theme: pink is the accent and nothing
  * else, plum is the one dark ink, and warnings, errors and success keep their
@@ -153,6 +154,7 @@ export function fmtDuration(ms: number): string {
   return `${m}m ${s - m * 60}s`;
 }
 
+/** 12-hour, always ("7:25 PM"). */
 export function fmtTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return fmtTime12(ts);
 }

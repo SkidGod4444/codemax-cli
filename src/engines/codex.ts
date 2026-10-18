@@ -1,8 +1,9 @@
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason, ToolStatus } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason, ToolStatus } from "./types.ts";
 import { agentEnv } from "./env.ts";
 import { platformArgv } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
+import pkg from "../../package.json" with { type: "json" };
 
 export interface CodexEngineOptions {
   /** Command for the app server. Default: codex app-server. */
@@ -18,6 +19,10 @@ export interface CodexEngineOptions {
  * `answerPermission`.
  */
 export class CodexEngine implements Engine {
+  /** Models this account can use, from `model/list`. */
+  private catalog: { id: string; name: string; efforts: string[]; defaultEffort?: string }[] = [];
+  /** Reasoning effort chosen with /effort (sent with each turn); undefined = the model's default. */
+  private effort: string | undefined;
   readonly agent: AgentId = "codex";
   info: EngineInfo | null = null;
   session: EngineSessionRef | null = null;
@@ -49,7 +54,7 @@ export class CodexEngine implements Engine {
     this.cwd = o.cwd;
     this.transport = this.opts.transport ?? this.spawn(o.cwd);
     this.transport.onLine((line) => this.onLine(line));
-    const init = await this.request("initialize", { clientInfo: { name: "codemax", version: "0.3.0" }, capabilities: {} });
+    const init = await this.request("initialize", { clientInfo: { name: "codemax", version: pkg.version }, capabilities: {} });
     this.notify("initialized", {});
 
     let thread: any;
@@ -65,6 +70,9 @@ export class CodexEngine implements Engine {
     this.model = thread.model ?? undefined;
     this.session = { agent: "codex", id: thread.id, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     const account: any = await this.request("account/read", {}).catch(() => null);
+    // The models this account can use, straight from Codex: never a list of our own.
+    // An older Codex without model/list must not hold up startup: give it a few seconds.
+    this.catalog = await Promise.race([this.listModels(), Bun.sleep(4000).then(() => [])]).catch(() => []);
     this.info = {
       agent: "codex",
       name: "Codex",
@@ -74,8 +82,9 @@ export class CodexEngine implements Engine {
         { id: "never", name: "full auto (no approvals)" },
       ],
       currentMode: "on-request",
-      models: [...new Set([this.model, "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"].filter(Boolean))].map((id) => ({ id: id!, name: id! })),
+      models: this.catalog.length ? this.catalog.map((m) => ({ id: m.id, name: m.name })) : this.model ? [{ id: this.model, name: this.model }] : [],
       currentModel: this.model,
+      options: this.effortOptions(),
       plan: account?.account?.planType ? `chatgpt ${account.account.planType}` : undefined,
     };
     this.emit({ type: "session", ref: this.session });
@@ -281,7 +290,7 @@ export class CodexEngine implements Engine {
     const done = new Promise<StopReason>((resolve) => (this.turn = { resolve }));
     try {
       const approvalPolicy = this.info?.currentMode === "never" ? "never" : "on-request";
-      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }], model: this.model, approvalPolicy });
+      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }], model: this.model, approvalPolicy, ...(this.effort ? { effort: this.effort } : {}) });
       if (this.turn) this.turn.id = res?.turn?.id;
     } catch (e: any) {
       const msg = `${e?.message ?? e} ${JSON.stringify(e?.data ?? "")}`.trim();
@@ -314,6 +323,46 @@ export class CodexEngine implements Engine {
   async setModel(modelId: string) {
     this.model = modelId;
     if (this.info) this.info.currentModel = modelId;
+    // Reasoning efforts differ per model: keep the chosen one only if the new model has it.
+    const efforts = this.catalog.find((m) => m.id === modelId)?.efforts ?? [];
+    if (this.effort && !efforts.includes(this.effort)) this.effort = undefined;
+    if (this.info) this.info.options = this.effortOptions();
+  }
+
+  async setOption(optionId: string, value: string) {
+    if (optionId !== "effort") return;
+    this.effort = value;
+    if (this.info) this.info.options = this.effortOptions();
+  }
+
+  /** `model/list`, all pages, hidden models left out. */
+  private async listModels(): Promise<{ id: string; name: string; efforts: string[]; defaultEffort?: string }[]> {
+    const out: { id: string; name: string; efforts: string[]; defaultEffort?: string }[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const r: any = await this.request("model/list", cursor ? { cursor } : {});
+      for (const m of r?.data ?? []) {
+        if (m?.hidden) continue;
+        const id = String(m.model ?? m.id ?? "");
+        if (!id) continue;
+        out.push({
+          id,
+          name: String(m.displayName ?? id),
+          efforts: (m.supportedReasoningEfforts ?? []).map((e: any) => String(e?.reasoningEffort ?? e)).filter(Boolean),
+          defaultEffort: m.defaultReasoningEffort ? String(m.defaultReasoningEffort) : undefined,
+        });
+      }
+      cursor = r?.nextCursor ?? undefined;
+      if (!cursor) break;
+    }
+    return out;
+  }
+
+  /** The current model's reasoning efforts, as Codex lists them. */
+  private effortOptions(): EngineOption[] {
+    const m = this.catalog.find((x) => x.id === this.model);
+    if (!m?.efforts.length) return [];
+    return [{ id: "effort", name: "Reasoning effort", category: "thought_level", current: this.effort ?? m.defaultEffort ?? "default", values: m.efforts.map((e) => ({ value: e, name: e })) }];
   }
 
   async close() {

@@ -37,6 +37,8 @@ export class Palette {
   private rows: TextRenderable[] = [];
   private titleRow: TextRenderable;
   private cursor = 0;
+  /** First visible row: the window scrolls so every item can be reached with the arrows. */
+  private offset = 0;
   private filter: string;
   private matches: PaletteItem[] = [];
   private maxRows: number;
@@ -90,11 +92,16 @@ export class Palette {
 
   render() {
     const { top, width } = this.anchor();
-    const visible = this.matches.slice(0, this.maxRows);
+    // Keep the highlighted row inside the visible window.
+    if (this.cursor < this.offset) this.offset = this.cursor;
+    if (this.cursor >= this.offset + this.maxRows) this.offset = this.cursor - this.maxRows + 1;
+    this.offset = Math.max(0, Math.min(this.offset, this.matches.length - this.maxRows));
+    const visible = this.matches.slice(this.offset, this.offset + this.maxRows);
     const shown = visible.length;
-    const titleLines = this.opts.title ? 1 : 0;
-    this.titleRow.visible = !!this.opts.title;
-    this.titleRow.content = this.opts.title ?? "";
+    const more = this.matches.length > this.maxRows;
+    const titleLines = this.opts.title || more ? 1 : 0;
+    this.titleRow.visible = titleLines > 0;
+    this.titleRow.content = `${this.opts.title ?? ""}${more ? `${this.opts.title ? " · " : ""}${this.cursor + 1}/${this.matches.length} · ↑↓ to scroll` : ""}`;
     this.box.height = shown + titleLines + (shown === 0 ? 1 : 0);
     this.box.top = Math.max(0, top - this.box.height);
     const labelW = Math.min(Math.max(28, Math.floor(width * 0.35)), Math.max(10, ...visible.map((v) => v.label.length + 2)));
@@ -112,7 +119,7 @@ export class Palette {
         return;
       }
       row.visible = true;
-      const sel = i === this.cursor;
+      const sel = this.offset + i === this.cursor;
       const label = pad(it.label, labelW);
       const desc = it.description ?? "";
       const hint = it.hint ? `  ${it.hint}` : "";
@@ -150,7 +157,8 @@ export class Palette {
   }
 
   private move(d: number): boolean {
-    const n = Math.min(this.matches.length, this.maxRows);
+    // Every match is reachable; the window in render() scrolls to follow.
+    const n = this.matches.length;
     if (!n) return true;
     this.cursor = (this.cursor + d + n) % n;
     this.render();

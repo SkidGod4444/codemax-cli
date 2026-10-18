@@ -130,7 +130,7 @@ export default function TerminalDemo() {
     s.turns += 1;
     if (who === "claude") s.claudeTasks += 1;
     const now = new Date();
-    push("done", `${who === "claude" ? "Worked" : "Cooked"} for ${plan.secs}s · done ${now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`);
+    push("done", `${who === "claude" ? "Worked" : "Cooked"} for ${plan.secs}s · done ${now.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true })}`);
   }, [push, typeOut]);
 
   const command = useCallback(async (raw: string) => {

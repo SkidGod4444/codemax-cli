@@ -1,5 +1,6 @@
 import type { AgentId, QuotaStatus } from "../adapters/types.ts";
 import { stripAnsi } from "./terminal.ts";
+import { fmtTime12 } from "./time.ts";
 
 /**
  * Vendor-neutral phrases. Deliberately narrow: "rate limit" or "429" alone
@@ -47,7 +48,7 @@ export class OutputScanner {
 export function quotaLabel(q?: QuotaStatus): string {
   if (!q) return "";
   if (isExhausted(q)) {
-    const reset = q.resetsAt ? ` until ${new Date(q.resetsAt).toLocaleTimeString()}` : "";
+    const reset = q.resetsAt ? ` until ${fmtTime12(q.resetsAt)}` : "";
     return q.source === "output" ? `exhausted? (text match)${reset}` : `EXHAUSTED${reset}`;
   }
   if (typeof q.usedPercent === "number") return `${Math.round(q.usedPercent)}% used`;

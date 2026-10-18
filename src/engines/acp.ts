@@ -1,6 +1,6 @@
 import { ClientSideConnection, ndJsonStream, type Client, type Stream } from "@agentclientprotocol/sdk";
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, StopReason } from "./types.ts";
 import { agentEnv } from "./env.ts";
 import { platformArgv } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
@@ -204,7 +204,7 @@ export class AcpEngine implements Engine {
         // `used` is how full the context window is, not tokens spent: it feeds the context meter.
         // Token counts come from the prompt response (or session files) at turn end.
         if (typeof u.used === "number") this.turnContext = u.used;
-        this.emit({ type: "usage", contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.currentModelName() });
+        this.emit({ type: "usage", contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.currentModelName(), planLimits: planLimitsOf(u) });
         break;
       }
       default:
@@ -337,6 +337,15 @@ function extraOptions(config: unknown): EngineOption[] {
       current: c.currentValue,
       values: c.options.map((o: any) => ({ value: String(o.value), name: String(o.name ?? o.value), description: o.description })),
     }));
+}
+
+/** Claude's plan limits ride on usage updates as `_meta["_claude/rateLimit"]` (SDKRateLimitInfo). */
+function planLimitsOf(u: any): PlanLimit[] | undefined {
+  const rl = u?._meta?.["_claude/rateLimit"];
+  if (!rl || typeof rl !== "object") return undefined;
+  const util = typeof rl.utilization === "number" ? (rl.utilization <= 1 ? rl.utilization * 100 : rl.utilization) : undefined;
+  const reset = typeof rl.resetsAt === "number" ? (rl.resetsAt < 1e12 ? rl.resetsAt * 1000 : rl.resetsAt) : undefined;
+  return [{ window: String(rl.rateLimitType ?? "plan"), usedPercent: util, resetsAt: reset, status: rl.status }];
 }
 
 function mapStatus(s: string | undefined): "pending" | "in_progress" | "completed" | "failed" {

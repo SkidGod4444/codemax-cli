@@ -64,7 +64,13 @@ test("Codex engine: app-server handshake, approval round-trip, turn end", async 
       sent.push(m);
       queueMicrotask(() => {
         if (m.method === "initialize") reply({ jsonrpc: "2.0", id: m.id, result: { userAgent: "codemax/0.159.3 (test)" } });
-        else if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "thread-1" } } });
+        else if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "thread-1", model: "gpt-6.1-sol" } } });
+        else if (m.method === "model/list")
+          reply({ jsonrpc: "2.0", id: m.id, result: { nextCursor: null, data: [
+            { id: "gpt-6.1-sol", model: "gpt-6.1-sol", displayName: "GPT-6.1-Sol", isDefault: true, hidden: false, defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "medium" }, { reasoningEffort: "ultra" }] },
+            { id: "internal", model: "internal-preview", displayName: "Internal", hidden: true, supportedReasoningEfforts: [] },
+            { id: "gpt-5.6-luna", model: "gpt-5.6-luna", displayName: "GPT-5.6-Luna", hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low" }] },
+          ] } });
         else if (m.method === "account/read") reply({ jsonrpc: "2.0", id: m.id, result: { account: { type: "chatgpt", planType: "pro" } } });
         else if (m.method === "turn/start") {
           reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "turn-1" } } });
@@ -93,6 +99,9 @@ test("Codex engine: app-server handshake, approval round-trip, turn end", async 
   });
   const info = await engine.start({ cwd: "/tmp" });
   expect(info.version).toBe("0.159.3");
+  // the models are Codex's own list (hidden ones left out), not codemax's
+  expect(info.models).toEqual([{ id: "gpt-6.1-sol", name: "GPT-6.1-Sol" }, { id: "gpt-5.6-luna", name: "GPT-5.6-Luna" }]);
+  expect(info.options?.[0]).toMatchObject({ id: "effort", current: "medium", values: [{ value: "low" }, { value: "medium" }, { value: "ultra" }] });
   expect(engine.session?.id).toBe("thread-1");
   expect(sent.some((m) => m.method === "initialized")).toBe(true);
 

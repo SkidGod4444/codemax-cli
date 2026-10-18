@@ -56,6 +56,7 @@ test("Codex engine turns cumulative token totals into deltas with cached tokens 
       queueMicrotask(() => {
         if (m.method === "initialize") reply({ jsonrpc: "2.0", id: m.id, result: { userAgent: "codemax/0.159.3" } });
         else if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "t1", model: "gpt-5.6-terra" } } });
+        else if (m.method === "model/list") reply({ jsonrpc: "2.0", id: m.id, result: { data: [{ id: "gpt-5.6-terra", model: "gpt-5.6-terra", displayName: "GPT-5.6-Terra" }], nextCursor: null } });
         else if (m.method === "account/read") reply({ jsonrpc: "2.0", id: m.id, result: { account: { planType: "pro" } } });
         else if (m.method === "turn/start") {
           reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "u1" } } });

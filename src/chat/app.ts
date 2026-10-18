@@ -31,6 +31,8 @@ import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
 import { logoLines } from "./logo.ts";
 import { checkForUpdate, updatePlan } from "../core/update.ts";
+import { sortModels } from "./models.ts";
+import { fmtDateTime12 } from "../core/time.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -42,7 +44,8 @@ interface Active {
   agent: AgentId;
   name: string;
   engine: Engine;
-  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder } | null;
+  /** `model`: the model the agent reported for this turn (usage), when it does. */
+  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string } | null;
   replay: AgentBlock | null;
   unsubscribe: () => void;
   mode?: string;
@@ -74,6 +77,7 @@ export class ChatApp {
   private input: TextareaRenderable;
   private inputWrap: BoxRenderable;
   private dialogHost: BoxRenderable;
+  private queueBox!: BoxRenderable;
   private footerText: TextRenderable;
   private shortcuts: BoxRenderable;
   private flash = "";
@@ -99,6 +103,8 @@ export class ChatApp {
   /** Side agent (/side): reviews the main agent's work after each turn. */
   private reviewer: { agent: AgentId; name: string; engine: Engine; busy: boolean; pending: boolean; since: number; primed: boolean } | null = null;
   private notes: { ts: number; agent: AgentId; name: string; text: string }[] = [];
+  /** Plan limits each agent reported, by window ("five_hour", "seven_day"…). */
+  private planLimits = new Map<AgentId, Map<string, { usedPercent?: number; resetsAt?: number; status?: string; at: number }>>();
   /** Working turns since the side agent last reviewed (for `sideAgent.every`). */
   private turnsSinceReview = 0;
   /** Notes sent automatically per task (auto mode is capped so the two agents cannot loop). */
@@ -135,6 +141,10 @@ export class ChatApp {
     root.add(this.working);
     this.dialogHost = new BoxRenderable(renderer, { id: "dialog-host", width: "100%", flexShrink: 0, flexDirection: "column" });
     root.add(this.dialogHost);
+    // Queued messages wait here, pinned just above the prompt, until they are sent.
+    this.queueBox = new BoxRenderable(renderer, { id: "queue", width: "100%", flexShrink: 0, flexDirection: "column", paddingX: 1 });
+    this.queueBox.visible = false;
+    root.add(this.queueBox);
     this.inputWrap = new BoxRenderable(renderer, { id: "input-wrap", width: "100%", flexShrink: 0, flexDirection: "column", border: ["top", "bottom"], borderStyle: "single", borderColor: C.accent });
     const inputRow = new BoxRenderable(renderer, { id: "input-row", width: "100%", flexDirection: "row" });
     inputRow.add(new TextRenderable(renderer, { id: "input-prompt", content: `${G.prompt} `, width: 2, fg: C.accent }));
@@ -188,7 +198,8 @@ export class ChatApp {
     this.renderFooter();
   }
 
-  async start(agent: AgentId, fresh: boolean, o: { pick?: boolean } = {}) {
+  /** `explicit`: the user named this agent (--agent), so never start a different one. */
+  async start(agent: AgentId, fresh: boolean, o: { pick?: boolean; explicit?: boolean } = {}) {
     try {
       this.today = spendToday();
     } catch {
@@ -196,6 +207,7 @@ export class ChatApp {
     }
     await this.refreshDetect();
     const ok = (a: AgentId) => this.detect.get(a)?.installed && this.detect.get(a)?.engine;
+    if (!ok(agent) && o.explicit) throw new Error(`${agent} is ${this.detect.get(agent)?.installed ? "installed but has no protocol engine (try codemax --tui --agent " + agent + ")" : "not installed"}. Available: ${listAdapters(this.config.order).filter((a) => ok(a.id)).map((a) => a.id).join(", ") || "none"}`);
     const first = ok(agent) ? agent : listAdapters(this.config.order).find((a) => ok(a.id))?.id;
     if (!first) throw new Error("no agent with a protocol engine found (need claude, codex, opencode, grok or gemini on PATH)");
     const notes: string[] = [];
@@ -393,9 +405,7 @@ export class ChatApp {
     const busy = !!this.active?.turn;
     const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
     if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
-      this.queue.push(text);
-      this.transcript.note(`queued until the turn ends: ${text.slice(0, 60)}`, C.dim);
-      this.renderFooter();
+      this.enqueue(text);
       return;
     }
     if (text.startsWith("/")) return this.command(text);
@@ -407,8 +417,7 @@ export class ChatApp {
     const route = this.routeFor(text);
     if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
     if (this.active.turn) {
-      this.queue.push(text);
-      this.transcript.note(`queued: ${text.slice(0, 80)}${text.length > 80 ? "…" : ""}`, C.dim);
+      this.enqueue(text);
       return;
     }
     await this.send(this.active, text);
@@ -650,6 +659,26 @@ export class ChatApp {
     return true;
   }
 
+  /** Queue a message (or command) until the agent's turn ends; it shows above the prompt. */
+  private enqueue(text: string) {
+    this.queue.push(text);
+    this.renderQueue();
+    this.renderFooter();
+  }
+
+  private renderQueue() {
+    this.safely("queue", () => {
+      for (const child of this.queueBox.getChildren()) child.destroyRecursively();
+      const show = this.queue.slice(0, 3);
+      for (const [i, q] of show.entries()) {
+        const line = q.startsWith("A side agent (") ? "side-agent note for the main agent" : q.replace(/\s+/g, " ");
+        this.queueBox.add(new TextRenderable(this.renderer, { id: `queue-${Date.now()}-${i}`, content: `${G.prompt} ${line}`, fg: C.dim, wrapMode: "none", truncate: true, width: "100%" } as any));
+      }
+      if (this.queue.length > show.length) this.queueBox.add(new TextRenderable(this.renderer, { id: `queue-more-${Date.now()}`, content: `  + ${this.queue.length - show.length} more queued`, fg: C.dimmer }));
+      this.queueBox.visible = this.queue.length > 0;
+    });
+  }
+
   /** Run one queued entry the same way as if it had just been typed. */
   private async dispatch(active: Active, text: string) {
     if (text.startsWith("!")) return this.shell(text.slice(1).trim());
@@ -658,7 +687,11 @@ export class ChatApp {
   }
 
   private async drainQueue(active: Active) {
-    while (this.queue.length && this.active === active && !active.turn) await this.dispatch(active, this.queue.shift()!);
+    while (this.queue.length && this.active === active && !active.turn) {
+      const next = this.queue.shift()!;
+      this.renderQueue();
+      await this.dispatch(active, next);
+    }
     this.renderFooter();
   }
 
@@ -772,11 +805,17 @@ export class ChatApp {
     const name = raw!.toLowerCase();
     const b = this.builtins().find((x) => x.name === name || x.name === name.replace(/^\/(exit|q)$/, "/quit"));
     if (b) return b.run(rest.join(" "));
+    // /<agent>:<cmd> runs the active agent's own command even when codemax has one of that name.
+    const ns = name.match(/^\/([a-z]+):(.+)$/);
+    if (ns && this.active && ns[1] === this.active.agent && this.active.commands.some((c) => c.name === ns[2])) {
+      const forward = `/${ns[2]}${rest.length ? " " + rest.join(" ") : ""}`;
+      if (this.active.turn) return this.enqueue(forward);
+      return this.send(this.active, forward);
+    }
     if (name === "/exit" || name === "/q") return this.quit();
     if (this.active?.commands.some((c) => `/${c.name}` === name)) {
       if (this.active.turn) {
-        this.queue.push(line);
-        this.transcript.note(`queued ${name} until the turn ends`, C.dim);
+        this.enqueue(line);
         return;
       }
       return this.send(this.active, line);
@@ -786,7 +825,12 @@ export class ChatApp {
 
   private runCommandValue(value: string, args: string) {
     if (value.startsWith("builtin:")) return this.builtins().find((b) => b.name === value.slice(8))?.run(args);
-    if (value.startsWith("agentcmd:")) return this.command(`/${value.slice(9)}${args ? " " + args : ""}`);
+    if (value.startsWith("agentcmd:")) {
+      const name = value.slice(9);
+      // A name codemax also uses goes through /<agent>:<name> so the agent's own command runs.
+      const clash = this.builtins().some((b) => b.name === `/${name}`) && this.active;
+      return this.command(`/${clash ? `${this.active!.agent}:` : ""}${name}${args ? " " + args : ""}`);
+    }
   }
 
   private pendingShell: string[] = [];
@@ -834,7 +878,8 @@ export class ChatApp {
     this.paletteKind = "modes";
     this.palette = new Palette(this.renderer, {
       title: `Model for ${a.name}`,
-      items: models.map((m) => ({ label: m.id, description: `${m.name !== m.id ? m.name : ""}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id })),
+      // The agent's own list, newest first, by its display name (e.g. "Opus 5.5" for the id "opus").
+      items: sortModels(models).map((m, i) => ({ label: m.name, description: `${m.name !== m.id ? m.id : ""}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id, weight: 100 - i })),
       onPick: (it) => {
         this.closePalette();
         void apply(it.value);
@@ -944,6 +989,13 @@ export class ChatApp {
     const all = this.ledger.usage();
     for (const l of renderUsageTable(all, { title: "Usage for this project" })) this.transcript.note(l);
     this.transcript.note(`this codemax session: ${fmtUsd(this.sessionCost)} · all time here: ${fmtUsd(sumCost(all))} · prices in ~/.codemax/prices.json`);
+    // Plan limits, as the agents report them (Claude Code's own /usage is terminal-only, so this is where it shows).
+    const label: Record<string, string> = { five_hour: "5-hour", seven_day: "weekly", seven_day_opus: "weekly Opus", seven_day_sonnet: "weekly Sonnet", overage: "extra usage", seven_day_overage_included: "weekly incl. extra" };
+    for (const [agent, m] of this.planLimits) {
+      const parts = [...m].map(([w, v]) => `${label[w] ?? w} ${typeof v.usedPercent === "number" ? `${Math.round(v.usedPercent)}%` : v.status ?? "?"}${v.status === "rejected" ? " (used up)" : ""}${v.resetsAt ? ` · resets ${fmtDateTime12(v.resetsAt)}` : ""}`);
+      this.transcript.note(`${getAdapter(agent).name} plan: ${parts.join("; ")}`, C.accent);
+    }
+    if (!this.planLimits.size) this.transcript.note("plan limits appear here once an agent reports them (Claude Code does after a turn)");
   }
 
   private showStatus() {
@@ -978,9 +1030,12 @@ export class ChatApp {
     const builtinNames = new Set(this.builtins().map((b) => b.name));
     const items: PaletteItem[] = [
       ...this.builtins().map((b) => ({ label: b.name, description: b.description, value: `builtin:${b.name}`, weight: 1 })),
-      ...(this.active?.commands ?? [])
-        .filter((c) => !builtinNames.has(`/${c.name}`))
-        .map((c) => ({ label: `/${c.name}`, description: c.description ?? `${this.active!.name} command`, value: `agentcmd:${c.name}` })),
+      // An agent command that shares a built-in's name stays reachable as /<agent>:<name>.
+      ...(this.active?.commands ?? []).map((c) => {
+        const clash = builtinNames.has(`/${c.name}`);
+        const label = clash ? `/${this.active!.agent}:${c.name}` : `/${c.name}`;
+        return { label, description: `${c.description ?? `${this.active!.name} command`}${clash ? ` (${this.active!.name}'s own /${c.name})` : ""}`, value: `agentcmd:${c.name}` };
+      }),
     ];
     this.paletteKind = "commands";
     this.palette = new Palette(this.renderer, {
@@ -1169,7 +1224,8 @@ export class ChatApp {
     if (turn && this.config.bellAfterSeconds > 0 && Date.now() - turn.startedAt > this.config.bellAfterSeconds * 1000) process.stdout.write("\x07");
     if (turn) {
       const dur = fmtDuration(Date.now() - turn.startedAt);
-      block.footer(stop === "cancelled" ? `Interrupted after ${dur}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())}`);
+      const who = `${active.name} · ${this.modelName(active, turn.model)}`;
+      block.footer(stop === "cancelled" ? `Interrupted after ${dur} · ${who}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())} · ${who}`);
       const reply = block.text().trim();
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
       turn.rec?.end(stop);
@@ -1247,9 +1303,17 @@ export class ChatApp {
         break;
       case "usage": {
         if (active.turn && typeof e.outputTokens === "number") active.turn.tokens += e.outputTokens;
+        if (active.turn && e.model && !/default model$/.test(e.model)) active.turn.model = e.model;
         if (typeof e.contextUsed === "number" && typeof e.contextSize === "number" && e.contextSize > 0) {
           active.context = { used: e.contextUsed, size: e.contextSize };
           this.renderFooter();
+        }
+        for (const pl of e.planLimits ?? []) {
+          const m = this.planLimits.get(active.agent) ?? new Map();
+          m.set(pl.window, { usedPercent: pl.usedPercent, resetsAt: pl.resetsAt, status: pl.status, at: Date.now() });
+          this.planLimits.set(active.agent, m);
+          // A refused window is the plan running out: the handoff offer follows from onQuota.
+          if (pl.status === "rejected" || pl.window === "five_hour") this.onQuota({ agent: active.agent, usedPercent: pl.usedPercent, exhausted: pl.status === "rejected", resetsAt: pl.resetsAt, source: "probe", at: Date.now() });
         }
         if (typeof e.usedPercent === "number") this.onQuota({ agent: active.agent, usedPercent: e.usedPercent, exhausted: e.usedPercent >= 100, source: "probe", at: Date.now() });
         this.recordUsage(active.agent, active.engine, e);
@@ -1392,7 +1456,7 @@ export class ChatApp {
     this.paletteKind = "modes";
     this.palette = new Palette(this.renderer, {
       title: `Model for the side agent (${name}) · Esc keeps ${shortModelName(r.engine.info?.currentModel ?? "default")}`,
-      items: models.map((m) => ({ label: m.id, description: `${m.name !== m.id ? m.name : ""}${m.id === r.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id })),
+      items: sortModels(models).map((m, i) => ({ label: m.name, description: `${m.name !== m.id ? m.id : ""}${m.id === r.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id, weight: 100 - i })),
       onPick: (it) => {
         this.closePalette();
         void this.setSideModel(it.value);
@@ -1644,12 +1708,18 @@ export class ChatApp {
     if (!a) return this.transcript.note("no main agent to forward to", C.warn);
     const msg = forwardMessage(n.text, n.name);
     if (a.turn || this.switching) {
-      this.queue.push(msg);
-      this.transcript.note(`note queued for ${a.name} until its turn ends`);
-      this.renderFooter();
+      this.enqueue(msg);
       return;
     }
     void this.send(a, msg);
+  }
+
+  /** The model's display name as the agent lists it ("Opus 5.5"), else a short id. */
+  private modelName(a: Active, id?: string): string {
+    const mid = id ?? a.engine.info?.currentModel;
+    if (!mid) return "default model";
+    const listed = a.engine.info?.models?.find((m) => m.id === mid);
+    return listed && listed.name !== listed.id ? listed.name : shortModelName(mid);
   }
 
   private announceUpdate(version: string) {
@@ -1714,7 +1784,7 @@ export class ChatApp {
       else {
         const elapsed = Date.now() - t.startedAt;
         const tip = elapsed > 8000 ? `  ⎿  tip: ${pick(TIPS, Math.floor(t.startedAt / 1000))}` : "";
-        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · esc to interrupt${tip}`);
+        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)} · esc to interrupt${tip}`);
       }
     }, 120);
   }
@@ -1883,14 +1953,14 @@ function ago(ts: number): string {
   return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
 }
 
-export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false) {
+export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false, explicit = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
   const pref = config.theme ?? "auto";
   applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
   const app = new ChatApp(renderer, config, ledger, cwd);
   process.once("exit", () => app.awake.releaseSync());
   try {
-    await app.start(agent, fresh, { pick });
+    await app.start(agent, fresh, { pick, explicit });
   } finally {
     renderer.destroy();
     try {

@@ -783,3 +783,100 @@ test("27. startup shows the wordmark and asks which agent to continue with; an u
     expect(h.starts.at(-1)!.agent).toBe("claude");
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("28. /model lists the agent's own models by name, newest first, and scrolls to every one", async () => {
+  const calls: unknown[] = [];
+  const ids = ["default", "opus", "fable", "sonnet", "haiku", "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"];
+  const names = ["Default (recommended)", "Opus 5.5", "Fable 5.1", "Sonnet 5.5", "Haiku 5.5", "Haiku 4.5", "Sonnet 5", "Opus 5", "Fable 5", "Opus 4.8", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"];
+  const h = await harness({ claude: reply("ok") }, {}, undefined, {
+    claude: { configCalls: calls, session: { models: { currentModelId: "default", availableModels: ids.map((id, i) => ({ modelId: id, name: names[i] })) } } },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/model");
+    let f = await h.frame((f) => f.includes("Model for Claude Code") && f.includes("1/13"));
+    // newest first, Default pinned on top, equal versions in the agent's order
+    const order = ["Default (recommended)", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5", "Fable 5.1", "Sonnet 5 ", "Opus 5 "];
+    for (let i = 1; i < order.length; i++) expect(f.indexOf(order[i - 1]!)).toBeLessThan(f.indexOf(order[i]!));
+    for (let i = 0; i < 9; i++) h.setup.mockInput.pressArrow("down");
+    f = await h.frame((f) => f.includes("10/13") && f.includes("Opus 4.7"));
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("model: claude-opus-4-7"));
+    expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "claude-opus-4-7" })]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("29. queued messages stay pinned above the prompt until sent; the spinner and each turn show the responding model", async () => {
+  let release!: () => void;
+  let first = true;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (first) {
+        first = false;
+        await ctx.say("Working on it…");
+        await new Promise<void>((r) => (release = r));
+        return ctx.say(" done.");
+      }
+      await ctx.say(`Got: ${text}`);
+    },
+  }, {}, undefined, { claude: { session: { models: { currentModelId: "opus", availableModels: [{ modelId: "opus", name: "Opus 5.5" }, { modelId: "sonnet", name: "Sonnet 5.5" }] } } } });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("long task");
+    await h.frame((f) => f.includes("Working on it…") && f.includes("Claude Code · Opus 5.5 · esc to interrupt"));
+    await h.send("second message");
+    await h.send("third message");
+    const f = await h.frame((f) => f.includes("❯ second message") && f.includes("❯ third message"));
+    expect(f).toMatch(/❯ long task\s+· \d{1,2}:\d{2} (AM|PM)/); // sent messages carry a 12-hour time
+    const lines = f.split("\n");
+    const prompt = lines.findIndex((l) => l.includes('Try "fix the failing test"') || /^❯\s*$/.test(l.trim()));
+    const q2 = lines.findIndex((l) => l.includes("❯ second message"));
+    const q3 = lines.findIndex((l) => l.includes("❯ third message"));
+    expect(q3).toBe(q2 + 1);
+    expect(prompt - q3).toBeLessThanOrEqual(2); // directly above the input box (its top border in between)
+    release();
+    await h.frame((fr) => fr.includes("Got: second message") && fr.includes("Got: third message"));
+    const after = await h.frame((fr) => !fr.split("\n").slice(-6).some((l) => l.includes("third message") && l.trim().startsWith("❯ third")) || true);
+    expect(after).toContain("· Claude Code · Opus 5.5");
+    expect((h.app as any).queue).toHaveLength(0);
+    expect((h.app as any).queueBox.visible).toBe(false);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("30. an agent you name that is not available stops with a clear message instead of starting another", async () => {
+  const h = await harness({ claude: reply("hi") });
+  try {
+    await expect(h.app.start("grok" as any, true, { explicit: true })).rejects.toThrow(/grok is (not installed|installed but has no protocol engine)\. Available: claude/);
+    expect(h.starts).toHaveLength(0);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("31. Claude's plan limits show in /usage, a refused window offers the handoff, and its own /usage is /claude:usage", async () => {
+  let n = 0;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text.startsWith("/usage")) return ctx.say("Claude's own usage screen");
+      n++;
+      await upd(ctx, { sessionUpdate: "available_commands_update", availableCommands: [{ name: "usage", description: "Plan usage" }, { name: "review", description: "Review" }] });
+      await upd(ctx, { sessionUpdate: "usage_update", used: 1000, size: 200000, _meta: { "_claude/rateLimit": { status: n === 1 ? "allowed" : "rejected", rateLimitType: "five_hour", utilization: n === 1 ? 0.42 : 1, resetsAt: Math.floor(Date.now() / 1000) + 3600 } } });
+      await ctx.say(`turn ${n}`);
+    },
+    codex: reply("codex here"),
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("one");
+    await h.frame((f) => f.includes("turn 1"));
+    await h.send("/usage");
+    await h.frame((f) => /Claude Code plan: 5-hour 42% · resets \w{3} \d+, \d{1,2}:\d{2} (AM|PM)/.test(f));
+    await h.setup.mockInput.typeText("/claude:us");
+    await h.frame((f) => f.includes("/claude:usage") && f.includes("Claude Code's own /usage"));
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Claude's own usage screen"));
+    await h.send("two");
+    await h.frame((f) => f.includes("out of quota until") && f.includes("Continue in Codex"));
+  } finally { await h.cleanup(); }
+}, 30000);

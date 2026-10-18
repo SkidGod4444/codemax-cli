@@ -27,6 +27,8 @@ export type EngineEvent =
       costUsd?: number;
       /** Rate-limit window consumption, when the agent exposes it. */
       usedPercent?: number;
+      /** Subscription plan limits the agent reported (Claude: 5-hour, weekly…), one entry per window. */
+      planLimits?: PlanLimit[];
       /** Context window fill, when reported (tokens used / size). */
       contextUsed?: number;
       contextSize?: number;
@@ -35,6 +37,15 @@ export type EngineEvent =
   | { type: "turn_end"; stopReason: StopReason }
   | { type: "error"; kind: ErrorKind; message: string }
   | { type: "log"; level: "info" | "warn" | "error"; message: string };
+
+export interface PlanLimit {
+  /** e.g. "five_hour", "seven_day", "seven_day_opus". */
+  window: string;
+  usedPercent?: number;
+  resetsAt?: number;
+  /** "allowed" | "allowed_warning" | "rejected" (out of this window's quota). */
+  status?: string;
+}
 
 export type ToolStatus = "pending" | "in_progress" | "completed" | "failed";
 export type StopReason = "end_turn" | "max_tokens" | "cancelled" | "refusal" | "error" | "other";

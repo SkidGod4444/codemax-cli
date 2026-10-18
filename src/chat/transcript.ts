@@ -1,6 +1,7 @@
 import { BoxRenderable, ScrollBoxRenderable, StyledText, TextRenderable, fg, italic, strikethrough, stringToStyledText, type CliRenderer, type TextChunk } from "@opentui/core";
 import { C, G } from "./theme.ts";
 import { styleMarkdown, styleToolOutput } from "./markdown.ts";
+import { fmtTime12 } from "../core/time.ts";
 
 export interface PlanEntry {
   content: string;
@@ -109,9 +110,11 @@ export class Transcript {
     this.scrollToEnd();
   }
 
-  user(text: string) {
+  /** Your message, with the time it was sent ("· 7:25 PM", 12-hour). */
+  user(text: string, ts = Date.now()) {
     this.gap();
-    this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.accent });
+    const node = this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.accent });
+    node.content = new StyledText([...stringToStyledText(text).chunks, fg(C.dimmer)(`  · ${fmtTime12(ts)}`)]);
   }
 
   note(text: string, fg_: string = C.dim) {
