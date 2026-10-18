@@ -17,6 +17,13 @@ const sh = (cmd: string[]) => {
 };
 const fail = (msg: string): never => {
   console.error(`FAIL: ${msg}`);
+  if (process.platform === "win32") {
+    // Diagnose: run the same helper briefly with its output visible, and list power requests.
+    const hold = new Awake({ ...deps, pid: process.pid }).holdCommand(false)!;
+    const probe = Bun.spawnSync([...hold.slice(0, -1), hold.at(-1)!.replace(/while \(Get-Process[^}]+\}/, "Start-Sleep -Seconds 4; 'helper ran'")], { stdout: "pipe", stderr: "pipe" });
+    console.error("helper exit", probe.exitCode, "out:", probe.stdout.toString().trim(), "err:", probe.stderr.toString().trim().slice(0, 800));
+    console.error("powercfg /requests:\n" + sh(["powercfg", "/requests"]));
+  }
   process.exit(1);
 };
 const until = async (what: string, pred: () => boolean, ms = 12000) => {
