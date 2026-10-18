@@ -6,8 +6,12 @@ import type { AgentId } from "./adapters/types.ts";
 export interface Config {
   /** Priority order used for "next agent" suggestions. */
   order: AgentId[];
-  /** Hotkey byte that opens the codemax menu. Default 0x1f (Ctrl+_ / Ctrl+/). */
-  hotkey: number;
+  /**
+   * Hotkeys that open the codemax menu, as "ctrl+<key>". Each is matched in
+   * every encoding terminals use (raw byte, CSI u, modifyOtherKeys).
+   * Default: ctrl+/ and ctrl+^. Run `codemax keys` to see what yours sends.
+   */
+  hotkeys: string[];
   /** Offer a switch automatically when quota exhaustion is detected. */
   autoSwitch: boolean;
   /** Per-agent extra CLI args appended to every launch. */
@@ -18,7 +22,7 @@ export interface Config {
 
 export const DEFAULT_CONFIG: Config = {
   order: ["claude", "codex", "opencode", "cursor", "grok", "gemini", "copilot"],
-  hotkey: 0x1f,
+  hotkeys: ["ctrl+/", "ctrl+^"],
   autoSwitch: true,
   agentArgs: {},
   brief: { turns: 10, maxChars: 8000, turnChars: 1200 },
@@ -33,7 +37,10 @@ export function loadConfig(): Config {
     return structuredClone(DEFAULT_CONFIG);
   }
   try {
-    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<Config>;
+    const raw = JSON.parse(readFileSync(CONFIG_PATH, "utf8")) as Partial<Config> & { hotkey?: number };
+    // v0.1.0 stored a single byte; map it onto the new list.
+    if (!raw.hotkeys && typeof raw.hotkey === "number") raw.hotkeys = [raw.hotkey === 0x1e ? "ctrl+^" : "ctrl+/"];
+    delete raw.hotkey;
     return {
       ...DEFAULT_CONFIG,
       ...raw,
@@ -45,9 +52,6 @@ export function loadConfig(): Config {
   }
 }
 
-export function hotkeyLabel(byte: number): string {
-  if (byte === 0x1f) return "Ctrl+/ (Ctrl+_)";
-  if (byte === 0x1e) return "Ctrl+^";
-  if (byte >= 1 && byte <= 26) return `Ctrl+${String.fromCharCode(64 + byte)}`;
-  return `0x${byte.toString(16)}`;
+export function hotkeyLabel(hotkeys: string[]): string {
+  return hotkeys.map((h) => h.replace(/^ctrl\+/i, "Ctrl+")).join(" or ");
 }

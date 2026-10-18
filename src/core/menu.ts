@@ -23,7 +23,7 @@ export interface MenuState {
   notice?: string;
   /** When the current agent has exited, "close" is not offered. */
   canClose: boolean;
-  hotkey: number;
+  hotkeys: string[];
 }
 
 const dim = (s: string) => `${CSI}2m${s}${CSI}22m`;
@@ -75,7 +75,7 @@ export class Menu {
     L.push("");
     const mode = this.fresh ? yellow("fresh session") : green("resume if a session exists");
     L.push(dim(" ↑/↓ or 1-9 pick · Enter switch · f toggle: ") + mode);
-    L.push(dim(` ${this.state.canClose ? "Esc/q back to agent · " : ""}x quit codemax · hotkey ${hotkeyLabel(this.state.hotkey)}`));
+    L.push(dim(` ${this.state.canClose ? "Esc/q back to agent · " : ""}x quit codemax · hotkey ${hotkeyLabel(this.state.hotkeys)}`));
     out(`${CSI}H${CSI}2J` + L.map((l) => l + `${CSI}K`).join("\r\n"));
   }
 

@@ -8,6 +8,7 @@ import { OutputScanner } from "./quota.ts";
 import { buildBrief } from "./brief.ts";
 import { diffStat } from "./git.ts";
 import { PASTE_END, PASTE_START, RESET_SEQ, out, termSize } from "./terminal.ts";
+import { findHotkey, parseHotkeys, type HotkeySpec } from "./hotkey.ts";
 
 interface Running {
   adapter: Adapter;
@@ -34,6 +35,7 @@ export class Orchestrator {
   private resolveDone!: () => void;
   readonly done: Promise<void>;
   private decoder = new TextDecoder();
+  private hotkeys: HotkeySpec[];
 
   constructor(
     private config: Config,
@@ -41,6 +43,7 @@ export class Orchestrator {
     private cwd: string,
   ) {
     this.done = new Promise((r) => (this.resolveDone = r));
+    this.hotkeys = parseHotkeys(config.hotkeys);
     for (const [id, q] of Object.entries(ledger.quota())) this.quota.set(id as AgentId, q);
   }
 
@@ -68,11 +71,11 @@ export class Orchestrator {
     }
     // The hotkey may share a chunk with other keys when typed quickly: forward
     // what came before it, open the menu, and let the menu see what followed.
-    const i = bytes.indexOf(this.config.hotkey);
-    if (i >= 0) {
-      if (i > 0) this.running?.proc.write(bytes.subarray(0, i));
+    const hit = findHotkey(bytes, this.hotkeys);
+    if (hit) {
+      if (hit.index > 0) this.running?.proc.write(bytes.subarray(0, hit.index));
       this.openMenu("switch agent", true);
-      const rest = bytes.subarray(i + 1);
+      const rest = bytes.subarray(hit.index + hit.length);
       const menu = this.menu as Menu | null; // openMenu() just set it; TS keeps the stale null narrowing
       if (rest.length && menu) {
         const action = menu.handleKey(rest);
@@ -254,7 +257,7 @@ export class Orchestrator {
 
   private openMenu(title: string, canClose: boolean, notice?: string) {
     if (this.menu) return;
-    this.menu = new Menu({ title, rows: this.rows(), current: this.running?.adapter.id, notice, canClose, hotkey: this.config.hotkey });
+    this.menu = new Menu({ title, rows: this.rows(), current: this.running?.adapter.id, notice, canClose, hotkeys: this.config.hotkeys });
     this.menu.open();
     void this.refreshDetect().then(() => this.menu?.update({ rows: this.rows() }));
   }

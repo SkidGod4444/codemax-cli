@@ -6,6 +6,7 @@ import { listAdapters, getAdapter } from "./adapters/index.ts";
 import { buildBrief } from "./core/brief.ts";
 import { quotaLabel } from "./core/quota.ts";
 import type { AgentId } from "./adapters/types.ts";
+import { describeBytes, findHotkey, parseHotkeys } from "./core/hotkey.ts";
 
 const HELP = `codemax — one terminal for all your coding agents
 
@@ -16,8 +17,10 @@ usage:
   codemax history [-n <count>]               print recorded turns for this project
   codemax brief [--to <id>]                  print the handoff brief that would be injected
   codemax config                             print config path and values
+  codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
 
-inside an agent, press the hotkey (default Ctrl+/) to open the codemax menu.
+inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
+set "hotkeys": ["ctrl+<key>", ...] in the config to change it.
 `;
 
 function flag(args: string[], name: string): string | undefined {
@@ -95,7 +98,28 @@ async function main(argv: string[]) {
       return;
     }
     case "config": {
-      console.log(`${CONFIG_PATH}\nhotkey: ${hotkeyLabel(config.hotkey)}\n${JSON.stringify(config, null, 2)}`);
+      console.log(`${CONFIG_PATH}\nhotkeys: ${hotkeyLabel(config.hotkeys)}\n${JSON.stringify(config, null, 2)}`);
+      return;
+    }
+    case "keys": {
+      if (!process.stdin.isTTY) {
+        console.error("codemax keys needs a TTY");
+        process.exit(2);
+      }
+      const specs = parseHotkeys(config.hotkeys);
+      console.log(`press keys to see what your terminal sends. configured hotkeys: ${hotkeyLabel(config.hotkeys)}. q or Ctrl+C to quit.\n`);
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", (chunk: Buffer) => {
+        const bytes = new Uint8Array(chunk);
+        const hit = findHotkey(bytes, specs);
+        process.stdout.write(`${describeBytes(bytes)}${hit ? `   ← matches hotkey ${hit.name}` : ""}\r\n`);
+        if (bytes.length === 1 && (bytes[0] === 0x03 || bytes[0] === 0x71)) {
+          process.stdin.setRawMode(false);
+          process.exit(0);
+        }
+      });
+      await new Promise(() => {});
       return;
     }
     default:

@@ -33,7 +33,7 @@ test("passthrough → hotkey menu → close → switch (brief typed) → quit", 
 
   // hotkey opens the menu
   out = "";
-  term.write("\x1f");
+  term.write("\x1b[47;5u"); // CSI-u encoding of Ctrl+/
   await waitFor(/codemax.*switch agent/s);
   expect(stripAnsi(out)).toMatch(/Fake \(sh\)/);
 
@@ -46,7 +46,7 @@ test("passthrough → hotkey menu → close → switch (brief typed) → quit", 
 
   // switch to the fake agent again as a fresh session: brief gets typed into the new shell
   out = "";
-  term.write("\x1f");
+  term.write("\x1b[47;5u"); // CSI-u encoding of Ctrl+/
   await waitFor(/codemax/);
   term.write("f"); // fresh
   await Bun.sleep(150);
@@ -57,7 +57,7 @@ test("passthrough → hotkey menu → close → switch (brief typed) → quit", 
 
   // quit from the menu
   out = "";
-  term.write("\x1f");
+  term.write("\x1b[47;5u"); // CSI-u encoding of Ctrl+/
   await waitFor(/codemax/);
   term.write("x");
   await waitFor(/codemax: bye/);
