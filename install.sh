@@ -95,19 +95,21 @@ if [ -z "$REF" ]; then
   fi
 fi
 
-# ── code
+# ── code: fetch just the chosen release into a plain checkout (quietly; a
+#    release tag is not a branch, so cloning it directly makes git chatter)
 if [ -d "$DIR/.git" ]; then
   step "Updating codemax to $REF"
   git -C "$DIR" remote set-url origin "$REPO"
-  git -C "$DIR" fetch --quiet --depth 1 origin "$REF" || die "Could not fetch $REF from $REPO"
-  git -C "$DIR" checkout --quiet --detach FETCH_HEAD
 else
   step "Downloading codemax $REF"
   [ -e "$DIR" ] && die "$DIR exists and is not a codemax checkout. Move it or set CODEMAX_DIR."
-  mkdir -p "$(dirname "$DIR")"
-  GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DIR" \
-    || die "Could not download $REPO. Check your connection, or that you have access to the repo."
+  mkdir -p "$DIR"
+  git -C "$DIR" init --quiet
+  git -C "$DIR" remote add origin "$REPO"
 fi
+GIT_TERMINAL_PROMPT=0 git -C "$DIR" fetch --quiet --depth 1 --no-tags origin "$REF" 2>/dev/null \
+  || die "Could not download $REF from $REPO. Check your connection, or that the repository is public."
+git -C "$DIR" -c advice.detachedHead=false checkout --quiet --force --detach "FETCH_HEAD^{commit}"
 ok "$(git -C "$DIR" log -1 --format='%h %s' | cut -c1-60)"
 
 step "Installing dependencies"
