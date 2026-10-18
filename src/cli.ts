@@ -3,17 +3,21 @@ import { canonicalCwd } from "./core/paths.ts";
 import { Ledger } from "./core/ledger.ts";
 import { Orchestrator } from "./core/orchestrator.ts";
 import { runApp } from "./tui/app.ts";
+import { runChat } from "./chat/app.ts";
+import { hasEngine } from "./engines/index.ts";
 import { listAdapters, getAdapter } from "./adapters/index.ts";
 import { buildBrief } from "./core/brief.ts";
 import { quotaLabel } from "./core/quota.ts";
 import type { AgentId } from "./adapters/types.ts";
 import { describeBytes, findHotkey, parseHotkeys } from "./core/hotkey.ts";
+import { diagnose } from "./core/doctor.ts";
 
 const HELP = `codemax — one terminal for all your coding agents
 
 usage:
-  codemax [start] [--agent <id>] [--fresh]   run an agent TUI under codemax (default: first in config order)
-                 [--raw]                     legacy passthrough mode without the codemax screen (no status bar)
+  codemax [start] [--agent <id>] [--fresh]   codemax chat UI driving the agent over its protocol (default)
+                 [--tui]                     show the agent's own TUI inside the codemax screen instead
+                 [--raw]                     legacy passthrough mode without the codemax screen
   codemax agents                             show detected agents, saved sessions, quota
   codemax status                             project ledger summary
   codemax history [-n <count>]               print recorded turns for this project
@@ -21,6 +25,7 @@ usage:
   codemax config                             print config path and values
   codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
   codemax quota [clear [<id>]]               show or clear remembered quota state for this project
+  codemax doctor [--fix]                     check agent auth/permission setup (API keys that would be billed, silent modes)
 
 inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
 set "hotkeys": ["ctrl+<key>", ...] in the config to change it.
@@ -55,8 +60,10 @@ async function main(argv: string[]) {
       if (args.includes("--raw")) {
         const orch = new Orchestrator(config, ledger, cwd);
         await orch.start(agent, args.includes("--fresh"));
-      } else {
+      } else if (args.includes("--tui") || !hasEngine(agent)) {
         await runApp(config, ledger, cwd, agent, args.includes("--fresh"));
+      } else {
+        await runChat(config, ledger, cwd, agent, args.includes("--fresh"));
       }
       process.exit(0);
     }
@@ -106,6 +113,16 @@ async function main(argv: string[]) {
     }
     case "config": {
       console.log(`${CONFIG_PATH}\nhotkeys: ${hotkeyLabel(config.hotkeys)}\n${JSON.stringify(config, null, 2)}`);
+      return;
+    }
+    case "doctor": {
+      const findings = diagnose();
+      if (!findings.length) return console.log("all clear: no API-key billing or silent-permission issues found");
+      for (const f of findings) {
+        console.log(`${f.severity === "block" ? "BLOCK" : "warn "} [${f.agent}] ${f.message}`);
+        if (f.fix) console.log(`      fix: ${f.fix.description}${args.includes("--fix") ? "" : "  (run: codemax doctor --fix)"}`);
+        if (f.fix && args.includes("--fix")) console.log(`      → ${f.fix.apply()}`);
+      }
       return;
     }
     case "quota": {

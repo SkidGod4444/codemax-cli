@@ -12,6 +12,31 @@ codemax does **not** drive agents through `-p` / `exec` / `run --format json`. H
 - A hotkey (default `Ctrl+_`, which most terminals send for `Ctrl+/`; configurable) opens the codemax menu: switch agent, see quota, quit.
 - Context survives a switch because codemax keeps its own **project ledger**, fed from the transcript files the agents already write to disk, plus git.
 
+## v0.3 direction (2026-10-18): codemax's own UI, agents as engines
+
+The user chose a single codemax chat UI that drives the agents underneath instead of showing each vendor's TUI. That needs a programmatic channel, and the distinction matters: one-shot headless modes (`-p`, `exec`) stay ruled out because they auto-approve and have no permission prompts. The channel is the interactive kind: the Agent Client Protocol (ACP) or the vendor's equivalent JSON-RPC session, where the agent sends permission requests, tool-call and plan updates back to the UI and the UI answers. Zed and JetBrains drive agents this way.
+
+Spike (same day, API keys stripped from the environment, all on subscription logins):
+
+| Agent | Channel | Auth seen | Permission prompt | Status |
+|---|---|---|---|---|
+| Claude Code | ACP via `@zed-industries/claude-code-acp` (Claude Agent SDK) | `claude-login` | yes (allow always / once / reject) | works; verify it runs the user's `claude`, else fall back to `claude --input-format stream-json` |
+| Codex | native `codex app-server` JSON-RPC over stdio | ChatGPT plan | yes (`item/*/requestApproval`) | works. The community ACP adapter does not: its bundled core rejects ChatGPT-plan models |
+| OpenCode | native `opencode acp` | `opencode-login` | not asked (ran on its default) | works; confirm it picks a subscription model, not the free one |
+| Grok | native `grok agent stdio` (ACP) | `cached_token` | not asked | works |
+| Gemini CLI | native ACP per registry | — | — | not installed here |
+| Cursor Agent | none (stream-json only) | — | — | falls back to the embedded terminal pane |
+
+Lost: vendor slash commands, skills, hooks and plan-mode screens, and MCP sign-in flows the vendor TUIs render. ACP exposes modes and an available-commands list, so some comes back.
+Gained: the ledger sees every message natively; handoff is codemax's own conversation; quota comes from structured errors; the terminal-fidelity problem disappears.
+Carries over: OpenTUI renderer, status bar, menu overlay, tests, ledger, brief builder. The embedded pane becomes `codemax --tui` and the fallback for engine-less agents; `--raw` stays.
+
+Layout: `src/engines/` (normalized event stream; `acp.ts` generic client; `codex.ts` app-server client), `src/chat/` (OpenTUI chat UI: turn list, tool rows, permission overlay, input).
+
+**Status (2026-10-18, later):** default flipped. Verified end to end through a headless terminal: Claude wrote a file after a permission prompt answered in codemax, the menu switched to Codex with an 821-char brief, Codex confirmed the file and answered a follow-up, all four turns landed in the ledger natively. Permission caveats found and handled: OpenCode needs an inline "ask" config (codemax sets it); Grok inherits the permission mode from the user's Claude Code settings (`defaultMode: "auto"` here), which codemax surfaces as a warning. The Claude adapter runs the user's own `claude` through `CLAUDE_CODE_EXECUTABLE`.
+
+Open: Gemini CLI untested (not installed); native resume across restarts unverified for ACP `session/load`; compiled binary cannot find the Claude adapter unless it is on PATH (`bun link` install works); markdown rendering and diff views in the transcript; `/model` switching.
+
 ## How context survives
 
 | Mechanism | Scope | Source |

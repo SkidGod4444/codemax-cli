@@ -16,7 +16,9 @@ export const claude: Adapter = {
   detect: () => detectBin("claude", ["--version"]),
   newSessionId: () => crypto.randomUUID(),
   launch(o: LaunchOptions): LaunchSpec {
-    const cmd = ["claude"];
+    // Settings files can inject ANTHROPIC_API_KEY via their "env" block; blank it so the
+    // claude.ai login is billed. (The ACP engine path cannot pass this and is gated by doctor.)
+    const cmd = ["claude", "--settings", JSON.stringify({ env: { ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "" } })];
     if (o.resume) cmd.push("--resume", o.resume.id);
     else if (o.sessionId) cmd.push("--session-id", o.sessionId);
     if (o.extraArgs) cmd.push(...o.extraArgs);
