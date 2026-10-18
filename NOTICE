@@ -1,0 +1,27 @@
+codemax
+Copyright (C) 2026 Saidev Dhal <https://saidev.codes>
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, version 3 only (AGPL-3.0-only). See LICENSE.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+Additional permission under GNU AGPL version 3 section 7
+
+codemax works by starting and talking to coding agents and their libraries,
+some of which are distributed under their own non-free terms (for example
+Claude Code and @anthropic-ai/claude-agent-sdk, Codex, Grok, Gemini CLI,
+Cursor Agent and GitHub Copilot CLI). If you modify this program, or any
+covered work, by linking or combining it with such an agent program or library
+(or a modified version of it), the copyright holder grants you additional
+permission to convey the resulting work. Corresponding Source for the
+non-source form of such a combination shall not include the source code for
+the parts of those agent programs or libraries that are not covered by this
+License.
+
+Trademarks
+
+The AGPL covers the code, not the codemax name or logo. See TRADEMARKS.md.

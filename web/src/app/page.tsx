@@ -15,11 +15,15 @@ import {
 import AsciiArt from "@/components/AsciiArt";
 import CopyCommand from "@/components/CopyCommand";
 import { Logo } from "@/components/Logo";
+import MobileMenu from "@/components/MobileMenu";
 import TerminalDemo from "@/components/TerminalDemo";
 import { Accordion, AccordionItem, AccordionPanel, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 
-const REPO = "https://github.com/SkidGod4444/codemax-cli";
+import { INSTALL_COMMAND, SITE } from "@/lib/site";
+
+const REPO = SITE.repo;
+const NAV: [string, string][] = [["Why", "why"], ["Agents", "agents"], ["Features", "features"], ["Get started", "start"]];
 
 /* ───────────────────────── primitives */
 
@@ -52,12 +56,12 @@ function Marks({ at, from = "lg" }: { at: number[]; from?: "md" | "lg" }) {
 }
 
 /** One band of the page: a full-width hairline on top, crosses where it meets the frame. */
-function Band({ id, children, className = "", tone = "pink", marks }: { id?: string; children: React.ReactNode; className?: string; tone?: "pink" | "white"; marks?: number[] }) {
+function Band({ id, children, className = "", tone = "pink", marks, corners = true }: { id?: string; children: React.ReactNode; className?: string; tone?: "pink" | "white"; marks?: number[]; corners?: boolean }) {
   return (
     <section id={id} className={`tone-${tone} relative scroll-mt-16 border-t border-[var(--line)] ${className}`}>
       <div className="relative mx-auto max-w-[1240px] border-x border-[var(--line)]">
-        <Cross className="top-0 left-0" />
-        <Cross className="top-0 left-full" />
+        {corners && <Cross className="top-0 left-0" />}
+        {corners && <Cross className="top-0 left-full" />}
         {marks && <Marks at={marks} />}
         {children}
       </div>
@@ -115,33 +119,67 @@ const faqs = [
   { q: "Who is it for?", a: "Developers who pay for more than one AI coding plan and are tired of hitting a limit in the middle of real work." },
 ];
 
+/** Structured data: the app itself, plus the FAQ for rich results. */
+function JsonLd() {
+  const data = [
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      name: SITE.name,
+      description: SITE.description,
+      url: SITE.url,
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "macOS, Linux",
+      offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+      license: "https://www.gnu.org/licenses/agpl-3.0.html",
+      sameAs: [SITE.repo],
+      author: { "@type": "Person", name: SITE.author.name, url: SITE.author.url },
+    },
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      mainEntity: faqs.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
+    },
+  ];
+  return <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(data).replace(/</g, "\\u003c") }} />;
+}
+
 /* ───────────────────────── page */
 
 export default function Home() {
   return (
-    <main className="min-h-svh bg-white">
+    <main className="min-h-svh overflow-x-clip bg-white">
+      <JsonLd />
       {/* nav */}
       <header className="tone-white sticky top-0 z-40 border-b border-[var(--line)] !bg-white">
-        <nav className="quilt mx-auto grid h-14 max-w-[1240px] grid-cols-[auto_1fr_auto] border-x border-[var(--line)] md:grid-cols-4">
+        <div aria-hidden className="pointer-events-none relative mx-auto max-w-[1240px]">
+          <span className="tuft top-14 left-0" />
+          <span className="tuft top-14 left-full" />
+          <span className="tuft top-14 left-1/2 md:hidden" />
+          <span className="tuft top-14 left-1/4 hidden md:block" />
+          <span className="tuft top-14 left-3/4 hidden md:block" />
+          <span className="tuft top-14 left-1/2 hidden lg:block" />
+        </div>
+        <nav className="quilt mx-auto grid h-14 max-w-[1240px] grid-cols-2 border-x border-[var(--line)] md:grid-cols-4">
           <div className="tone-pink flex items-center border-r border-[var(--line)] bg-[#ff5c8d] px-5 transition-colors hover:bg-[#f24a80] sm:px-10">
             <a href="#" aria-label="codemax home">
               <Logo className="h-[18px] w-auto" color="#ffffff" />
             </a>
           </div>
-          <div className="hidden items-center justify-center gap-8 font-mono text-[11px] tracking-[0.2em] uppercase md:col-span-2 md:flex">
-            {[["Why", "why"], ["Agents", "agents"], ["Features", "features"], ["Get started", "start"]].map(([l, id]) => (
+          <div className="hidden items-center justify-center gap-4 font-mono text-[10.5px] tracking-[0.1em] whitespace-nowrap uppercase md:col-span-2 md:flex lg:gap-8 lg:text-[11px] lg:tracking-[0.2em]">
+            {NAV.map(([l, id]) => (
               <a key={id} href={`#${id}`} className="text-[var(--ink-3)] transition hover:text-[var(--ink)]">/ {l}</a>
             ))}
           </div>
-          <a href={REPO} target="_blank" rel="noreferrer" className="tone-pink col-start-3 flex items-center justify-center gap-2 border-l border-[var(--line)] bg-[#ff5c8d] px-5 font-mono text-[11px] tracking-[0.18em] text-white uppercase transition-colors hover:bg-[#f24a80] md:col-start-4">
+          <a href={REPO} target="_blank" rel="noreferrer" className="tone-pink hidden items-center justify-center gap-2 border-l border-[var(--line)] bg-[#ff5c8d] px-5 font-mono text-[11px] tracking-[0.18em] text-white uppercase transition-colors hover:bg-[#f24a80] md:col-start-4 md:flex">
             <GitHubMark /> Star on GitHub
           </a>
+          <MobileMenu links={NAV} repo={REPO} />
         </nav>
       </header>
 
       {/* hero */}
-      <Band className="border-t-0" marks={[50]}>
-        <div className="relative"><Marks at={[25, 75]} from="md" /></div>
+      <Band className="border-t-0" corners={false}>
         <div className="quilt grid lg:grid-cols-2">
           <div className="flex flex-col justify-center px-5 py-16 sm:px-10 lg:py-24">
             <Label>Free · Open source</Label>
@@ -159,9 +197,12 @@ export default function Home() {
                 <GitHubMark /> Star on GitHub
               </Button>
             </div>
+            <div className="mt-6 max-w-md">
+              <CopyCommand command={INSTALL_COMMAND} />
+            </div>
           </div>
           <div className="border-t border-[var(--line)] p-5 sm:p-8 lg:border-t-0 lg:border-l">
-            <Figure scene="rings" n="01" caption="Five agents, one chain" className="flex aspect-[5/4] flex-col" cell={6} />
+            <Figure scene="rings" n="01" caption="Five agents, one chain" className="flex aspect-[4/3] flex-col sm:aspect-[16/9] lg:aspect-[5/4]" cell={6} />
           </div>
         </div>
         {/* stat row */}
@@ -210,7 +251,8 @@ export default function Home() {
       </Band>
 
       {/* principles */}
-      <Band marks={[25, 50, 75]}>
+      <Band>
+        <Marks at={[25, 50, 75]} from="md" />
         <div className="quilt grid md:grid-cols-4">
           <div className="px-5 py-12 sm:px-8">
             <Label>Why codemax</Label>
@@ -234,7 +276,7 @@ export default function Home() {
       <Band id="agents" tone="white" marks={[25, 50, 75]}>
         <div className="quilt grid lg:grid-cols-2">
           <div className="order-2 border-t border-[var(--line)] p-5 sm:p-8 lg:order-1 lg:border-t-0 lg:border-r">
-            <Figure scene="planet" n="02" caption="One hub, every agent" className="flex aspect-square flex-col" cell={6} ink="255,79,134" />
+            <Figure scene="planet" n="02" caption="One hub, every agent" className="flex aspect-square flex-col sm:aspect-[16/10] lg:aspect-square" cell={6} ink="255,79,134" />
           </div>
           <div className="order-1 flex flex-col justify-center px-5 py-16 sm:px-10 lg:order-2">
             <Label>Agents</Label>
@@ -264,7 +306,7 @@ export default function Home() {
             </p>
           </div>
           <div className="border-t border-[var(--line)] p-5 sm:p-8 lg:border-t-0 lg:border-l">
-            <Figure scene="cubes" n="03" caption="Pieces that fit together" className="flex aspect-square flex-col" cell={6} />
+            <Figure scene="cubes" n="03" caption="Pieces that fit together" className="flex aspect-square flex-col sm:aspect-[16/10] lg:aspect-square" cell={6} />
           </div>
         </div>
         <div className="quilt relative grid border-t border-[var(--line)] sm:grid-cols-2 lg:grid-cols-4">
@@ -286,10 +328,13 @@ export default function Home() {
             <Label>Get started</Label>
             <h2 className="mt-5 text-[clamp(2.4rem,4.2vw,3.6rem)] leading-[1] font-serif font-normal tracking-[-0.015em] text-balance">Up and running in a minute.</h2>
             <p className="mt-5 max-w-md text-pretty text-[var(--ink-2)]">Free and open source. Uses the logins you already have — nothing new to sign up for.</p>
-            <div className="mt-8 max-w-lg"><CopyCommand command="git clone https://github.com/SkidGod4444/codemax-cli && cd codemax-cli && bun i && bun link" /></div>
+            <div className="mt-8 max-w-lg">
+              <CopyCommand command={INSTALL_COMMAND} />
+              <p className="mt-3 font-mono text-[10.5px] tracking-[0.14em] text-[var(--ink-3)] uppercase">macOS · Linux · WSL — installs Bun if you need it</p>
+            </div>
             <ol className="mt-8 max-w-lg border-t border-[var(--line)]">
               {[
-                ["01", "Install codemax", "one command, about a minute"],
+                ["01", "Paste it in your terminal", "installs codemax in about a minute"],
                 ["02", "Open your project", "run codemax in any repo"],
                 ["03", "Just ask", "switch agents any time with one key"],
               ].map(([n, a, b]) => (
@@ -338,9 +383,14 @@ export default function Home() {
 
       <footer className="tone-white border-t border-[var(--line)]">
         <div className="quilt relative mx-auto grid max-w-[1240px] border-x border-[var(--line)] font-mono text-[11px] tracking-[0.14em] text-[var(--ink-3)] uppercase md:grid-cols-2">
+          <Cross className="top-0 left-0" />
+          <Cross className="top-0 left-full" />
+          <Cross className="top-full left-0" />
+          <Cross className="top-full left-full" />
           <Marks at={[50]} from="md" />
+          <span aria-hidden className="tuft top-full left-1/2 hidden md:block" />
           <span className="inline-flex flex-wrap items-center gap-3 px-5 py-6 sm:px-10">
-            <Logo className="h-3.5 w-auto" /> · Apache 2.0 ·
+            <Logo className="h-3.5 w-auto" /> · AGPL-3.0 ·
             <a href="https://saidev.codes" target="_blank" rel="noreferrer" className="text-[var(--label)] underline-offset-4 transition hover:text-[var(--ink)] hover:underline">by Saidev Dhal</a>
           </span>
           <span className="border-t border-[var(--line)] px-5 py-6 sm:px-10 md:border-t-0 md:border-l md:text-right">Not affiliated with Anthropic, OpenAI, xAI or Google</span>

@@ -35,3 +35,7 @@ Run `bun link` to use your checkout as `codemax`. It runs from source, so change
 ## Pull requests
 
 Keep them focused and describe what you verified by hand against real agents. Update `README.md` when user-facing behavior changes.
+
+## License
+
+codemax is licensed under the [GNU AGPL-3.0](LICENSE) with an additional permission described in [NOTICE](NOTICE). By opening a pull request you agree that your contribution is licensed under the same terms. The codemax name and logo are covered by [TRADEMARKS.md](TRADEMARKS.md), not by the license.

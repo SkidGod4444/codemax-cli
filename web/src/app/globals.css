@@ -332,9 +332,10 @@ body::-webkit-scrollbar,
   --tuft: #ffffff;
   --tuft-rim: rgb(236 53 112 / 0.45);
 }
-.quilt > :not([aria-hidden]),
+.quilt > :not([aria-hidden], [data-overlay]),
 .quilt-cell {
   position: relative;
+  min-width: 0; /* let grid cells shrink below their content on phones */
   background-image: radial-gradient(130% 95% at 50% 30%, var(--pillow-glow), transparent 65%);
   box-shadow:
     inset 0 1px 0 var(--pillow-hi),
@@ -344,7 +345,7 @@ body::-webkit-scrollbar,
     inset -18px 0 32px -28px var(--pillow-lo),
     inset 18px 0 32px -28px var(--pillow-lo);
 }
-.quilt > :not([aria-hidden])::after,
+.quilt > :not([aria-hidden], [data-overlay])::after,
 .quilt-cell::after {
   content: "";
   position: absolute;
@@ -377,4 +378,28 @@ body::-webkit-scrollbar,
   inset: 3px;
   border-radius: 9999px;
   box-shadow: inset 0 1px 1.5px rgb(90 8 40 / 0.35);
+}
+
+/* Everything clickable shows a pointer; disabled controls say so. */
+a[href],
+button,
+[role="button"],
+[role="tab"],
+[role="link"],
+summary,
+label:has(input),
+select,
+input[type="checkbox"],
+input[type="radio"],
+input[type="submit"],
+input[type="button"] {
+  cursor: pointer;
+}
+label:has(input[type="text"]),
+label:has(input:not([type])) {
+  cursor: text;
+}
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
 }

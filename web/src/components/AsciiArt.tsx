@@ -189,7 +189,8 @@ export default function AsciiArt({
   return <canvas ref={ref} aria-hidden className={`pointer-events-none absolute inset-0 ${className}`} />;
 }
 
-const stepFor = (W: number, cell: number) => (W < 500 ? Math.max(6, cell - 1) : cell);
+/** Finer grid on narrow screens so shapes and letters stay readable. */
+const stepFor = (W: number, cell: number) => (W < 500 ? Math.max(4, Math.round(cell * 0.6)) : W < 800 ? Math.max(5, cell - 1) : cell);
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const clamp01 = (v: number) => clamp(v, 0, 1);
 /** Overshoot a touch, then settle: cells "pop" into place. */

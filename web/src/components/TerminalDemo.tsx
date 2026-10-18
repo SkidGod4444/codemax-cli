@@ -234,7 +234,7 @@ export default function TerminalDemo() {
   return (
     <div className="flex h-full flex-col">
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-white shadow-[0_40px_100px_-30px_rgba(58,13,37,0.45)] ring-1 ring-white/60"
+        className="flex min-h-0 flex-1 cursor-text flex-col overflow-hidden rounded-xl bg-white shadow-[0_40px_100px_-30px_rgba(58,13,37,0.45)] ring-1 ring-white/60"
         onClick={() => inputRef.current?.focus({ preventScroll: true })}
       >
         <div className="flex items-center gap-2 border-b border-plum/10 px-4 py-3">
@@ -242,7 +242,6 @@ export default function TerminalDemo() {
           <span className="size-3 rounded-full bg-pink-200" />
           <span className="size-3 rounded-full bg-pink-100" />
           <span className="ml-3 font-mono text-xs text-plum/50">~/app — codemax</span>
-          <span className="ml-auto font-mono text-[10px] tracking-[0.16em] text-pink-500 uppercase">Live demo</span>
         </div>
         <div ref={bodyRef} className="h-[340px] space-y-0.5 overflow-y-auto overscroll-contain px-5 py-4 font-mono text-[12.5px] leading-6" aria-live="polite">
           {lines.map((l) => <Row key={l.id} l={l} />)}
@@ -256,8 +255,8 @@ export default function TerminalDemo() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKey}
             aria-label="Type a request for the demo agent"
-            placeholder={handoff ? "Press Enter to continue in Codex" : busy ? "" : 'Try "fix the bug in the cart" · / for commands'}
-            className="min-w-0 flex-1 bg-transparent caret-pink-500 outline-none placeholder:text-plum/35"
+            placeholder={handoff ? "Press Enter to continue in Codex" : busy ? "" : 'Try "fix the cart bug" · / for commands'}
+            className="min-w-0 flex-1 bg-transparent text-[16px] caret-pink-500 outline-none placeholder:text-plum/35 sm:text-[12.5px]"
             spellCheck={false}
             autoComplete="off"
           />
