@@ -10,6 +10,8 @@ export const SITE = {
   description:
     "Use Claude Code, Codex, OpenCode and Grok from one terminal. When one hits its usage limit, the next finishes your task with the same context. Uses only the subscriptions you already pay for. Free and open source.",
   repo: "https://github.com/SkidGod4444/codemax-cli",
+  /** Short link for every "GitHub" button on the site; redirects to `repo`. */
+  github: "https://ref.saidev.codes/codemax",
   author: { name: "Saidev Dhal", url: "https://saidev.codes" },
   keywords: [
     "codemax",

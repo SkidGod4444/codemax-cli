@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 
 import { INSTALL_COMMAND, SITE } from "@/lib/site";
 
-const REPO = SITE.repo;
+const REPO = SITE.github;
 const NAV: [string, string][] = [["Why", "why"], ["Agents", "agents"], ["Features", "features"], ["Get started", "start"]];
 
 /* ───────────────────────── primitives */
