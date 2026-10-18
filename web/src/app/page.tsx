@@ -33,16 +33,32 @@ function GitHubMark({ className = "size-4" }: { className?: string }) {
 
 /** A "+" registration mark centred on a grid intersection. */
 function Cross({ className = "" }: { className?: string }) {
-  return <span aria-hidden className={`pointer-events-none absolute z-10 font-mono text-[15px] leading-none text-[var(--mark)] ${className}`}>+</span>;
+  return <span aria-hidden className={`tuft ${className}`} />;
+}
+
+/**
+ * "+" marks where interior grid lines meet a horizontal line. Every section
+ * splits on the same 4-column grid (25 / 50 / 75 %), so the vertical lines
+ * run straight down the page and these crosses sit on true intersections.
+ */
+function Marks({ at, from = "lg" }: { at: number[]; from?: "md" | "lg" }) {
+  return (
+    <div aria-hidden className={`pointer-events-none absolute inset-x-0 top-0 hidden ${from === "md" ? "md:block" : "lg:block"}`}>
+      {at.map((x) => (
+        <span key={x} className="tuft top-0" style={{ left: `${x}%` }} />
+      ))}
+    </div>
+  );
 }
 
 /** One band of the page: a full-width hairline on top, crosses where it meets the frame. */
-function Band({ id, children, className = "", tone = "pink" }: { id?: string; children: React.ReactNode; className?: string; tone?: "pink" | "white" }) {
+function Band({ id, children, className = "", tone = "pink", marks }: { id?: string; children: React.ReactNode; className?: string; tone?: "pink" | "white"; marks?: number[] }) {
   return (
     <section id={id} className={`tone-${tone} relative scroll-mt-16 border-t border-[var(--line)] ${className}`}>
       <div className="relative mx-auto max-w-[1240px] border-x border-[var(--line)]">
-        <Cross className="-top-[8px] -left-[5px]" />
-        <Cross className="-top-[8px] -right-[5px]" />
+        <Cross className="top-0 left-0" />
+        <Cross className="top-0 left-full" />
+        {marks && <Marks at={marks} />}
         {children}
       </div>
     </section>
@@ -106,24 +122,27 @@ export default function Home() {
     <main className="min-h-svh bg-white">
       {/* nav */}
       <header className="tone-white sticky top-0 z-40 border-b border-[var(--line)] !bg-white">
-        <nav className="mx-auto flex h-14 max-w-[1240px] items-center justify-between border-x border-[var(--line)] px-5 sm:px-8">
-          <a href="#" aria-label="codemax home" className="-ml-5 flex h-full items-center self-stretch border-r border-[var(--line)] bg-[#ff5c8d] px-6 transition-colors hover:bg-[#f24a80] sm:-ml-8 sm:px-8">
-            <Logo className="h-[18px] w-auto" color="#ffffff" />
-          </a>
-          <div className="hidden gap-8 font-mono text-[11px] tracking-[0.2em] uppercase md:flex">
+        <nav className="quilt mx-auto grid h-14 max-w-[1240px] grid-cols-[auto_1fr_auto] border-x border-[var(--line)] md:grid-cols-4">
+          <div className="tone-pink flex items-center border-r border-[var(--line)] bg-[#ff5c8d] px-5 transition-colors hover:bg-[#f24a80] sm:px-10">
+            <a href="#" aria-label="codemax home">
+              <Logo className="h-[18px] w-auto" color="#ffffff" />
+            </a>
+          </div>
+          <div className="hidden items-center justify-center gap-8 font-mono text-[11px] tracking-[0.2em] uppercase md:col-span-2 md:flex">
             {[["Why", "why"], ["Agents", "agents"], ["Features", "features"], ["Get started", "start"]].map(([l, id]) => (
               <a key={id} href={`#${id}`} className="text-[var(--ink-3)] transition hover:text-[var(--ink)]">/ {l}</a>
             ))}
           </div>
-          <a href={REPO} target="_blank" rel="noreferrer" className="-mr-5 flex h-full items-center gap-2 self-stretch border-l border-[var(--line)] bg-[#ff5c8d] px-6 font-mono text-[11px] tracking-[0.18em] text-white uppercase transition-colors hover:bg-[#f24a80] sm:-mr-8 sm:px-8">
+          <a href={REPO} target="_blank" rel="noreferrer" className="tone-pink col-start-3 flex items-center justify-center gap-2 border-l border-[var(--line)] bg-[#ff5c8d] px-5 font-mono text-[11px] tracking-[0.18em] text-white uppercase transition-colors hover:bg-[#f24a80] md:col-start-4">
             <GitHubMark /> Star on GitHub
           </a>
         </nav>
       </header>
 
       {/* hero */}
-      <Band className="border-t-0">
-        <div className="grid lg:grid-cols-[1fr_1.05fr]">
+      <Band className="border-t-0" marks={[50]}>
+        <div className="relative"><Marks at={[25, 75]} from="md" /></div>
+        <div className="quilt grid lg:grid-cols-2">
           <div className="flex flex-col justify-center px-5 py-16 sm:px-10 lg:py-24">
             <Label>Free · Open source</Label>
             <h1 className="mt-6 text-[clamp(3rem,5.8vw,5rem)] leading-[0.95] font-serif font-normal tracking-[-0.02em] text-balance">
@@ -146,7 +165,8 @@ export default function Home() {
           </div>
         </div>
         {/* stat row */}
-        <div className="grid grid-cols-2 border-t border-[var(--line)] md:grid-cols-4">
+        <div className="quilt relative grid grid-cols-2 border-t border-[var(--line)] md:grid-cols-4">
+          <Marks at={[25, 50, 75]} from="md" />
           {[
             ["Coding agents", "4+"],
             ["Plans you can combine", "All"],
@@ -162,8 +182,8 @@ export default function Home() {
       </Band>
 
       {/* handoff */}
-      <Band id="why" tone="white">
-        <div className="grid lg:grid-cols-[0.9fr_1.1fr]">
+      <Band id="why" tone="white" marks={[25, 50, 75]}>
+        <div className="quilt grid lg:grid-cols-2">
           <div className="px-5 py-16 sm:px-10 lg:py-24">
             <Label>The problem</Label>
             <h2 className="mt-5 text-[clamp(2.4rem,4.2vw,3.6rem)] leading-[1] font-serif font-normal tracking-[-0.015em] text-balance">Limits always hit mid-task.</h2>
@@ -183,21 +203,25 @@ export default function Home() {
               ))}
             </ol>
           </div>
-          <div className="border-t border-[var(--line)] bg-[#ef4a80] p-5 sm:p-10 lg:border-t-0 lg:border-l lg:py-16">
+          <div className="border-t border-[var(--line)] bg-[#ef4a80] p-5 sm:p-8 lg:border-t-0 lg:border-l lg:py-12">
             <TerminalDemo />
           </div>
         </div>
       </Band>
 
       {/* principles */}
-      <Band>
-        <div className="grid md:grid-cols-3">
+      <Band marks={[25, 50, 75]}>
+        <div className="quilt grid md:grid-cols-4">
+          <div className="px-5 py-12 sm:px-8">
+            <Label>Why codemax</Label>
+            <p className="mt-8 font-serif text-3xl leading-[1.05]">Three reasons people switch.</p>
+          </div>
           {[
             { icon: Layers, title: "Get the most from every plan", body: "Stop letting one subscription sit idle while another runs out. Use all of them, from one place." },
             { icon: Gauge, title: "Stay in flow", body: "No more copy-pasting context into a new tool. Your task, history and changes travel with you." },
             { icon: ShieldCheck, title: "No surprise bills", body: "codemax only ever uses the plans you already pay for. Never a pay-per-token API key." },
-          ].map(({ icon: Icon, title, body }, i) => (
-            <div key={title} className={`px-5 py-12 sm:px-8 ${i ? "border-t border-[var(--line)] md:border-t-0 md:border-l" : ""}`}>
+          ].map(({ icon: Icon, title, body }) => (
+            <div key={title} className={`border-t border-[var(--line)] px-5 py-12 sm:px-8 md:border-t-0 md:border-l`}>
               <Icon className="size-6" strokeWidth={1.5} />
               <h3 className="mt-8 text-xl font-semibold tracking-tight">{title}</h3>
               <p className="mt-3 text-pretty text-[var(--ink-2)]">{body}</p>
@@ -207,8 +231,8 @@ export default function Home() {
       </Band>
 
       {/* agents */}
-      <Band id="agents" tone="white">
-        <div className="grid lg:grid-cols-[1.05fr_1fr]">
+      <Band id="agents" tone="white" marks={[25, 50, 75]}>
+        <div className="quilt grid lg:grid-cols-2">
           <div className="order-2 border-t border-[var(--line)] p-5 sm:p-8 lg:order-1 lg:border-t-0 lg:border-r">
             <Figure scene="planet" n="02" caption="One hub, every agent" className="flex aspect-square flex-col" cell={6} ink="255,79,134" />
           </div>
@@ -230,8 +254,8 @@ export default function Home() {
       </Band>
 
       {/* features */}
-      <Band id="features">
-        <div className="grid lg:grid-cols-[1fr_0.75fr]">
+      <Band id="features" marks={[50]}>
+        <div className="quilt grid lg:grid-cols-2">
           <div className="flex flex-col justify-center px-5 py-16 sm:px-10">
             <Label>Features</Label>
             <h2 className="mt-5 text-[clamp(2.4rem,4.2vw,3.6rem)] leading-[1] font-serif font-normal tracking-[-0.015em] text-balance">Everything you need to keep shipping.</h2>
@@ -243,7 +267,8 @@ export default function Home() {
             <Figure scene="cubes" n="03" caption="Pieces that fit together" className="flex aspect-square flex-col" cell={6} />
           </div>
         </div>
-        <div className="grid border-t border-[var(--line)] sm:grid-cols-2 lg:grid-cols-4">
+        <div className="quilt relative grid border-t border-[var(--line)] sm:grid-cols-2 lg:grid-cols-4">
+          <Marks at={[25, 50, 75]} />
           {features.map(({ icon: Icon, title, body }, i) => (
             <div key={title} className={`relative px-6 py-8 ${i % 4 ? "lg:border-l" : ""} ${i % 2 ? "sm:border-l" : ""} ${i >= 2 ? "border-t sm:border-t" : ""} ${i < 4 ? "lg:border-t-0" : ""} ${i === 1 ? "border-t sm:border-t-0" : ""} border-[var(--line)]`}>
               <Icon className="size-5" strokeWidth={1.6} />
@@ -255,8 +280,8 @@ export default function Home() {
       </Band>
 
       {/* start + faq */}
-      <Band id="start" tone="white">
-        <div className="grid lg:grid-cols-2">
+      <Band id="start" tone="white" marks={[25, 50, 75]}>
+        <div className="quilt grid lg:grid-cols-2">
           <div className="px-5 py-16 sm:px-10 lg:py-20">
             <Label>Get started</Label>
             <h2 className="mt-5 text-[clamp(2.4rem,4.2vw,3.6rem)] leading-[1] font-serif font-normal tracking-[-0.015em] text-balance">Up and running in a minute.</h2>
@@ -291,7 +316,8 @@ export default function Home() {
       </Band>
 
       {/* closing */}
-      <Band>
+      <Band marks={[50]}>
+        <div className="quilt-cell">
         <div className="px-5 pt-20 pb-12 text-center sm:px-10">
           <h2 className="mx-auto max-w-2xl text-[clamp(2.6rem,5vw,4.2rem)] leading-[0.98] font-serif font-normal tracking-[-0.015em] text-balance">Stop babysitting usage limits.</h2>
           <p className="mx-auto mt-5 max-w-md text-pretty text-[var(--ink-2)]">Get the full value of every AI plan you pay for — and never lose your flow to a limit again.</p>
@@ -307,12 +333,17 @@ export default function Home() {
         <div className="px-5 pb-8 sm:px-8">
           <Figure scene="wordmark" n="04" caption="codemax" className="flex aspect-[4/1] flex-col" cell={8} />
         </div>
+        </div>
       </Band>
 
       <footer className="tone-white border-t border-[var(--line)]">
-        <div className="mx-auto flex max-w-[1240px] flex-col items-center justify-between gap-2 border-x border-[var(--line)] px-5 py-6 font-mono text-[11px] tracking-[0.14em] text-[var(--ink-3)] uppercase sm:flex-row sm:px-8">
-          <span className="inline-flex items-center gap-3"><Logo className="h-3.5 w-auto" /> · Apache 2.0</span>
-          <span>Not affiliated with Anthropic, OpenAI, xAI or Google</span>
+        <div className="quilt relative mx-auto grid max-w-[1240px] border-x border-[var(--line)] font-mono text-[11px] tracking-[0.14em] text-[var(--ink-3)] uppercase md:grid-cols-2">
+          <Marks at={[50]} from="md" />
+          <span className="inline-flex flex-wrap items-center gap-3 px-5 py-6 sm:px-10">
+            <Logo className="h-3.5 w-auto" /> · Apache 2.0 ·
+            <a href="https://saidev.codes" target="_blank" rel="noreferrer" className="text-[var(--label)] underline-offset-4 transition hover:text-[var(--ink)] hover:underline">by Saidev Dhal</a>
+          </span>
+          <span className="border-t border-[var(--line)] px-5 py-6 sm:px-10 md:border-t-0 md:border-l md:text-right">Not affiliated with Anthropic, OpenAI, xAI or Google</span>
         </div>
       </footer>
     </main>

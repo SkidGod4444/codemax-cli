@@ -296,3 +296,85 @@
   background: #ffffff;
   color: var(--ink);
 }
+
+/* No visible scrollbars anywhere: scrolling still works (wheel, touch, keys). */
+html,
+body,
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/*
+ * Quilted grid: every cell bulges softly like a padded panel, a dashed
+ * thread runs just inside each seam, and tufted buttons sit where seams cross.
+ */
+.tone-pink {
+  --pillow-hi: rgb(255 255 255 / 0.22);
+  --pillow-lo: rgb(150 12 62 / 0.26);
+  --pillow-glow: rgb(255 255 255 / 0.1);
+  --stitch: rgb(255 255 255 / 0.38);
+  --tuft: #ff7aa3;
+  --tuft-rim: rgb(150 12 62 / 0.45);
+}
+.tone-white {
+  --pillow-hi: rgb(255 255 255 / 1);
+  --pillow-lo: rgb(236 53 112 / 0.13);
+  --pillow-glow: rgb(255 242 246 / 0.9);
+  --stitch: rgb(255 92 141 / 0.36);
+  --tuft: #ffffff;
+  --tuft-rim: rgb(236 53 112 / 0.45);
+}
+.quilt > :not([aria-hidden]),
+.quilt-cell {
+  position: relative;
+  background-image: radial-gradient(130% 95% at 50% 30%, var(--pillow-glow), transparent 65%);
+  box-shadow:
+    inset 0 1px 0 var(--pillow-hi),
+    inset 1px 0 0 var(--pillow-hi),
+    inset 0 22px 36px -26px var(--pillow-hi),
+    inset 0 -26px 40px -26px var(--pillow-lo),
+    inset -18px 0 32px -28px var(--pillow-lo),
+    inset 18px 0 32px -28px var(--pillow-lo);
+}
+.quilt > :not([aria-hidden])::after,
+.quilt-cell::after {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, var(--stitch) 0 5px, transparent 5px 9px) top / 100% 1px no-repeat,
+    repeating-linear-gradient(90deg, var(--stitch) 0 5px, transparent 5px 9px) bottom / 100% 1px no-repeat,
+    repeating-linear-gradient(180deg, var(--stitch) 0 5px, transparent 5px 9px) left / 1px 100% no-repeat,
+    repeating-linear-gradient(180deg, var(--stitch) 0 5px, transparent 5px 9px) right / 1px 100% no-repeat;
+}
+/* the tufted button where seams cross */
+.tuft {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 38% 32%, rgb(255 255 255 / 0.9), var(--tuft) 55%);
+  box-shadow:
+    0 0 0 1px var(--tuft-rim),
+    0 2px 3px rgb(90 8 40 / 0.3),
+    inset 0 -1px 1px rgb(90 8 40 / 0.25);
+  pointer-events: none;
+  z-index: 10;
+}
+.tuft::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 9999px;
+  box-shadow: inset 0 1px 1.5px rgb(90 8 40 / 0.35);
+}
