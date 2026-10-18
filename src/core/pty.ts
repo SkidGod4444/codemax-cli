@@ -8,6 +8,9 @@ export interface AgentProcessOptions {
   env?: Record<string, string>;
   /** Env vars removed from the child's environment. */
   dropEnv?: string[];
+  /** Initial PTY size. Defaults to the host terminal size. */
+  cols?: number;
+  rows?: number;
   onData: (chunk: Uint8Array) => void;
   onExit: (code: number | null) => void;
 }
@@ -20,7 +23,7 @@ export class AgentProcess {
   readonly startedAt = Date.now();
 
   constructor(private opts: AgentProcessOptions) {
-    const { cols, rows } = termSize();
+    const { cols, rows } = opts.cols && opts.rows ? { cols: opts.cols, rows: opts.rows } : termSize();
     this.term = new Bun.Terminal({
       cols,
       rows,

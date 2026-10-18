@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stripAnsi } from "../src/core/terminal.ts";
 
-/** Drive codemax itself inside a PTY with the fake (sh) agent. */
+/** Drive codemax's legacy --raw passthrough inside a PTY with the fake (sh) agent. */
 test("passthrough → hotkey menu → close → switch (brief typed) → quit", async () => {
   const home = mkdtempSync(join(tmpdir(), "codemax-home-"));
   const repo = mkdtempSync(join(tmpdir(), "codemax-repo-"));
@@ -12,7 +12,7 @@ test("passthrough → hotkey menu → close → switch (brief typed) → quit", 
 
   let out = "";
   const term = new Bun.Terminal({ cols: 100, rows: 30, data: (_t, c) => (out += new TextDecoder().decode(c)) });
-  const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "cli.ts"), "start", "--agent", "fake"], {
+  const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "cli.ts"), "start", "--raw", "--agent", "fake"], {
     cwd: repo,
     terminal: term,
     env: { ...process.env, CODEMAX_FAKE_AGENT: "1", CODEMAX_HOME: home, PS1: "FAKE$ ", ENV: "/dev/null", TERM: "xterm" },

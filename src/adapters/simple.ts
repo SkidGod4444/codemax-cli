@@ -41,7 +41,7 @@ export const opencode = simple({
   name: "OpenCode",
   bin: "opencode",
   // TUI positional is a project path, not a prompt → brief is typed in.
-  patterns: [/rate limit/i, /usage limit/i, /quota/i],
+  patterns: [/usage limit reached/i],
 });
 
 export const cursor = simple({
@@ -50,7 +50,7 @@ export const cursor = simple({
   bin: "cursor-agent",
   resumeArgs: (id) => ["--resume", id],
   promptPositional: true,
-  patterns: [/usage limit/i, /rate limit/i, /out of (fast )?requests/i],
+  patterns: [/usage limit reached/i, /out of (fast )?requests/i],
   apiKeyEnv: ["CURSOR_API_KEY"],
 });
 
@@ -59,7 +59,7 @@ export const grok = simple({
   name: "Grok CLI",
   bin: "grok",
   resumeArgs: (id) => ["--resume", id],
-  patterns: [/rate limit/i, /usage limit/i, /quota/i],
+  patterns: [/usage limit reached/i],
   apiKeyEnv: ["XAI_API_KEY", "GROK_API_KEY"],
 });
 
@@ -68,7 +68,7 @@ export const gemini = simple({
   name: "Gemini CLI",
   bin: "gemini",
   promptPositional: false,
-  patterns: [/quota exceeded/i, /rate limit/i, /RESOURCE_EXHAUSTED/],
+  patterns: [/quota exceeded/i, /RESOURCE_EXHAUSTED/],
   apiKeyEnv: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
 });
 
@@ -76,7 +76,7 @@ export const copilot = simple({
   id: "copilot",
   name: "Copilot CLI",
   bin: "copilot",
-  patterns: [/rate limit/i, /premium requests/i, /quota/i],
+  patterns: [/premium requests? (limit|exhausted|used up)/i],
 });
 
 /** Test-only agent: a plain shell, enabled with CODEMAX_FAKE_AGENT=1. */

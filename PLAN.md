@@ -4,6 +4,8 @@ One terminal harness that runs several coding-agent CLIs (Claude Code, Codex, Op
 
 ## Core decision: wrap the real TUIs, never headless mode
 
+**v0.2 update (2026-10-18):** passing the agent's bytes straight to the host terminal broke on every switch once Claude Code moved to the alternate screen with mouse tracking: a killed agent leaves the host in whatever modes it enabled, and codemax's own menu toggled the alternate screen underneath it. codemax now owns the screen with [OpenTUI](https://opentui.com) (Bun-native, by the OpenCode team, powers OpenCode in production). Each agent runs inside an `EmbeddedTerminalRenderable` (Ghostty VT parser); codemax paints that pane plus a status bar and menu overlay. A fresh renderable per launch means no vendor terminal state survives a switch. Ink has no equivalent, which decided the framework choice. The old passthrough stays as `codemax --raw`.
+
 codemax does **not** drive agents through `-p` / `exec` / `run --format json`. Headless modes lose the vendor UX (permission prompts, plan mode, slash commands, skills, hooks, MCP auth flows) and force auto-approve. Instead:
 
 - codemax spawns the agent's own interactive TUI inside a pseudo-terminal (`Bun.Terminal`) and passes keystrokes and screen bytes through untouched. You are using the real `claude`, `codex`, etc.

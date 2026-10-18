@@ -96,6 +96,6 @@ export const codex: Adapter = {
     if (!p) return null;
     return codexQuotaFromRollout(p);
   },
-  quotaPatterns: [/you['’]ve hit your usage limit/i, /usage limit/i, /rate limit reached/i, /insufficient_quota/i],
+  quotaPatterns: [/you['’]ve hit your usage limit/i, /usage limit reached/i],
   apiKeyEnv: ["OPENAI_API_KEY"],
 };

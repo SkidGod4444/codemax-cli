@@ -36,14 +36,6 @@ export const claude: Adapter = {
     const p = ref.transcriptPath ?? transcriptPath(ref.cwd, ref.id);
     return parseClaudeTranscript(p, ref.id);
   },
-  quotaPatterns: [
-    /you['’]ve (hit|reached) your (usage )?limit/i,
-    /claude (ai )?usage limit reached/i,
-    /usage limit reached/i,
-    /limit will reset/i,
-    /out of (extra )?usage/i,
-    /rate[_ ]limit(ed|_error)/i,
-    /overloaded_error/i,
-  ],
+  quotaPatterns: [/claude (ai )?usage limit reached/i, /out of extra usage/i, /limit will reset at/i],
   apiKeyEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
 };

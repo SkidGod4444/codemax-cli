@@ -31,6 +31,8 @@ export interface QuotaStatus {
   source: "probe" | "output" | "manual";
   detail?: string;
   at: number;
+  /** Output-text detections are guesses: they expire instead of sticking. */
+  expiresAt?: number;
 }
 
 export interface LaunchOptions {

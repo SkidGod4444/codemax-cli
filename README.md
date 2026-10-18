@@ -6,7 +6,8 @@ Built for people with more than one subscription: when one agent runs out of quo
 
 ## How it works
 
-- codemax runs the agent's **real interactive TUI** inside a pseudo-terminal and passes every keystroke through. No headless modes, no auto-approve: you get the vendor UX, permissions, plan mode, slash commands, skills and MCP exactly as shipped.
+- codemax runs the agent's **real interactive TUI** in a pseudo-terminal. No headless modes, no auto-approve: you get the vendor UX, permissions, plan mode, slash commands, skills and MCP exactly as shipped.
+- The agent draws into an **embedded virtual terminal** ([OpenTUI](https://opentui.com)'s `EmbeddedTerminalRenderable`, backed by Ghostty's VT parser), and codemax paints that plus its own one-line status bar and menu. The host terminal never sees the agent's escape sequences, so alternate screen, mouse and keyboard modes cannot leak from one agent to the next.
 - It keeps a **project ledger** in `~/.codemax/projects/<project>/`, fed from the transcript files the agents already write to disk (Claude Code and Codex today) plus `git diff --stat`.
 - On a switch it builds a bounded **handoff brief** (summary, recent turns, recent commits, uncommitted changes, last request) and gives it to the next agent as its first prompt. Switching back to an agent you used before resumes its native session.
 - Codex reports quota usage proactively in its own session file; every agent's output is also scanned for "usage limit" style messages. When one fires, codemax offers the next agent. You can always switch manually.
@@ -14,7 +15,7 @@ Built for people with more than one subscription: when one agent runs out of quo
 
 ## Install
 
-Requires [Bun](https://bun.sh) ≥ 1.3.
+Requires [Bun](https://bun.sh) ≥ 1.3 (tested on 1.3.5; `@opentui/core` declares 1.3.14, so `bun upgrade` is the first thing to try if the native renderer misbehaves).
 
 ```sh
 git clone <this repo> && cd codemax-cli
@@ -34,7 +35,9 @@ codemax brief --to codex     # preview the handoff brief
 codemax config               # ~/.codemax/config.json
 ```
 
-Inside an agent press **Ctrl+/** (sends `Ctrl+_`; configurable via `hotkey` in config) to open the codemax menu: pick another agent with the number keys or arrows, `f` toggles fresh vs. resume, `Esc` goes back, `x` quits.
+Inside an agent press **Ctrl+^** (Ctrl+Shift+6) or **Ctrl+/** to open the codemax menu: pick another agent with the number keys or arrows, `f` toggles fresh vs. resume, `Esc` goes back, `x` quits. Some terminals swallow Ctrl+/ (Warp does); run `codemax keys` to see what yours sends, and set `"hotkeys": ["ctrl+<key>"]` in the config to change it.
+
+`codemax --raw` runs the older passthrough mode without the codemax screen, for comparison or if the embedded terminal misbehaves in your terminal.
 
 When an agent exits on its own (for example you typed `/exit`), the menu opens so you can continue in another one.
 

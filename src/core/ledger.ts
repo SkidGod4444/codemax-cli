@@ -107,6 +107,12 @@ export class Ledger {
     all[q.agent] = q;
     writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
   }
+
+  clearQuota(agent?: AgentId) {
+    const all = agent ? this.quota() : {};
+    if (agent) delete all[agent];
+    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
+  }
 }
 
 export const BRIEF_MARKER = "[codemax handoff]";

@@ -4,14 +4,16 @@ import { listAdapters, getAdapter } from "../adapters/index.ts";
 import { Ledger } from "./ledger.ts";
 import { AgentProcess } from "./pty.ts";
 import { Menu, type MenuRow } from "./menu.ts";
-import { OutputScanner } from "./quota.ts";
+import { OutputScanner, isExhausted } from "./quota.ts";
 import { buildBrief } from "./brief.ts";
 import { diffStat } from "./git.ts";
-import { PASTE_END, PASTE_START, RESET_SEQ, out, termSize } from "./terminal.ts";
+import { CLEAR_SEQ, PASTE_END, PASTE_START, RESET_SEQ, out, termSize } from "./terminal.ts";
 import { findHotkey, parseHotkeys, type HotkeySpec } from "./hotkey.ts";
 
 interface Running {
   adapter: Adapter;
+  /** True while the agent has the alternate screen active (tracked from its output). */
+  altScreen: boolean;
   proc: AgentProcess;
   ref: SessionRef | null;
   scanner: OutputScanner;
@@ -111,6 +113,11 @@ export class Orchestrator {
   // ---------- agent lifecycle ----------
 
   private async launch(adapter: Adapter, o: { fresh: boolean; reason?: string; from?: AgentId }) {
+    const stale = this.quota.get(adapter.id);
+    if (stale?.source === "output") {
+      this.quota.delete(adapter.id);
+      this.ledger.clearQuota(adapter.id);
+    }
     const saved = this.ledger.sessions()[adapter.id];
     const resume = !o.fresh && saved ? saved : undefined;
     const sessionId = resume ? undefined : adapter.newSessionId?.();
@@ -118,7 +125,7 @@ export class Orchestrator {
     const brief = hasHistory ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: adapter.id, from: o.from, reason: o.reason, config: this.config }) : undefined;
 
     const spec = adapter.launch({ cwd: this.cwd, resume, sessionId, prompt: brief, extraArgs: this.config.agentArgs[adapter.id] });
-    out(RESET_SEQ);
+    out(RESET_SEQ + CLEAR_SEQ);
 
     const scanner = new OutputScanner(adapter.id, adapter.quotaPatterns, (q) => this.onQuota(q));
     const run: Running = {
@@ -129,6 +136,7 @@ export class Orchestrator {
       pendingPrompt: spec.promptConsumed ? undefined : brief,
       lastOutputAt: 0,
       firstOutputAt: 0,
+      altScreen: false,
       timers: [],
       proc: null as unknown as AgentProcess,
     };
@@ -145,7 +153,9 @@ export class Orchestrator {
         if (!run.firstOutputAt) run.firstOutputAt = now;
         run.lastOutputAt = now;
         if (!this.menu) process.stdout.write(chunk);
-        scanner.feed(this.decoder.decode(chunk, { stream: true }));
+        const text = this.decoder.decode(chunk, { stream: true });
+        trackAltScreen(run, text);
+        scanner.feed(text);
       },
       onExit: (code) => void this.onAgentExit(run, code),
     });
@@ -210,12 +220,26 @@ export class Orchestrator {
     const prev = this.quota.get(q.agent);
     this.quota.set(q.agent, q);
     this.ledger.saveQuota(q);
-    if (q.exhausted && !prev?.exhausted) {
+    if (isExhausted(q) && !isExhausted(prev)) {
       this.ledger.addEvent({ kind: "quota", agent: q.agent, detail: q.detail });
-      if (this.config.autoSwitch && !this.menu && !silent) {
-        this.openMenu(`${q.agent} reported quota exhaustion — pick the next agent`, true, `${q.agent}: ${q.detail ?? "limit reached"}`);
-      }
+      if (this.config.autoSwitch && !silent) this.offerSwitchWhenIdle(q);
     }
+  }
+
+  /** Open the menu for a quota hit only once the agent has stopped printing, so a stream is never cut. */
+  private offerSwitchWhenIdle(q: QuotaStatus) {
+    const run = this.running;
+    const tick = setInterval(() => {
+      if (this.running !== run || this.menu) return clearInterval(tick);
+      if (Date.now() - (run?.lastOutputAt ?? 0) < 2000) return;
+      clearInterval(tick);
+      const guess = q.source === "output";
+      this.openMenu(
+        guess ? `${q.agent} may be out of quota — pick the next agent, or Esc if this is a false alarm` : `${q.agent} is out of quota — pick the next agent`,
+        true,
+        `${q.agent}: ${q.detail ?? "limit reached"}${guess ? " (screen text, not confirmed; forgotten in 30 min or when you relaunch it)" : ""}`,
+      );
+    }, 500);
   }
 
   private async onAgentExit(run: Running, code: number | null) {
@@ -258,12 +282,14 @@ export class Orchestrator {
   private openMenu(title: string, canClose: boolean, notice?: string) {
     if (this.menu) return;
     this.menu = new Menu({ title, rows: this.rows(), current: this.running?.adapter.id, notice, canClose, hotkeys: this.config.hotkeys });
-    this.menu.open();
+    // If the agent already owns the alternate screen, draw over it instead of
+    // nesting another alt-screen switch the terminal cannot unwind cleanly.
+    this.menu.open(!this.running?.altScreen);
     void this.refreshDetect().then(() => this.menu?.update({ rows: this.rows() }));
   }
 
   private closeMenu() {
-    this.menu?.close();
+    this.menu?.close(!this.running?.altScreen);
     this.menu = null;
     this.running?.proc.jiggle();
   }
@@ -292,10 +318,11 @@ export class Orchestrator {
       await this.sync(prev);
       this.ledger.addEvent({ kind: "note", agent: from, detail: "stopped for switch", diffStat: await diffStat(this.cwd) });
     }
-    this.menu?.close();
+    this.menu?.close(false);
     this.menu = null;
-    out(RESET_SEQ + `codemax: handing off to ${target.name}…\r\n`);
-    const reason = from && this.quota.get(from)?.exhausted ? `${from} ran out of quota` : undefined;
+    out(RESET_SEQ + CLEAR_SEQ + `codemax: handing off to ${target.name}…\r\n`);
+    const fromQ = from ? this.quota.get(from) : undefined;
+    const reason = fromQ && isExhausted(fromQ) ? (fromQ.source === "output" ? `${from} appeared to hit its usage limit` : `${from} ran out of quota`) : undefined;
     await this.launch(target, { fresh, from, reason });
     this.switching = false;
   }
@@ -303,7 +330,7 @@ export class Orchestrator {
   private async quit() {
     this.switching = true;
     const run = this.running;
-    this.menu?.close();
+    this.menu?.close(false);
     this.menu = null;
     if (run) {
       run.timers.forEach(clearInterval);
@@ -316,4 +343,10 @@ export class Orchestrator {
     out(`codemax: bye. ledger at ${this.ledger.dir}\n`);
     this.resolveDone();
   }
+}
+
+const ALT_RE = /\x1b\[\?(?:1049|1047|47)([hl])/g;
+function trackAltScreen(run: Running, text: string) {
+  let m: RegExpExecArray | null;
+  while ((m = ALT_RE.exec(text))) run.altScreen = m[1] === "h";
 }

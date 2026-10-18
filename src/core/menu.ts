@@ -1,6 +1,6 @@
 import type { Adapter, AgentId, QuotaStatus, SessionRef } from "../adapters/types.ts";
 import { ALT_OFF, ALT_ON, CSI, out, termSize } from "./terminal.ts";
-import { quotaLabel } from "./quota.ts";
+import { isExhausted, quotaLabel } from "./quota.ts";
 import { hotkeyLabel } from "../config.ts";
 
 export interface MenuRow {
@@ -38,17 +38,18 @@ export class Menu {
   private fresh = false;
   private cursor = 0;
   constructor(private state: MenuState) {
-    const i = state.rows.findIndex((r) => r.adapter.id !== state.current && r.installed && !r.quota?.exhausted);
+    const i = state.rows.findIndex((r) => r.adapter.id !== state.current && r.installed && !isExhausted(r.quota));
     this.cursor = i >= 0 ? i : 0;
   }
 
-  open() {
-    out(ALT_ON);
+  /** `useAltScreen` false: the agent is already on the alternate screen, so just draw over it. */
+  open(useAltScreen = true) {
+    out(useAltScreen ? ALT_ON : `${CSI}?25l${CSI}H${CSI}2J`);
     this.render();
   }
 
-  close() {
-    out(ALT_OFF);
+  close(useAltScreen = true) {
+    out(useAltScreen ? ALT_OFF : `${CSI}H${CSI}2J${CSI}?25h`);
   }
 
   update(patch: Partial<MenuState>) {
@@ -69,7 +70,7 @@ export class Menu {
       const name = r.adapter.id === this.state.current ? bold(r.adapter.name) + dim(" (current)") : r.adapter.name;
       const inst = r.installed ? green("installed") + (r.version ? dim(` ${r.version}`) : "") : red("not found");
       const sess = r.session ? dim(`session ${r.session.id.slice(0, 8)}… ${ago(r.session.lastUsedAt)}`) : dim("no session");
-      const q = r.quota ? (r.quota.exhausted ? red(quotaLabel(r.quota)) : yellow(quotaLabel(r.quota))) : "";
+      const q = r.quota ? (isExhausted(r.quota) ? red(quotaLabel(r.quota)) : yellow(quotaLabel(r.quota))) : "";
       L.push(` ${sel} ${num} ${pad(name, 22)} ${pad(inst, 28)} ${pad(sess, 34)} ${q}`);
     });
     L.push("");

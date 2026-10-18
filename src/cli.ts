@@ -2,6 +2,7 @@ import { loadConfig, CONFIG_PATH, hotkeyLabel } from "./config.ts";
 import { canonicalCwd } from "./core/paths.ts";
 import { Ledger } from "./core/ledger.ts";
 import { Orchestrator } from "./core/orchestrator.ts";
+import { runApp } from "./tui/app.ts";
 import { listAdapters, getAdapter } from "./adapters/index.ts";
 import { buildBrief } from "./core/brief.ts";
 import { quotaLabel } from "./core/quota.ts";
@@ -12,12 +13,14 @@ const HELP = `codemax — one terminal for all your coding agents
 
 usage:
   codemax [start] [--agent <id>] [--fresh]   run an agent TUI under codemax (default: first in config order)
+                 [--raw]                     legacy passthrough mode without the codemax screen (no status bar)
   codemax agents                             show detected agents, saved sessions, quota
   codemax status                             project ledger summary
   codemax history [-n <count>]               print recorded turns for this project
   codemax brief [--to <id>]                  print the handoff brief that would be injected
   codemax config                             print config path and values
   codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
+  codemax quota [clear [<id>]]               show or clear remembered quota state for this project
 
 inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
 set "hotkeys": ["ctrl+<key>", ...] in the config to change it.
@@ -49,8 +52,12 @@ async function main(argv: string[]) {
       const ledger = new Ledger(cwd);
       const agent = (flag(args, "--agent") ?? flag(args, "-a") ?? config.order[0] ?? "claude") as AgentId;
       getAdapter(agent); // validate
-      const orch = new Orchestrator(config, ledger, cwd);
-      await orch.start(agent, args.includes("--fresh"));
+      if (args.includes("--raw")) {
+        const orch = new Orchestrator(config, ledger, cwd);
+        await orch.start(agent, args.includes("--fresh"));
+      } else {
+        await runApp(config, ledger, cwd, agent, args.includes("--fresh"));
+      }
       process.exit(0);
     }
     case "agents": {
@@ -99,6 +106,18 @@ async function main(argv: string[]) {
     }
     case "config": {
       console.log(`${CONFIG_PATH}\nhotkeys: ${hotkeyLabel(config.hotkeys)}\n${JSON.stringify(config, null, 2)}`);
+      return;
+    }
+    case "quota": {
+      const ledger = new Ledger(cwd);
+      if (args[0] === "clear") {
+        ledger.clearQuota(args[1] as AgentId | undefined);
+        console.log(args[1] ? `cleared quota state for ${args[1]}` : "cleared all quota state");
+        return;
+      }
+      const all = ledger.quota();
+      if (!Object.keys(all).length) return console.log("no quota state recorded");
+      for (const q of Object.values(all)) console.log(`${q.agent.padEnd(9)} ${quotaLabel(q) || "ok"}  (${q.source}, ${new Date(q.at).toLocaleString()}${q.detail ? `, ${q.detail}` : ""})`);
       return;
     }
     case "keys": {

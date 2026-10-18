@@ -1,13 +1,19 @@
 import type { AgentId, QuotaStatus } from "../adapters/types.ts";
 import { stripAnsi } from "./terminal.ts";
 
-export const GENERIC_QUOTA_PATTERNS = [
-  /too many requests/i,
-  /quota (has been )?exceeded/i,
-  /insufficient[_ ]quota/i,
-  /usage limit (reached|exceeded)/i,
-  /\b429\b.*(rate|limit)/i,
-];
+/**
+ * Vendor-neutral phrases. Deliberately narrow: "rate limit" or "429" alone
+ * show up constantly in normal coding work and must not trip the detector.
+ */
+export const GENERIC_QUOTA_PATTERNS = [/usage limit (reached|exceeded)/i, /you['’]ve (hit|reached) your (usage |weekly |session |daily )?limit/i, /insufficient[_ ]quota/i];
+
+/** How long an output-text detection counts before it is forgotten. */
+export const OUTPUT_DETECTION_TTL_MS = 30 * 60_000;
+
+export function isExhausted(q?: QuotaStatus, now = Date.now()): boolean {
+  if (!q?.exhausted) return false;
+  return !q.expiresAt || q.expiresAt > now;
+}
 
 /**
  * Scans the ANSI-stripped PTY output of one agent for quota exhaustion text.
@@ -30,7 +36,7 @@ export class OutputScanner {
       const m = this.buf.match(re);
       if (m) {
         this.lastHit = Date.now();
-        this.onHit({ agent: this.agent, exhausted: true, source: "output", detail: m[0].slice(0, 120), at: Date.now() });
+        this.onHit({ agent: this.agent, exhausted: true, source: "output", detail: `text match: "${m[0].slice(0, 80)}"`, at: Date.now(), expiresAt: Date.now() + OUTPUT_DETECTION_TTL_MS });
         this.buf = "";
         return;
       }
@@ -40,9 +46,9 @@ export class OutputScanner {
 
 export function quotaLabel(q?: QuotaStatus): string {
   if (!q) return "";
-  if (q.exhausted) {
+  if (isExhausted(q)) {
     const reset = q.resetsAt ? ` until ${new Date(q.resetsAt).toLocaleTimeString()}` : "";
-    return `EXHAUSTED${reset}`;
+    return q.source === "output" ? `exhausted? (text match)${reset}` : `EXHAUSTED${reset}`;
   }
   if (typeof q.usedPercent === "number") return `${Math.round(q.usedPercent)}% used`;
   return "";
