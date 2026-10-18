@@ -86,8 +86,9 @@ ok "Bun $version"
 # ── which version: the newest release tag, so a work-in-progress push to main
 #    never reaches users. Falls back to main only until the first release.
 if [ -z "$REF" ]; then
-  REF="$(git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null \
-    | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+  tags="$(GIT_TERMINAL_PROMPT=0 git ls-remote --tags --refs "$REPO" 'v*' 2>/dev/null)" \
+    || die "Could not reach $REPO. Check your connection, or that the repository is public."
+  REF="$(printf '%s\n' "$tags" | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
   if [ -z "$REF" ]; then
     REF=main
     ok "No release yet, installing the latest main"
@@ -104,7 +105,7 @@ else
   step "Downloading codemax $REF"
   [ -e "$DIR" ] && die "$DIR exists and is not a codemax checkout. Move it or set CODEMAX_DIR."
   mkdir -p "$(dirname "$DIR")"
-  git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DIR" \
+  GIT_TERMINAL_PROMPT=0 git clone --quiet --depth 1 --branch "$REF" "$REPO" "$DIR" \
     || die "Could not download $REPO. Check your connection, or that you have access to the repo."
 fi
 ok "$(git -C "$DIR" log -1 --format='%h %s' | cut -c1-60)"
