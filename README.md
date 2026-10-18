@@ -90,6 +90,9 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
+| `/side codex` | A side agent that reviews each turn and leaves a note when something needs attention (`/side codex auto` forwards notes itself) |
+| `/forward`, `/notes` | Send the side agent's note to the main agent; list notes |
+| `/awake on`, `/awake lid` | Keep the machine from sleeping while agents work; `lid` also with the lid closed |
 | `/undo` | Revert the last turn's changes |
 | `/usage`, `/budget` | Usage and spend per agent |
 | `/model`, `/effort`, **Shift+Tab** | Pick the model or reasoning effort, cycle permission mode |

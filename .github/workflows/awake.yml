@@ -1,0 +1,26 @@
+# Keep-awake on real machines: turn lid mode on, check the system really changed,
+# kill "codemax" with SIGKILL, check everything is put back. Runs on disposable
+# GitHub runners only, because it changes power settings.
+name: Keep awake
+
+on:
+  push:
+    branches: [main]
+    paths: [src/core/awake.ts, scripts/awake-check.ts, .github/workflows/awake.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun scripts/awake-check.ts

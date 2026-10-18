@@ -28,6 +28,17 @@ export interface Config {
   checkpoints: boolean;
   /** Refresh the public price list weekly for /usage (set false to stay offline). */
   priceUpdates: boolean;
+  /**
+   * Keep the machine awake while codemax runs: "on" prevents sleep, "lid" also keeps
+   * working with the laptop lid closed. See src/core/awake.ts for each platform.
+   */
+  awake: "off" | "on" | "lid";
+  /**
+   * Side agent: another agent that reviews the main agent's work after each turn and
+   * leaves a note when something needs attention. `forward: "auto"` sends notes to the
+   * main agent by itself; "ask" waits for /forward.
+   */
+  sideAgent: { agent: AgentId | null; forward: "ask" | "auto" };
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
   /**
@@ -49,6 +60,8 @@ export const DEFAULT_CONFIG: Config = {
   summarizeOnSwitch: true,
   bellAfterSeconds: 20,
   theme: "auto",
+  awake: "off",
+  sideAgent: { agent: null, forward: "ask" },
   brief: { turns: 10, maxChars: 8000, turnChars: 1200, resumeChars: 24000 },
 };
 
@@ -71,6 +84,7 @@ export function loadConfig(): Config {
       brief: { ...DEFAULT_CONFIG.brief, ...(raw.brief ?? {}) },
       agentArgs: { ...(raw.agentArgs ?? {}) },
       budgets: { ...(raw.budgets ?? {}) },
+      sideAgent: { ...DEFAULT_CONFIG.sideAgent, ...(raw.sideAgent ?? {}) },
       routes: Array.isArray(raw.routes) ? raw.routes : [],
     };
   } catch {

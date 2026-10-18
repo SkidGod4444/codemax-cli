@@ -91,6 +91,18 @@ export class Transcript {
     this.box.add(card);
   }
 
+  /** A side agent's note: a bordered card that stands apart from the conversation. */
+  noteCard(title: string, body: string, hint: string) {
+    if (this.gone) return;
+    this.gap();
+    const card = new BoxRenderable(this.renderer, { id: `note-${++this.n}`, width: "100%", flexDirection: "column", border: true, borderStyle: "rounded", borderColor: C.warn, paddingX: 1 });
+    card.add(new TextRenderable(this.renderer, { id: `nt-${this.n}`, content: title, fg: C.warn, attributes: 1 } as any));
+    card.add(new TextRenderable(this.renderer, { id: `nb-${this.n}`, content: styleMarkdown(body), wrapMode: "word", width: "100%" } as any));
+    card.add(new TextRenderable(this.renderer, { id: `nh-${this.n}`, content: hint, fg: C.dim, wrapMode: "word" } as any));
+    this.box.add(card);
+    this.scrollToEnd();
+  }
+
   user(text: string) {
     this.gap();
     this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.accent });

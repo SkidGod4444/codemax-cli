@@ -35,7 +35,7 @@ function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] 
   };
 }
 
-const CLAUDE_ADAPTER_PKG = "@zed-industries/claude-code-acp@0.16.2";
+const CLAUDE_ADAPTER_PKG = "@agentclientprotocol/claude-agent-acp@0.93.0";
 
 /**
  * Command for the Claude ACP adapter (it runs the user's own `claude`).
@@ -46,8 +46,8 @@ function claudeAdapterCmd(): string[] | null {
   const runningOnBun = basename(process.execPath).toLowerCase().startsWith("bun");
   if (process.platform !== "win32") {
     const candidates = [
-      join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-code-acp"),
-      join(process.cwd(), "node_modules", ".bin", "claude-code-acp"),
+      join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-agent-acp"),
+      join(process.cwd(), "node_modules", ".bin", "claude-agent-acp"),
     ];
     for (const c of candidates) if (existsSync(c)) return [c];
   }
@@ -55,15 +55,15 @@ function claudeAdapterCmd(): string[] | null {
   // do not (Windows) and when no `bun` is on PATH (installed through npm).
   if (runningOnBun) {
     try {
-      const pkgJson = Bun.resolveSync("@zed-industries/claude-code-acp/package.json", import.meta.dir);
+      const pkgJson = Bun.resolveSync("@agentclientprotocol/claude-agent-acp/package.json", import.meta.dir);
       const bin = JSON.parse(readFileSync(pkgJson, "utf8")).bin;
-      const entry = typeof bin === "string" ? bin : bin?.["claude-code-acp"];
+      const entry = typeof bin === "string" ? bin : bin?.["claude-agent-acp"];
       if (entry && existsSync(join(dirname(pkgJson), entry))) return [process.execPath, join(dirname(pkgJson), entry)];
     } catch {
       /* not installed next to codemax */
     }
   }
-  const onPath = Bun.which("claude-code-acp");
+  const onPath = Bun.which("claude-agent-acp");
   if (onPath) return [onPath];
   const bun = Bun.which("bun") ?? (runningOnBun ? process.execPath : null);
   const bunx = Bun.which("bunx") ? [Bun.which("bunx")!] : bun ? [bun, "x"] : null;

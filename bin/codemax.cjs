@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // codemax launcher for npm installs (`npm i -g codemax-cli`, `npx codemax-cli`).
 // codemax runs on Bun; this finds a Bun binary and starts src/cli.ts with it:
-//   1. the `bun` npm package installed alongside codemax (a dependency),
-//   2. its platform package directly (when install scripts were skipped),
+//   1. the `bun` npm package, if one is installed alongside codemax,
+//   2. the matching @oven/bun-<platform> package (an optional dependency of
+//      codemax; npm installs only the one for this machine, no install script),
 //   3. a `bun` already on PATH.
 "use strict";
 const { spawn, spawnSync } = require("node:child_process");

@@ -1,4 +1,5 @@
-import { loadConfig, CONFIG_PATH, hotkeyLabel } from "./config.ts";
+import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
+import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
 import { canonicalCwd } from "./core/paths.ts";
 import { Ledger } from "./core/ledger.ts";
 import { Orchestrator } from "./core/orchestrator.ts";
@@ -27,6 +28,7 @@ usage:
   codemax brief [--to <id>]                  print the handoff brief that would be injected
   codemax config                             print config path and values
   codemax keys                               show the raw bytes your terminal sends per keypress (hotkey debugging)
+  codemax awake [on|lid|off|status]          keep the machine awake while codemax runs (lid: also with the lid closed)
   codemax quota [clear [<id>]]               show or clear remembered quota state for this project
   codemax doctor [--fix]                     check agent auth/permission setup (API keys that would be billed, silent modes)
   codemax usage [--all]                      tokens and API-equivalent cost per agent for this project (or every project)
@@ -162,6 +164,28 @@ async function main(argv: string[]) {
         if (f.fix) console.log(`      fix: ${f.fix.description}${args.includes("--fix") ? "" : "  (run: codemax doctor --fix)"}`);
         if (f.fix && args.includes("--fix")) console.log(`      → ${f.fix.apply()}`);
       }
+      return;
+    }
+    case "awake": {
+      const v = (args[0] ?? "status").toLowerCase();
+      const support = process.platform === "linux" ? "sleep, lid close and shutdown are blocked (systemd-inhibit)" : process.platform === "darwin" ? "sleep is blocked; lid close needs your admin password once; macOS cannot block shutdown" : process.platform === "win32" ? "sleep is blocked; lid close switches the lid action to 'do nothing' and back; Windows cannot block shutdown" : "not supported on this platform";
+      if (v === "status") {
+        console.log(`awake: ${config.awake ?? "off"} (applies while codemax runs)\n${process.platform}: ${support}`);
+        return;
+      }
+      if (v !== "on" && v !== "lid" && v !== "off") {
+        console.error("usage: codemax awake [on|lid|off|status]");
+        process.exit(2);
+      }
+      if (v === "off") for (const n of await recoverAwake({ ...defaultAwakeDeps(), pid: -1, interactive: (fn) => fn() })) console.log(n);
+      if (v === "lid" && process.platform === "darwin") {
+        console.log("macOS needs your admin password to keep working with the lid closed (pmset disablesleep).");
+        const ok = Bun.spawnSync(["sudo", "-v"], { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exitCode === 0;
+        if (!ok) console.log("no admin rights: lid-close will not be enabled; the Mac still will not idle-sleep.");
+      }
+      saveConfigKey("awake", v);
+      console.log(v === "off" ? "awake off: the machine sleeps normally" : `awake ${v}: applies whenever codemax is running · ${support}`);
+      if (v === "lid") console.log("With the lid closed, keep the laptop somewhere it can breathe: not in a bag.");
       return;
     }
     case "quota": {

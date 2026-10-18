@@ -26,6 +26,8 @@ import pkg from "../../package.json" with { type: "json" };
 import { platformArgv, shellArgv } from "../core/spawn.ts";
 import { cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
+import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
+import { buildReviewPrompt, forwardMessage, parseNote } from "../core/review.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -89,6 +91,11 @@ export class ChatApp {
   private switching = false;
   /** Set by quit(); async work that resumes afterwards (a handoff being built) stops. */
   private closed = false;
+  /** Side agent (/side): reviews the main agent's work after each turn. */
+  private reviewer: { agent: AgentId; name: string; engine: Engine; busy: boolean; pending: boolean; since: number; primed: boolean } | null = null;
+  private notes: { ts: number; agent: AgentId; name: string; text: string }[] = [];
+  /** Keep-awake (/awake). Tests swap its system runner. */
+  awake = new Awake({ ...defaultAwakeDeps(), interactive: (fn) => this.withTerminal(fn) });
   private resolveDone!: () => void;
   readonly done: Promise<void>;
   /** Test hooks. */
@@ -177,6 +184,11 @@ export class ChatApp {
     if (!first) throw new Error("no agent with a protocol engine found (need claude, codex, opencode, grok or gemini on PATH)");
     const notes: string[] = [];
     if (first !== agent) notes.push(`${agent} has no protocol engine here; starting ${first}`);
+    for (const n of await recoverAwake({ ...defaultAwakeDeps(), interactive: (fn) => this.withTerminal(fn) }).catch(() => [])) notes.push(n);
+    if (this.config.awake && this.config.awake !== "off") {
+      const st = await this.awake.set(this.config.awake).catch(() => null);
+      if (st) notes.push(st.mode === "off" ? "keep-awake could not be turned on" : `keeping this machine awake${st.lid ? ", lid closed included" : ""} (/awake off to stop)`, ...st.notes);
+    }
     const stripped = strippedKeys();
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
     this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes });
@@ -635,9 +647,50 @@ export class ChatApp {
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
+      { name: "/side", description: "Side agent that reviews each turn: /side codex | /side codex auto | /side off", run: (a) => void this.setSide(a) },
+      { name: "/notes", description: "Notes the side agent left", run: () => this.showNotes() },
+      { name: "/forward", description: "Send the side agent's latest note (or /forward <n>) to the main agent", run: (a) => this.forwardNote(a.trim() ? Number(a) - 1 : undefined) },
+      { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/theme", description: "Colour theme: /theme dark | light | auto (saved; restart to apply everywhere)", run: (a) => this.setThemePref(a) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
+  }
+
+  /** Run something that needs the real terminal (a sudo password prompt): pause the screen around it. */
+  private async withTerminal<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      await this.renderer.suspend();
+    } catch {
+      /* test renderer */
+    }
+    try {
+      return await fn();
+    } finally {
+      try {
+        await this.renderer.resume();
+      } catch {
+        /* test renderer */
+      }
+    }
+  }
+
+  private async setAwake(arg: string) {
+    const v = arg.trim().toLowerCase();
+    if (v !== "on" && v !== "lid" && v !== "off") {
+      const s = this.awake.status;
+      this.transcript.note(`awake: ${s.mode}${s.lid ? " (lid closed included)" : ""} · /awake on keeps the machine from sleeping · /awake lid also keeps working with the lid closed · /awake off`);
+      return;
+    }
+    const st = await this.awake.set(v);
+    try {
+      saveConfigKey("awake", st.mode);
+    } catch {
+      /* read-only home */
+    }
+    this.config.awake = st.mode;
+    this.transcript.note(st.mode === "off" ? (v === "off" ? "awake off: the machine can sleep normally again" : "keep-awake could not be turned on") : `awake ${st.mode}: this machine will not sleep while codemax runs${st.lid ? ", even with the lid closed" : ""}`, st.mode === "off" ? C.dim : C.accent);
+    for (const n of st.notes) this.transcript.note(n, C.warn);
+    this.renderFooter();
   }
 
   private setThemePref(arg: string) {
@@ -1057,6 +1110,8 @@ export class ChatApp {
       const reply = block.text().trim();
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
       turn.rec?.end(stop);
+      // The side agent reviews main-agent turns that did work (not /ask, not summaries).
+      if (turn.rec && this.active === active && !this.side.has(active) && (turn.tools.size > 0 || reply.length > 0)) void this.review();
       if (isLimitNotice(reply)) {
         // The agent ended the turn with only a limit notice: treat it as running out, and leave
         // the user's request unanswered in the ledger so the next agent is asked to finish it.
@@ -1124,27 +1179,7 @@ export class ChatApp {
           this.renderFooter();
         }
         if (typeof e.usedPercent === "number") this.onQuota({ agent: active.agent, usedPercent: e.usedPercent, exhausted: e.usedPercent >= 100, source: "probe", at: Date.now() });
-        const hasTokens = (e.inputTokens ?? 0) + (e.outputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheWriteTokens ?? 0) > 0;
-        // A zero cost with no tokens (free models report cost 0 on every update) is not usage.
-        if (hasTokens || (e.costUsd ?? 0) > 0) {
-          const rec = priceRecord({
-            ts: Date.now(),
-            agent: active.agent,
-            sessionId: active.engine.session?.id ?? "?",
-            model: e.model ?? active.engine.info?.currentModel,
-            input: e.inputTokens ?? 0,
-            output: e.outputTokens ?? 0,
-            cacheRead: e.cacheReadTokens ?? 0,
-            cacheWrite: e.cacheWriteTokens ?? 0,
-            agentCostUsd: typeof e.costUsd === "number" ? e.costUsd : undefined,
-          });
-          this.ledger.addUsage(rec);
-          this.sessionCost += recordCost(rec).usd;
-          this.sessionTokens += rec.input + rec.output + rec.cacheRead + rec.cacheWrite;
-          addSpend(this.today, rec);
-          this.renderFooter();
-          this.checkBudget(active.agent);
-        }
+        this.recordUsage(active.agent, active.engine, e);
         break;
       }
       case "session":
@@ -1204,6 +1239,163 @@ export class ChatApp {
   }
 
   // ---------- working line, footer ----------
+
+  /** Price and record a usage event (main, /ask and side-agent sessions alike). */
+  private recordUsage(agent: AgentId, engine: Engine, e: Extract<EngineEvent, { type: "usage" }>) {
+    const hasTokens = (e.inputTokens ?? 0) + (e.outputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheWriteTokens ?? 0) > 0;
+    // A zero cost with no tokens (free models report cost 0 on every update) is not usage.
+    if (!hasTokens && !((e.costUsd ?? 0) > 0)) return;
+    const rec = priceRecord({
+      ts: Date.now(),
+      agent,
+      sessionId: engine.session?.id ?? "?",
+      model: e.model ?? engine.info?.currentModel,
+      input: e.inputTokens ?? 0,
+      output: e.outputTokens ?? 0,
+      cacheRead: e.cacheReadTokens ?? 0,
+      cacheWrite: e.cacheWriteTokens ?? 0,
+      agentCostUsd: typeof e.costUsd === "number" ? e.costUsd : undefined,
+    });
+    this.ledger.addUsage(rec);
+    this.sessionCost += recordCost(rec).usd;
+    this.sessionTokens += rec.input + rec.output + rec.cacheRead + rec.cacheWrite;
+    addSpend(this.today, rec);
+    this.renderFooter();
+    this.checkBudget(agent);
+  }
+
+  // ---------- side agent ----------
+
+  private async setSide(arg: string) {
+    const [who, mode] = arg.trim().toLowerCase().split(/\s+/);
+    const cfg = this.config.sideAgent ?? { agent: null, forward: "ask" as const };
+    if (!who) {
+      this.transcript.note(cfg.agent ? `side agent: ${cfg.agent} · notes ${cfg.forward === "auto" ? "go to the main agent automatically" : "wait for /forward"} · /side off to stop` : "no side agent · /side codex adds one that reviews each turn (/side codex auto forwards its notes by itself)");
+      return;
+    }
+    if (who === "off") {
+      await this.closeReviewer();
+      this.config.sideAgent = { ...cfg, agent: null };
+    } else {
+      if (!this.detect.get(who as AgentId)?.engine) return this.transcript.note(`no protocol engine for "${who}"`, C.warn);
+      await this.closeReviewer();
+      this.config.sideAgent = { agent: who as AgentId, forward: mode === "auto" ? "auto" : "ask" };
+    }
+    try {
+      saveConfigKey("sideAgent", this.config.sideAgent);
+    } catch {
+      /* read-only home */
+    }
+    const s = this.config.sideAgent;
+    this.transcript.note(s.agent ? `side agent: ${getAdapter(s.agent).name} reviews each turn and speaks up only when something needs attention${s.forward === "auto" ? "; its notes go to the main agent automatically" : " · /forward sends a note to the main agent"}` : "side agent off", s.agent ? C.accent : C.dim);
+    this.renderFooter();
+  }
+
+  private async closeReviewer() {
+    const r = this.reviewer;
+    this.reviewer = null;
+    if (r) await r.engine.close().catch(() => {});
+  }
+
+  /** After a main turn: let the side agent review the new steps (in the background). */
+  private async review() {
+    const cfg = this.config.sideAgent;
+    if (!cfg?.agent || this.closed) return;
+    let r = this.reviewer;
+    if (r?.busy) {
+      r.pending = true;
+      return;
+    }
+    if (!r || r.agent !== cfg.agent) {
+      await this.closeReviewer();
+      if (this.checkBlockers(cfg.agent).length) return;
+      const engine = this.engineFactory(cfg.agent);
+      r = { agent: cfg.agent, name: getAdapter(cfg.agent).name, engine, busy: true, pending: false, since: this.lastReviewBaseline(), primed: false };
+      this.reviewer = r;
+      try {
+        await engine.start({ cwd: this.cwd });
+      } catch (e: any) {
+        this.reviewer = null;
+        this.transcript.note(`side agent ${r.name} could not start: ${e?.message ?? e}`, C.warn);
+        return;
+      }
+    }
+    r.busy = true;
+    this.renderFooter();
+    try {
+      do {
+        r.pending = false;
+        const steps = this.ledger.journal.steps();
+        const startedAt = Date.now();
+        const context = r.primed ? undefined : await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: r.agent, config: this.config, purpose: "context" }).catch(() => undefined);
+        const prompt = buildReviewPrompt({ steps, since: r.since, mainAgent: this.active?.name ?? "the main agent", reviewer: r.agent, context });
+        if (!prompt) break;
+        let reply = "";
+        let limited = false;
+        const engine = r.engine;
+        const off = engine.onEvent((e) => {
+          if (e.type === "text_delta") reply += e.text;
+          else if (e.type === "permission_request") {
+            // A reviewer never acts: refuse anything it asks to do.
+            const no = e.request.options.find((o) => /reject|deny|decline/i.test(`${o.kind} ${o.id}`)) ?? e.request.options.at(-1);
+            if (no) engine.answerPermission(e.request.id, no.id);
+          } else if (e.type === "usage") this.recordUsage(r!.agent, engine, e);
+          else if (e.type === "error" && e.kind === "quota") limited = true;
+        });
+        await engine.prompt(prompt).catch(() => "error");
+        off();
+        r.primed = true;
+        r.since = startedAt;
+        if (limited || isLimitNotice(reply)) {
+          this.transcript.note(`side agent ${r.name} hit its usage limit; turning it off for this session`, C.warn);
+          await this.closeReviewer();
+          this.renderFooter();
+          return;
+        }
+        const note = parseNote(reply);
+        if (note && !this.closed) this.addNote(r.agent, r.name, note);
+      } while (r.pending && this.reviewer === r && !this.closed);
+    } finally {
+      if (this.reviewer === r) r.busy = false;
+      this.renderFooter();
+    }
+  }
+
+  /** Review from the start of the current task the first time. */
+  private lastReviewBaseline(): number {
+    const req = this.ledger.journal.task().request;
+    return req ? req.ts - 1 : Date.now();
+  }
+
+  private addNote(agent: AgentId, name: string, text: string) {
+    this.notes.push({ ts: Date.now(), agent, name, text });
+    this.ledger.addEvent({ kind: "note", agent, detail: `side agent note: ${text.slice(0, 2000)}` });
+    const main = this.active?.name ?? "the main agent";
+    const auto = this.config.sideAgent?.forward === "auto";
+    this.transcript.noteCard(`⚑ Note from ${name} (side agent)`, text, auto ? `sent to ${main} automatically` : `/forward sends this to ${main} · /notes lists all notes`);
+    if (auto) this.forwardNote(this.notes.length - 1);
+  }
+
+  private forwardNote(index = this.notes.length - 1) {
+    const n = this.notes[index];
+    const a = this.active;
+    if (!n) return this.transcript.note("no side-agent notes yet");
+    if (!a) return this.transcript.note("no main agent to forward to", C.warn);
+    const msg = forwardMessage(n.text, n.name);
+    if (a.turn || this.switching) {
+      this.queue.push(msg);
+      this.transcript.note(`note queued for ${a.name} until its turn ends`);
+      this.renderFooter();
+      return;
+    }
+    void this.send(a, msg);
+  }
+
+  private showNotes() {
+    if (!this.notes.length) return this.transcript.note(this.config.sideAgent?.agent ? "no notes yet: the side agent only speaks up when something needs attention" : "no side agent · /side codex adds one");
+    this.notes.forEach((n, i) => this.transcript.note(`${i + 1}. ${fmtTime(n.ts)} ${n.name}: ${n.text.split("\n")[0]!.slice(0, 140)}`));
+    this.transcript.note("/forward <n> sends a note to the main agent");
+  }
 
   private startSpinner(active: Active) {
     this.stopSpinner();
@@ -1270,6 +1462,9 @@ export class ChatApp {
     else if (this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
     else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
+    if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
+    // Narrow glyph: the footer is measured in characters, and an emoji takes two columns.
+    if (this.awake.mode !== "off") left.push({ text: `● awake${this.awake.status.lid ? " · lid" : ""}`, prio: 1 });
     const effort = a ? this.effortOption(a)?.current : undefined;
     if (a) right.push({ text: `${a.name}${a.engine.info?.currentModel ? ` · ${shortModelName(a.engine.info.currentModel)}` : ""}${effort ? ` ${effort}` : ""}`, prio: 2 });
     if (a?.context) right.push({ text: `ctx ${Math.min(100, Math.round((a.context.used / a.context.size) * 100))}%`, prio: 1 });
@@ -1345,6 +1540,8 @@ export class ChatApp {
 
   async quit() {
     this.closed = true;
+    await this.awake.release().catch(() => []);
+    await this.closeReviewer();
     this.switching = true;
     const a = this.active;
     this.closePalette();
@@ -1382,6 +1579,7 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   const pref = config.theme ?? "auto";
   applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
   const app = new ChatApp(renderer, config, ledger, cwd);
+  process.once("exit", () => app.awake.releaseSync());
   try {
     await app.start(agent, fresh, { pick });
   } finally {

@@ -544,3 +544,87 @@ test("19. /ask gets the task as context only, never the takeover instructions, a
     expect(h.ledger.journal.steps().length).toBe(before);
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("20. /awake turns keep-awake on with a footer badge, saves it, and quitting releases it", async () => {
+  const h = await harness({ claude: reply("ok") });
+  const spawned: { cmd: string; killed: boolean }[] = [];
+  const { Awake } = await import("../src/core/awake.ts");
+  (h.app as any).awake = new Awake({
+    platform: "linux", pid: process.pid, recordPath: join(mkdtempSync(join(tmpdir(), "aw-")), "r.json"),
+    which: () => "/usr/bin/systemd-inhibit", run: async () => ({ code: 0, out: "", err: "" }),
+    spawn: (cmd) => { const s = { cmd: cmd.join(" "), killed: false }; spawned.push(s); return { kill: () => void (s.killed = true) }; },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/awake lid");
+    const f = await h.frame((f) => f.includes("awake lid: this machine will not sleep") && f.includes("● awake · lid"));
+    expect(f).toContain("not in a bag");
+    expect(spawned[0]!.cmd).toContain("handle-lid-switch");
+    await h.app.quit();
+    expect(spawned[0]!.killed).toBe(true);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("21. side agent: reviews each working turn, notes appear as cards, /forward aligns the main agent, its permission asks are refused", async () => {
+  let reviews = 0;
+  const permOutcomes: string[] = [];
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: `t${Math.random()}`, title: "Bash(bun test)", kind: "execute", status: "completed", rawInput: { command: "bun test" } });
+      await ctx.say("Tests pass; shipping it.");
+    },
+    codex: async (text, ctx) => {
+      if (!text.includes("You are a side agent")) return ctx.say("?");
+      reviews++;
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: "p1", title: "Edit src/a.ts" }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } as any);
+      permOutcomes.push(r.outcome.optionId ?? r.outcome.outcome);
+      if (reviews === 1) return ctx.say("Heads up · The tests only ran once, so a flaky pass would ship.\n\n**Thin evidence**\n- `bun test` ran a single time\n- **Consider running it twice before shipping.**");
+      return ctx.say("NO_NOTE");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/side codex");
+    await h.frame((f) => f.includes("side agent: Codex reviews each turn"));
+    await h.send("ship the release");
+    let f = await h.frame((f) => f.includes("Note from Codex (side agent)"));
+    expect(f).toContain("Thin evidence");
+    expect(f).toContain("/forward sends this to");
+    expect(permOutcomes).toEqual(["reject"]);
+    await h.send("/forward");
+    await h.frame(() => h.prompts.filter((p) => p.agent === "claude").length === 2);
+    const fwd = h.prompts.filter((p) => p.agent === "claude")[1]!.text;
+    expect(fwd).toContain("A side agent (Codex) reviewing your work left this note");
+    expect(fwd).toContain("Consider running it twice");
+    // the forwarded note was itself a working turn: the side agent reviews again and stays quiet
+    await h.frame(() => reviews === 2);
+    await Bun.sleep(150);
+    f = await h.frame((fr) => fr.includes("Tests pass"));
+    expect((h.app as any).notes).toHaveLength(1);
+    // reviewer turns stay out of the journal
+    expect(h.ledger.journal.steps().some((s: any) => s.agent === "codex")).toBe(false);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("22. side agent in auto mode forwards its note to the main agent by itself", async () => {
+  let reviewed = false;
+  const h = await harness({
+    claude: async (_t, ctx) => { await ctx.say("Changed the schema."); },
+    codex: async (text, ctx) => {
+      if (reviewed || !text.includes("You are a side agent")) return ctx.say("NO_NOTE");
+      reviewed = true;
+      return ctx.say("Heads up · The schema change has no migration.\n\n**Missing migration**\n- the column was renamed in place\n- **Consider adding a migration.**");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/side codex auto");
+    await h.frame((f) => f.includes("side agent: Codex reviews each turn") && f.includes("◆ side codex"));
+    await h.send("rename the column");
+    await h.frame((f) => f.includes("sent to Claude"));
+    await h.frame(() => h.prompts.filter((p) => p.agent === "claude").some((p) => p.text.includes("Missing migration")));
+  } finally { await h.cleanup(); }
+}, 30000);

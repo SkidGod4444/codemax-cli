@@ -182,7 +182,7 @@ function whereItStopped(steps: Step[], end: StepOf<"end"> | undefined): string[]
   return out;
 }
 
-function formatStep(s: Step): string | null {
+export function formatStep(s: Step): string | null {
   switch (s.kind) {
     case "user":
       return `- USER: ${oneLine(s.text, 600)}`;
