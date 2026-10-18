@@ -1,0 +1,298 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-serif: var(--font-serif);
+  --color-pink-50: var(--pink-50);
+  --color-pink-100: var(--pink-100);
+  --color-pink-200: var(--pink-200);
+  --color-pink-300: var(--pink-300);
+  --color-pink-400: var(--pink-400);
+  --color-pink-500: var(--pink-500);
+  --color-pink-600: var(--pink-600);
+  --color-plum: var(--plum);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --animate-skeleton: skeleton 2s -1s infinite linear;
+  --animate-caret-blink: 1s ease-out infinite caret-blink;
+  --animate-toast-success-odd: toast-success-odd 0.32s cubic-bezier(0.5, 1, 0.89, 1);
+  --animate-toast-success-even: toast-success-even 0.32s cubic-bezier(0.5, 1, 0.89, 1);
+  --animate-toast-error-odd: toast-error-odd 0.28s cubic-bezier(0.5, 1, 0.89, 1);
+  --animate-toast-error-even: toast-error-even 0.28s cubic-bezier(0.5, 1, 0.89, 1);
+  --font-heading: var(--font-heading);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar: var(--sidebar);
+  --color-code-highlight: var(--code-highlight);
+  --code-foreground: var(--code-foreground);
+  --color-code: var(--code);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-ring: var(--ring);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-input: var(--input);
+  --color-destructive: var(--destructive);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning: var(--warning);
+  --color-success-foreground: var(--success-foreground);
+  --color-success: var(--success);
+  --color-info-foreground: var(--info-foreground);
+  --color-info: var(--info);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+  @keyframes skeleton {
+  to {
+    background-position: -200% 0;
+    }
+  }
+  @keyframes caret-blink {
+  0%, 70%, to {
+    opacity: 1;
+    }
+  20%, 50% {
+    opacity: 0;
+    }
+  }
+  @keyframes toast-success-odd {
+  0% {
+    scale: 1;
+    }
+  30% {
+    scale: 1.025;
+    }
+  60% {
+    scale: 0.99;
+    }
+  100% {
+    scale: 1;
+    }
+  }
+  @keyframes toast-error-odd {
+  0% {
+    translate: 0 0;
+    }
+  25% {
+    translate: -3px 0;
+    }
+  50% {
+    translate: 3px 0;
+    }
+  75% {
+    translate: -3px 0;
+    }
+  100% {
+    translate: 0 0;
+    }
+  }
+  @keyframes toast-success-even {
+  0% {
+    scale: 1;
+    }
+  30% {
+    scale: 1.025;
+    }
+  60% {
+    scale: 0.99;
+    }
+  100% {
+    scale: 1;
+    }
+  }
+  @keyframes toast-error-even {
+  0% {
+    translate: 0 0;
+    }
+  25% {
+    translate: -3px 0;
+    }
+  50% {
+    translate: 3px 0;
+    }
+  75% {
+    translate: -3px 0;
+    }
+  100% {
+    translate: 0 0;
+    }
+  }
+}
+
+/*
+ * codemax: pink grounds, white ASCII. Section backgrounds step through the
+ * pink scale; type and glyphs are white; the one dark ink is plum.
+ */
+:root {
+  --pink-50: #fff2f6;
+  --pink-100: #ffe1eb;
+  --pink-200: #ffc3d6;
+  --pink-300: #ff9dbb;
+  --pink-400: #ff77a0;
+  --pink-500: #ff4f86;
+  --pink-600: #ec3570;
+  --plum: #3a0d25;
+
+  --background: var(--pink-400);
+  --foreground: #ffffff;
+  --card: rgb(255 255 255 / 0.14);
+  --card-foreground: #ffffff;
+  --popover: #ff6b98;
+  --popover-foreground: #ffffff;
+  --primary: #ffffff;
+  --primary-foreground: var(--pink-600);
+  --secondary: rgb(255 255 255 / 0.18);
+  --secondary-foreground: #ffffff;
+  --muted: rgb(255 255 255 / 0.12);
+  --muted-foreground: rgb(255 255 255 / 0.78);
+  --accent: rgb(255 255 255 / 0.16);
+  --accent-foreground: #ffffff;
+  --border: rgb(255 255 255 / 0.3);
+  --input: rgb(255 255 255 / 0.4);
+  --ring: rgb(255 255 255 / 0.7);
+  --destructive: var(--plum);
+  --destructive-foreground: #ffffff;
+  --info: #ffffff;
+  --info-foreground: #ffffff;
+  --success: #ffffff;
+  --success-foreground: #ffffff;
+  --warning: #ffffff;
+  --warning-foreground: #ffffff;
+  --chart-1: #ffffff;
+  --chart-2: var(--pink-100);
+  --chart-3: var(--pink-200);
+  --chart-4: var(--pink-300);
+  --chart-5: var(--plum);
+  --code: #ffffff;
+  --code-foreground: var(--plum);
+  --code-highlight: var(--pink-50);
+  --radius: 0.9rem;
+  --sidebar: var(--pink-400);
+  --sidebar-accent: rgb(255 255 255 / 0.16);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgb(255 255 255 / 0.3);
+  --sidebar-foreground: #ffffff;
+  --sidebar-primary: #ffffff;
+  --sidebar-primary-foreground: var(--pink-600);
+  --sidebar-ring: rgb(255 255 255 / 0.7);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-background text-foreground;
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+  }
+}
+
+::selection {
+  background: #ffffff;
+  color: var(--pink-600);
+}
+
+/* thin construction grid with + crosses at the corners */
+.grid-frame {
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.16) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.16) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%;
+}
+.cross::before,
+.cross::after {
+  content: "+";
+  position: absolute;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1;
+  color: rgb(255 255 255 / 0.7);
+}
+.cross::before { top: -7px; left: -4px; }
+.cross::after { bottom: -7px; right: -4px; }
+
+/* [ bracket ] corners around a block */
+.brackets { position: relative; }
+.brackets > .bk {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-color: #fff;
+}
+.brackets > .bk.tl { top: 0; left: 0; border-top: 2px solid; border-left: 2px solid; }
+.brackets > .bk.tr { top: 0; right: 0; border-top: 2px solid; border-right: 2px solid; }
+.brackets > .bk.bl { bottom: 0; left: 0; border-bottom: 2px solid; border-left: 2px solid; }
+.brackets > .bk.br { bottom: 0; right: 0; border-bottom: 2px solid; border-right: 2px solid; }
+
+.text-balance { text-wrap: balance; }
+
+/* ── section tones: pink bands and white bands share one set of classes */
+.tone-pink {
+  --ink: #ffffff;
+  --ink-2: rgb(255 255 255 / 0.9);
+  --ink-3: rgb(255 255 255 / 0.75);
+  --line: rgb(255 255 255 / 0.32);
+  --line-strong: rgb(255 255 255 / 0.6);
+  --mark: rgb(255 255 255 / 0.85);
+  --label: rgb(255 255 255 / 0.78);
+  --soft: rgb(255 255 255 / 0.15);
+  --hover: rgb(255 255 255 / 0.15);
+  --pill-bg: #ffffff;
+  --pill-fg: #e23571;
+  --primary: #ffffff;
+  --primary-foreground: #e23571;
+  --muted-foreground: rgb(255 255 255 / 0.8);
+  --border: rgb(255 255 255 / 0.32);
+  background: #ff5c8d;
+  color: var(--ink);
+}
+.tone-white {
+  --ink: #3a0d25;
+  --ink-2: rgb(58 13 37 / 0.8);
+  --ink-3: rgb(58 13 37 / 0.6);
+  --line: rgb(255 92 141 / 0.32);
+  --line-strong: rgb(255 92 141 / 0.7);
+  --mark: #ff5c8d;
+  --label: #e23571;
+  --soft: #fff2f6;
+  --hover: #ffe1eb;
+  --pill-bg: #ff5c8d;
+  --pill-fg: #ffffff;
+  --primary: #ff4f86;
+  --primary-foreground: #ffffff;
+  --muted-foreground: rgb(58 13 37 / 0.6);
+  --border: rgb(255 92 141 / 0.32);
+  background: #ffffff;
+  color: var(--ink);
+}

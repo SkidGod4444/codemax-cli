@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" width="360" alt="codemax" />
+</p>
+
 # codemax
 
 **One terminal for every coding agent you pay for.** codemax drives Claude Code, Codex, OpenCode, Grok and Gemini CLI from a single chat, keeps one conversation and project history across all of them, and hands the task to the next agent when one runs out of quota.
