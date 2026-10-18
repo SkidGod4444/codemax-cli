@@ -6,6 +6,7 @@ import type { Engine, EngineFactory } from "./types.ts";
 import { AcpEngine, type UsageSample } from "./acp.ts";
 import { CodexEngine } from "./codex.ts";
 import { ClaudeUsageTail } from "../transcripts/claude-usage.ts";
+import { antigravityServer } from "./antigravity.ts";
 
 /** Grok writes ~/.grok/sessions/<encoded cwd>/<session>/usage.json with per-turn totals. */
 function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] } {
@@ -113,6 +114,13 @@ const factories: EngineFactory[] = [
     // `cursor-agent acp` (Cursor Agent 2026.10+) asks before shell commands and edits, and
     // exposes its modes (agent / plan / ask) and models as ACP config options.
     create: () => new AcpEngine({ agent: "cursor", name: "Cursor Agent", cmd: ["cursor-agent", "acp"] }),
+  },
+  {
+    agent: "antigravity",
+    // Google's ACP server for Antigravity (installed on request, see antigravity.ts), driven over
+    // plain pipes and signed in with the user's Google account only, never an API key.
+    available: async () => !!Bun.which("agy") && !!antigravityServer(),
+    create: () => new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: antigravityServer()!.cmd, plainPipes: true, signIn: ["oauth-personal", "oauth-business"] }),
   },
   {
     agent: "gemini",

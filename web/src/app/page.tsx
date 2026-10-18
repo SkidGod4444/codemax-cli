@@ -97,7 +97,7 @@ const agents = [
   { name: "OpenCode", plan: "Your OpenCode login", status: "Supported" },
   { name: "Grok", plan: "SuperGrok", status: "Supported" },
   { name: "Cursor", plan: "Cursor plans", status: "Supported" },
-  { name: "Gemini CLI", plan: "Google AI plans", status: "Coming soon" },
+  { name: "Antigravity CLI", plan: "Google AI plans", status: "Supported" },
   { name: "Copilot", plan: "GitHub Copilot plans", status: "Coming soon" },
 ] as const;
 
@@ -116,7 +116,7 @@ const faqs = [
   { q: "Will codemax cost me extra?", a: "No. codemax is free and open source, and it only uses the subscriptions you already pay for. It never bills an API key, and it warns you if anything on your machine would." },
   { q: "Does it replace Claude Code or Codex?", a: "No. Those agents still do the work. codemax is the one place you use them from, so you can move between them freely and never start from scratch." },
   { q: "Is my code safe?", a: "Everything runs on your machine. Your code goes only to the agents you already use, under your own accounts, and every edit asks for your approval first." },
-  { q: "Which agents does it work with?", a: "Claude Code, Codex, OpenCode, Grok and Cursor today, with Gemini CLI and Copilot next." },
+  { q: "Which agents does it work with?", a: "Claude Code, Codex, OpenCode, Grok, Cursor and Google's Antigravity CLI today, with Copilot next." },
   { q: "Who is it for?", a: "Developers who pay for more than one AI coding plan and are tired of hitting a limit in the middle of real work." },
 ];
 

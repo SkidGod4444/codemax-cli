@@ -89,9 +89,10 @@ async function main(argv: string[]) {
         const s = sessions[a.id];
         const q = quota[a.id];
         console.log(
-          `${a.id.padEnd(9)} ${a.name.padEnd(13)} ${d.installed ? `✓ ${d.version ?? ""}`.padEnd(14) : "✗ not found".padEnd(14)} ` +
+          `${a.id.padEnd(12)} ${a.name.padEnd(16)} ${d.installed ? `✓ ${d.version ?? ""}`.padEnd(14) : (d.problem ? "✗ broken" : "✗ not found").padEnd(14)} ` +
             `${s ? `session ${s.id.slice(0, 8)}…` : "no session".padEnd(16)} ${q ? quotaLabel(q) : ""}`,
         );
+        if (d.problem) console.log(`          ${d.problem}`);
       }
       return;
     }

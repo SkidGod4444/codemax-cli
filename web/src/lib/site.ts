@@ -21,6 +21,7 @@ export const SITE = {
     "Codex CLI",
     "OpenCode",
     "Grok CLI",
+    "Antigravity CLI",
     "Gemini CLI",
     "usage limit",
     "AI subscription",

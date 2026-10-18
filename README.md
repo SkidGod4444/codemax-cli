@@ -5,7 +5,7 @@
 <p align="center"><b>Every AI coding plan you pay for. One terminal.</b></p>
 
 <p align="center">
-  Claude Code · Codex · OpenCode · Grok · Cursor · Gemini CLI
+  Claude Code · Codex · OpenCode · Grok · Cursor · Antigravity CLI
 </p>
 
 ---
@@ -79,21 +79,22 @@ cd codemax-cli && bun install && bun link
 | OpenCode | Your OpenCode login | Supported |
 | Grok | SuperGrok | Supported |
 | Cursor Agent | Cursor plans | Supported (needs Cursor Agent 2026.10 or newer). Changing its model with `/model` also changes Cursor's own default. |
-| Gemini CLI | Google AI plans | Early, untested |
+| Antigravity CLI | Google AI plans | Supported. It has no ACP mode of its own, so codemax offers to download Google's official ACP server for it (about 110 MB, once, from dl.google.com) the first time you switch to it, and signs in with your Google account (a browser may open once). It reports context size but not token counts, so `/usage` shows input only. |
+| Gemini CLI | Google AI plans | Replaced by Antigravity CLI for Google AI plans; still works if installed |
 | Copilot CLI | GitHub Copilot plans | In its own UI via `codemax --tui` |
 
 ## Everyday keys
 
 | | |
 |---|---|
+| **↑** on an empty prompt | Edit a queued message (↑ again for the one before); Enter puts it back, clear it and Enter to remove it, Esc leaves it as it was |
 | `/switch` or **Ctrl+^** | Move to another agent, conversation included |
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
 | `/update` | Update codemax when a new version is out (also `codemax update`) |
 | `/config` | Every setting in one panel: theme, keep awake, side agent and its model, handoffs, snapshots… |
-| `/side` | Pick a side agent and its model; it reviews each turn and leaves a note when something needs attention (`/side codex <model> auto` forwards notes itself) |
-| `/forward`, `/notes`, `/review` | Send the side agent's note to the main agent; list notes; ask for a review now. How often it reviews is in `/config`; each review uses the side agent's plan, so a different subscription than the main agent is best |
+| Side agent | Turn it on in `/config` and pick its agent and model. It reviews the work in the background and speaks up only when something needs attention: its note waits above the prompt, where **1** expands it, **2** sends it to the main agent to discuss, **0** dismisses it. It never uses the main agent's plan unless you allow that in `/config` |
 | `/awake on`, `/awake lid` | Keep the machine from sleeping while agents work; `lid` also with the lid closed |
 | `/undo` | Revert the last turn's changes |
 | `/usage`, `/budget` | Usage and spend per agent |
@@ -111,7 +112,7 @@ cd codemax-cli && bun install && bun link
 
 | Key | Default | What it does |
 |---|---|---|
-| `order` | `["claude", "codex", "opencode", "cursor", "grok", "gemini", "copilot"]` | Which agent comes next on a handoff |
+| `order` | `["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot", "gemini"]` | Which agent comes next on a handoff |
 | `budgets` | `{}` | Daily limit per agent, e.g. `{"claude": 20, "all": 50}` |
 | `routes` | `[]` | Send matching messages to a specific agent |
 | `checkpoints` | `true` | Snapshots for `/undo` |

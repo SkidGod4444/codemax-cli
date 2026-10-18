@@ -1,8 +1,9 @@
 import { ClientSideConnection, ndJsonStream, type Client, type Stream } from "@agentclientprotocol/sdk";
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, StopReason } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, QuestionAnswer, StopReason } from "./types.ts";
+import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
-import { platformArgv } from "../core/spawn.ts";
+import { IS_WINDOWS, platformArgv } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
 
 export interface UsageSample {
@@ -22,6 +23,16 @@ export interface AcpEngineOptions {
   env?: Record<string, string>;
   /** Pre-built stream (tests inject an in-process agent). When set, `cmd` is not spawned. */
   stream?: Stream;
+  /**
+   * Run the agent behind plain pipes (`cat | agent | cat`, macOS/Linux). Bun gives a child
+   * socket stdio; Antigravity's Python ACP server never answers on a socket.
+   */
+  plainPipes?: boolean;
+  /**
+   * Sign-in methods codemax may use when the agent says "Authentication required" (its
+   * subscription login only, never an API-key method). A browser may open the first time.
+   */
+  signIn?: string[];
   /** False when the agent is known to auto-approve tools over ACP (surfaced to the user). */
   permissionPrompts?: boolean;
   /**
@@ -43,6 +54,9 @@ export class AcpEngine implements Engine {
   private conn: ClientSideConnection | null = null;
   private proc: Bun.Subprocess | null = null;
   private pendingPermissions = new Map<string, (optionId: string | null) => void>();
+  private pendingQuestions = new Map<string, (answer: QuestionAnswer) => void>();
+  /** cancel() was called during the current turn. */
+  private cancelled = false;
   private permSeq = 0;
   private turnActive = false;
   private tail: { read(): UsageSample[] } | null = null;
@@ -69,7 +83,18 @@ export class AcpEngine implements Engine {
     const stream = this.opts.stream ?? this.spawn(o.cwd);
     const client: Client = {
       requestPermission: (p) => this.onPermission(p),
-      sessionUpdate: ({ update }) => this.onUpdate(update as any),
+      // Form questions only: codemax shows them in its own dialog. URL elicitations are not advertised.
+      createElicitation: (p) => this.onElicitation(p) as any,
+      sessionUpdate: ({ sessionId, update }) => {
+        // Another session on this connection is a spawned agent (Cursor, Grok): its steps
+        // are its activity, never part of the main transcript.
+        if (sessionId && this.session && sessionId !== this.session.id) return this.onChildSession(sessionId, update as any);
+        this.onUpdate(update as any);
+      },
+      // Cursor reports a finished Task subagent with its own notification.
+      extNotification: async (method: string, params: any) => {
+        if (method === "cursor/task" && params?.toolCallId) this.emit({ type: "subagent", id: params.toolCallId, name: params.subagentType, task: params.description, status: "done" });
+      },
       readTextFile: async (p) => ({ content: await Bun.file(p.path).text() }),
       writeTextFile: async (p) => {
         await Bun.write(p.path, p.content);
@@ -77,7 +102,7 @@ export class AcpEngine implements Engine {
       },
     };
     this.conn = new ClientSideConnection(() => client, stream);
-    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false } });
+    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
 
     let sessionId: string;
     let modes: any;
@@ -85,21 +110,21 @@ export class AcpEngine implements Engine {
     let config: any;
     if (o.resume) {
       try {
-        const r: any = await this.conn.loadSession({ sessionId: o.resume.id, cwd: o.cwd, mcpServers: [] });
+        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: [] }));
         sessionId = o.resume.id;
         modes = r?.modes;
         models = r?.models;
         config = r?.configOptions;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new session` });
-        const s: any = await this.conn.newSession({ cwd: o.cwd, mcpServers: [] });
+        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [] }));
         sessionId = s.sessionId;
         config = s.configOptions;
         modes = s.modes;
         models = s.models;
       }
     } else {
-      const s: any = await this.conn.newSession({ cwd: o.cwd, mcpServers: [] });
+      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [] }));
       sessionId = s.sessionId;
       modes = s.modes;
       models = s.models;
@@ -134,8 +159,28 @@ export class AcpEngine implements Engine {
     return this.info;
   }
 
+  /** Run `fn`; if the agent wants a sign-in first, sign in with an allowed method and run it again. */
+  private async signedIn<T>(init: any, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (e: any) {
+      // -32000 is ACP's "auth required"; some agents send it as an internal error with the reason in data.
+      const needsAuth = e?.code === -32000 || /authenticat|auth required|sign.?in|log.?in/i.test(`${e?.message ?? ""} ${JSON.stringify(e?.data ?? "")}`);
+      const method = (init?.authMethods ?? []).map((m: any) => m.id).find((id: string) => this.opts.signIn?.includes(id));
+      if (!needsAuth || !this.conn) throw e;
+      if (!method) {
+        const offered = (init?.authMethods ?? []).map((m: any) => m.name ?? m.id).join(", ") || "none";
+        throw new Error(`${this.opts.name} needs you to sign in, and offers no subscription sign-in codemax may use (offered: ${offered}). codemax never uses API keys.`);
+      }
+      this.emit({ type: "log", level: "warn", message: `signing in to ${this.opts.name} with your subscription (${method}); a browser window may open the first time` });
+      await this.conn.authenticate({ methodId: method } as any);
+      return fn();
+    }
+  }
+
   private spawn(cwd: string): Stream {
-    const proc = Bun.spawn(platformArgv(this.opts.cmd), { cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const argv = this.opts.plainPipes && !IS_WINDOWS ? ["/bin/sh", "-c", 'cat | "$@" | cat', "sh", ...this.opts.cmd] : platformArgv(this.opts.cmd);
+    const proc = Bun.spawn(argv, { cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
@@ -182,9 +227,11 @@ export class AcpEngine implements Engine {
         if (u.content?.type === "text") this.emit({ type: "thought_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "tool_call":
+        this.trackSubagent(u, true);
         this.emit({ type: "tool_call", id: u.toolCallId, title: u.title ?? u.toolCallId, kind: u.kind, status: mapStatus(u.status), detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
       case "tool_call_update":
+        this.trackSubagent(u, false);
         this.emit({ type: "tool_update", id: u.toolCallId, status: u.status ? mapStatus(u.status) : undefined, title: u.title, detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
       case "plan":
@@ -215,13 +262,15 @@ export class AcpEngine implements Engine {
   async prompt(text: string): Promise<StopReason> {
     if (!this.conn || !this.session) throw new Error("engine not started");
     this.turnActive = true;
+    this.cancelled = false;
     this.turnContext = 0;
     try {
       const res: any = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] });
       this.session.lastUsedAt = Date.now();
       this.flushUsage();
       this.emitTurnUsage(res?.usage);
-      const reason = mapStop(res.stopReason);
+      // Some agents (Antigravity) end an interrupted turn with "end_turn": it was still cancelled.
+      const reason = this.cancelled ? "cancelled" : mapStop(res.stopReason);
       this.emit({ type: "turn_end", stopReason: reason });
       return reason;
     } catch (e: any) {
@@ -238,6 +287,61 @@ export class AcpEngine implements Engine {
 
   answerPermission(requestId: string, optionId: string) {
     this.pendingPermissions.get(requestId)?.(optionId);
+  }
+
+  answerQuestion(requestId: string, answer: QuestionAnswer) {
+    this.pendingQuestions.get(requestId)?.(answer);
+  }
+
+  /** Launch tool call id → whether it runs in the background (its "completed" only means launched). */
+  private subagentLaunches = new Map<string, { background: boolean }>();
+
+  /**
+   * Subagents from tool calls. A launch is Claude's Agent/Task tool, OpenCode's task tool or
+   * Cursor's "Task: …" (all carry subagent_type / description / prompt). Claude stamps each of
+   * the subagent's own tool calls with `_meta.claudeCode.parentToolUseId`: that is its activity.
+   */
+  private trackSubagent(u: any, isNew: boolean) {
+    const id = u.toolCallId;
+    const meta = u._meta?.claudeCode ?? {};
+    const parent = meta.parentToolUseId;
+    if (parent && this.subagentLaunches.has(parent)) {
+      if (isNew && u.title) this.emit({ type: "subagent", id: parent, activity: String(u.title) });
+      return;
+    }
+    const launch = this.subagentLaunches.get(id);
+    if (launch) {
+      const st = u.status;
+      if (st === "failed") this.emit({ type: "subagent", id, status: "failed" });
+      else if (st === "completed" && !launch.background) this.emit({ type: "subagent", id, status: "done" });
+      return;
+    }
+    if (!isNew) return;
+    const input = u.rawInput ?? {};
+    const tool = String(meta.toolName ?? input._toolName ?? "");
+    const type = input.subagent_type ?? input.subagentType;
+    const isLaunch = /^(agent|task)$/i.test(tool) || typeof type === "string" || /^Task: /.test(String(u.title ?? ""));
+    if (!isLaunch || !(input.prompt || input.description || type)) return;
+    this.subagentLaunches.set(id, { background: !!(input.run_in_background ?? input.background) });
+    this.emit({ type: "subagent", id, name: typeof type === "string" && type ? type : input.name ?? "agent", task: input.description ?? String(u.title ?? "").replace(/^Task: /, ""), status: "running" });
+  }
+
+  /** A spawned agent's own session (agents that run subagents as sessions). */
+  private onChildSession(sessionId: string, u: any) {
+    if (u?.sessionUpdate === "tool_call" && u.title) this.emit({ type: "subagent", id: sessionId, activity: String(u.title) });
+  }
+
+  private async onElicitation(p: any) {
+    if (p?.mode && p.mode !== "form") return { action: "decline" };
+    const id = `ask-${++this.permSeq}`;
+    const request = parseElicitation(id, p);
+    if (!request.fields.length) return { action: "decline" };
+    const answer = await new Promise<QuestionAnswer>((resolve) => {
+      this.pendingQuestions.set(id, resolve);
+      this.emit({ type: "question_request", request });
+    });
+    this.pendingQuestions.delete(id);
+    return elicitationResponse(answer);
   }
 
   private currentModelName(): string {
@@ -278,7 +382,9 @@ export class AcpEngine implements Engine {
 
   async cancel() {
     if (!this.conn || !this.session || !this.turnActive) return;
+    this.cancelled = true;
     for (const resolve of this.pendingPermissions.values()) resolve(null);
+    for (const resolve of this.pendingQuestions.values()) resolve({ action: "cancel" });
     await this.conn.cancel({ sessionId: this.session.id }).catch(() => {});
   }
 
@@ -312,8 +418,15 @@ export class AcpEngine implements Engine {
     const conn = this.conn;
     this.conn = null;
     for (const resolve of this.pendingPermissions.values()) resolve(null);
+    for (const resolve of this.pendingQuestions.values()) resolve({ action: "cancel" });
     if (conn && this.session) await conn.closeSession?.({ sessionId: this.session.id }).catch(() => {});
     if (this.proc) {
+      try {
+        // End of input first: an agent behind plain pipes (and its `cat`s) exits on EOF.
+        (this.proc.stdin as any)?.end?.();
+      } catch {
+        /* already closed */
+      }
       try {
         this.proc.kill();
       } catch {

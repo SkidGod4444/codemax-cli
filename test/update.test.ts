@@ -83,3 +83,22 @@ test("times are always 12-hour, whatever the system locale", async () => {
   expect(fmtTime12(new Date(2026, 9, 18, 0, 5).getTime())).toBe("12:05 AM");
   expect(fmtDateTime12(new Date(2026, 9, 18, 19, 25).getTime())).toBe("Oct 18, 7:25 PM");
 });
+
+test("models are shown by their full display name everywhere, never the id", async () => {
+  const { displayModelName } = await import("../src/chat/models.ts");
+  const claude = [
+    { id: "default", name: "Default (recommended)" },
+    { id: "opus", name: "Opus 5.5" },
+    { id: "sonnet", name: "Sonnet 5.5" },
+    { id: "claude-sonnet-5", name: "Sonnet 5" },
+  ];
+  expect(displayModelName("opus", claude)).toBe("Opus 5.5");
+  expect(displayModelName("default", claude)).toBe("Default");
+  expect(displayModelName("claude-opus-5-5")).toBe("Opus 5.5"); // reported in usage, not in the list
+  expect(displayModelName("claude-opus-5-5[context=300k,effort=medium]")).toBe("Opus 5.5"); // Cursor
+  expect(displayModelName("claude-haiku-5-5-20260301")).toBe("Haiku 5.5");
+  expect(displayModelName("anthropic/claude-sonnet-5")).toBe("Sonnet 5");
+  expect(displayModelName("opus", [{ id: "x", name: "Opus 4.6" }, { id: "y", name: "Opus 5.5" }])).toBe("Opus 5.5"); // saved alias
+  expect(displayModelName("gpt-6.1-codex", [{ id: "gpt-6.1-codex", name: "GPT-6.1-Codex" }])).toBe("GPT-6.1-Codex");
+  expect(displayModelName("grok-4.7")).toBe("grok-4.7");
+});

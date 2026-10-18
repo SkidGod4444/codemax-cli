@@ -1,5 +1,6 @@
 import type { AgentId } from "../adapters/types.ts";
 import { estimateCost, fmtTokens, fmtUsd, priceFor, priceProvenance } from "./pricing.ts";
+import { displayModelName } from "../chat/models.ts";
 
 /** One usage sample: a model call, a turn, or a delta reported by the agent. */
 export interface UsageRecord {
@@ -89,7 +90,7 @@ export function renderUsageTable(records: UsageRecord[], opts: { title: string; 
   }
   const head = ["agent", "calls", "input", "output", "cache read", "cache write", "est. cost"];
   const data = rows.map((t) => [
-    t.agent + (t.models.size ? ` (${[...t.models].map(shortModel).join(", ")})` : ""),
+    t.agent + (t.models.size ? ` (${[...new Set([...t.models].map(shortModel))].join(", ")})` : ""),
     String(t.calls),
     fmtTokens(t.input),
     fmtTokens(t.output),
@@ -111,6 +112,7 @@ export function renderUsageTable(records: UsageRecord[], opts: { title: string; 
   return lines;
 }
 
+/** Display name for a recorded model id ("claude-opus-5-5" → "Opus 5.5"), as everywhere else. */
 export function shortModel(m: string): string {
-  return m.replace(/^claude-/, "").replace(/^(anthropic|openai|xai|google|opencode)\//, "");
+  return displayModelName(m);
 }

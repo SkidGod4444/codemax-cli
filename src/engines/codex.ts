@@ -37,7 +37,8 @@ export class CodexEngine implements Engine {
   private threadId: string | null = null;
   private cwd = "";
   private model: string | undefined;
-  private lastTotals = { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
+  /** Cumulative token totals per thread (the main one and each spawned agent's), to emit deltas. */
+  private lastTotals = new Map<string, { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number }>();
 
   constructor(private opts: CodexEngineOptions = {}) {}
 
@@ -192,7 +193,63 @@ export class CodexEngine implements Engine {
     this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `codemax does not handle ${method}` } }));
   }
 
+  /**
+   * Token usage of one thread. Totals are cumulative per thread; the delta is emitted. A spawned
+   * agent's thread counts too: it runs on the same Codex plan, so /usage and budgets include it.
+   * Codex's inputTokens include cached ones.
+   */
+  private usageFrom(p: any, thread: string) {
+    const rl = p.rateLimits ?? p.tokenUsage?.rateLimits;
+    const used = rl?.primary?.usedPercent ?? rl?.primary?.used_percent;
+    const t = p.tokenUsage?.total;
+    const main = thread === (this.threadId ?? "main");
+    if (!t) {
+      if (typeof used === "number") this.emit({ type: "usage", usedPercent: used });
+      return;
+    }
+    const last = this.lastTotals.get(thread) ?? { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
+    const d = {
+      inputTokens: Math.max(0, (t.inputTokens ?? 0) - last.inputTokens),
+      cachedInputTokens: Math.max(0, (t.cachedInputTokens ?? 0) - last.cachedInputTokens),
+      cacheWriteInputTokens: Math.max(0, (t.cacheWriteInputTokens ?? 0) - last.cacheWriteInputTokens),
+      outputTokens: Math.max(0, (t.outputTokens ?? 0) - last.outputTokens),
+    };
+    this.lastTotals.set(thread, { inputTokens: t.inputTokens ?? 0, cachedInputTokens: t.cachedInputTokens ?? 0, cacheWriteInputTokens: t.cacheWriteInputTokens ?? 0, outputTokens: t.outputTokens ?? 0 });
+    if (!d.inputTokens && !d.outputTokens) return;
+    this.emit({
+      type: "usage",
+      inputTokens: Math.max(0, d.inputTokens - d.cachedInputTokens),
+      cacheReadTokens: d.cachedInputTokens,
+      cacheWriteTokens: d.cacheWriteInputTokens,
+      outputTokens: d.outputTokens,
+      model: main ? this.model : (p.tokenUsage?.model ?? this.model),
+      usedPercent: typeof used === "number" ? used : undefined,
+      // Context fill is the main thread's; a helper's window says nothing about it.
+      contextSize: main ? p.tokenUsage?.modelContextWindow : undefined,
+    });
+  }
+
+  /** Notifications from a spawned agent's thread: start, latest step, usage, end. */
+  private onChildThread(method: string, p: any, id: string) {
+    if (method === "thread/tokenUsage/updated" || method === "turn/tokenUsage/updated") return this.usageFrom(p, id);
+    if (method === "thread/started") {
+      const t = p.thread ?? {};
+      this.emit({ type: "subagent", id, name: t.agentRole ?? t.agentNickname, task: t.agentNickname && t.agentRole ? t.agentNickname : undefined, status: "running" });
+    } else if (method === "item/started") {
+      const it = p.item ?? {};
+      const step = it.type === "commandExecution" ? `$ ${Array.isArray(it.command) ? it.command.join(" ") : it.command ?? ""}` : it.type === "fileChange" ? `edit ${(it.changes ?? []).map((c: any) => c.path).join(", ")}` : it.type === "mcpToolCall" ? `${it.server}/${it.tool}` : undefined;
+      if (step) this.emit({ type: "subagent", id, activity: step });
+    } else if (method === "turn/completed") {
+      const status = p.turn?.status;
+      this.emit({ type: "subagent", id, status: status === "failed" || p.turn?.error ? "failed" : "done" });
+    }
+  }
+
   private onNotification(method: string, p: any) {
+    // A spawned agent runs on its own thread over this connection: its messages, tools and
+    // turn end must never land in (or end) the main turn. They become subagent activity.
+    const thread = p?.threadId ?? p?.turn?.threadId ?? (method === "thread/started" ? p?.thread?.id : undefined);
+    if (thread && this.threadId && thread !== this.threadId) return this.onChildThread(method, p, thread);
     switch (method) {
       case "item/agentMessage/delta":
         this.emit({ type: "text_delta", text: p.delta ?? "" });
@@ -207,6 +264,10 @@ export class CodexEngine implements Engine {
       case "item/updated": {
         const it = p.item ?? {};
         if (it.type === "agentMessage" || it.type === "userMessage" || it.type === "reasoning") break;
+        if (it.type === "subAgentActivity") {
+          if (it.agentThreadId) this.emit({ type: "subagent", id: it.agentThreadId, name: agentName(it.agentPath), status: it.kind === "completed" ? "done" : it.kind === "failed" ? "failed" : "running" });
+          break;
+        }
         const status: ToolStatus = method === "item/started" ? "in_progress" : it.status === "failed" || it.status === "declined" ? "failed" : method === "item/completed" ? "completed" : "in_progress";
         const title = it.type === "commandExecution" ? `$ ${Array.isArray(it.command) ? it.command.join(" ") : it.command ?? ""}` : it.type === "fileChange" ? `edit ${(it.changes ?? []).map((c: any) => c.path).join(", ")}` : it.type === "mcpToolCall" ? `${it.server}/${it.tool}` : it.type ?? "tool";
         const detail = it.aggregatedOutput ? String(it.aggregatedOutput).slice(-800) : undefined;
@@ -226,34 +287,9 @@ export class CodexEngine implements Engine {
         this.emit({ type: "plan", entries: (p.plan ?? p.entries ?? []).map((e: any) => ({ content: e.step ?? e.content, status: e.status })) });
         break;
       case "thread/tokenUsage/updated":
-      case "turn/tokenUsage/updated": {
-        const rl = p.rateLimits ?? p.tokenUsage?.rateLimits;
-        const used = rl?.primary?.usedPercent ?? rl?.primary?.used_percent;
-        const t = p.tokenUsage?.total;
-        if (t) {
-          // Totals are cumulative for the thread; emit the delta. Codex's inputTokens include cached ones.
-          const d = {
-            inputTokens: Math.max(0, (t.inputTokens ?? 0) - this.lastTotals.inputTokens),
-            cachedInputTokens: Math.max(0, (t.cachedInputTokens ?? 0) - this.lastTotals.cachedInputTokens),
-            cacheWriteInputTokens: Math.max(0, (t.cacheWriteInputTokens ?? 0) - this.lastTotals.cacheWriteInputTokens),
-            outputTokens: Math.max(0, (t.outputTokens ?? 0) - this.lastTotals.outputTokens),
-          };
-          this.lastTotals = { inputTokens: t.inputTokens ?? 0, cachedInputTokens: t.cachedInputTokens ?? 0, cacheWriteInputTokens: t.cacheWriteInputTokens ?? 0, outputTokens: t.outputTokens ?? 0 };
-          if (d.inputTokens || d.outputTokens) {
-            this.emit({
-              type: "usage",
-              inputTokens: Math.max(0, d.inputTokens - d.cachedInputTokens),
-              cacheReadTokens: d.cachedInputTokens,
-              cacheWriteTokens: d.cacheWriteInputTokens,
-              outputTokens: d.outputTokens,
-              model: this.model,
-              usedPercent: typeof used === "number" ? used : undefined,
-              contextSize: p.tokenUsage?.modelContextWindow,
-            });
-          }
-        } else if (typeof used === "number") this.emit({ type: "usage", usedPercent: used });
+      case "turn/tokenUsage/updated":
+        this.usageFrom(p, this.threadId ?? "main");
         break;
-      }
       case "turn/completed": {
         const status = p.turn?.status;
         const err = p.turn?.error;
@@ -376,4 +412,9 @@ export class CodexEngine implements Engine {
 
 function classify(msg: string) {
   return classifyError(msg);
+}
+
+/** "/root/explorer" → "explorer". */
+function agentName(path: unknown): string | undefined {
+  return typeof path === "string" && path ? path.split("/").filter(Boolean).pop() : undefined;
 }

@@ -12,6 +12,10 @@ export type EngineEvent =
   | { type: "tool_call"; id: string; title: string; kind?: string; status: ToolStatus; detail?: string; input?: unknown; output?: string; files?: string[] }
   | { type: "tool_update"; id: string; status?: ToolStatus; title?: string; detail?: string; input?: unknown; output?: string; files?: string[] }
   | { type: "permission_request"; request: PermissionRequest }
+  /** A subagent the main agent spawned (Task/Agent tool…): started, doing something, or finished. */
+  | SubagentEvent
+  /** The agent asks the user something (Claude's AskUserQuestion, MCP forms). Answer with `answerQuestion`. */
+  | { type: "question_request"; request: QuestionRequest }
   | { type: "plan"; entries: { content: string; status: string; priority?: string }[] }
   | { type: "mode"; modeId: string }
   | { type: "commands"; commands: { name: string; description?: string }[] }
@@ -68,6 +72,43 @@ export interface PermissionRequest {
   options: PermissionOption[];
 }
 
+export interface SubagentEvent {
+  type: "subagent";
+  /** Stable id (the launching tool call's id). */
+  id: string;
+  /** Agent type or name ("Explore", "general-purpose"). */
+  name?: string;
+  /** What it was asked to do (short description). */
+  task?: string;
+  /** Its latest step ("Grep(requireAuth)"). */
+  activity?: string;
+  status?: "running" | "done" | "failed";
+}
+
+export interface QuestionField {
+  /** Property name in the agent's form; the answer is keyed by it. */
+  key: string;
+  /** Short label ("Database"), when the agent gives one. */
+  title?: string;
+  question: string;
+  kind: "single" | "multi" | "text" | "number" | "boolean";
+  options: { value: string; label: string; description?: string }[];
+  /** Companion free-text field the agent accepts as "Other". */
+  otherKey?: string;
+  required?: boolean;
+  integer?: boolean;
+}
+
+export interface QuestionRequest {
+  id: string;
+  message: string;
+  fields: QuestionField[];
+  toolCallId?: string;
+}
+
+/** accept = answered; decline = the user skipped (the agent carries on); cancel = abort the request. */
+export type QuestionAnswer = { action: "accept"; content: Record<string, string | number | boolean | string[]> } | { action: "decline" } | { action: "cancel" };
+
 export interface EngineSessionRef {
   agent: AgentId;
   /** Vendor session / thread id, used to resume. */
@@ -84,6 +125,8 @@ export interface EngineMode {
 }
 
 export interface EngineStartOptions {
+  /** Let the agent ask the user questions (form elicitation). Off: the agent decides on its own. */
+  questions?: boolean;
   cwd: string;
   /** Resume a previous session instead of starting a new one. */
   resume?: EngineSessionRef;
@@ -126,6 +169,8 @@ export interface Engine {
   /** Send one user turn. Resolves when the turn ends (turn_end has been emitted). */
   prompt(text: string): Promise<StopReason>;
   answerPermission(requestId: string, optionId: string): void;
+  /** Engines that can ask the user questions (`question_request`) answer them here. */
+  answerQuestion?(requestId: string, answer: QuestionAnswer): void;
   cancel(): Promise<void>;
   setMode?(modeId: string): Promise<void>;
   setModel?(modelId: string): Promise<void>;

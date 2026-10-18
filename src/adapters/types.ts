@@ -1,4 +1,4 @@
-export type AgentId = "claude" | "codex" | "opencode" | "cursor" | "grok" | "gemini" | "copilot" | "fake";
+export type AgentId = "claude" | "codex" | "opencode" | "cursor" | "grok" | "antigravity" | "gemini" | "copilot" | "fake";
 
 export interface SessionRef {
   agent: AgentId;
@@ -60,6 +60,8 @@ export interface DetectResult {
   installed: boolean;
   path?: string;
   version?: string;
+  /** Why a CLI found on PATH does not count as installed (it failed to run). */
+  problem?: string;
 }
 
 export interface Adapter {

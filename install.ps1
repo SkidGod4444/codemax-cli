@@ -107,7 +107,7 @@ if (-not (($userPath -split ';') -contains $BunBin)) {
 if (-not (($env:Path -split ';') -contains $BunBin)) { $env:Path = "$env:Path;$BunBin" }
 
 # ── agents already on this machine
-$found = @('claude', 'codex', 'opencode', 'grok', 'gemini', 'cursor-agent', 'copilot') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }
+$found = @('claude', 'codex', 'opencode', 'grok', 'agy', 'gemini', 'cursor-agent', 'copilot') | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue }
 Say ''
 if ($found) { Say "  Agents found: $($found -join ' ')" }
 else {

@@ -62,6 +62,11 @@ export class Palette {
   }
 
   setFilter(text: string) {
+    // New text: the best match is highlighted again, so Enter picks it without arrow keys.
+    if (text !== this.filter) {
+      this.cursor = 0;
+      this.offset = 0;
+    }
     this.filter = text;
     const q = text.trim().toLowerCase();
     const scored = this.opts.items
@@ -179,7 +184,15 @@ function score(it: PaletteItem, q: string): number {
   if (label.split(/[:_\-/. ]/).some((w) => w.startsWith(needle))) return 2;
   if (label.includes(needle)) return 1.5;
   if ((it.description ?? "").toLowerCase().includes(needle)) return 1;
-  return 0;
+  // Letters in order ("mdl" → model) still find it, ranked last.
+  return isSubsequence(needle, label) ? 0.5 : 0;
+}
+
+function isSubsequence(needle: string, hay: string): boolean {
+  let i = 0;
+  for (const ch of hay) if (ch === needle[i]) i++;
+  // At least 3 letters, starting with the first: short queries stay exact ("st" is not "switch").
+  return needle.length >= 3 && hay[0] === needle[0] && i === needle.length;
 }
 
 function pad(s: string, n: number): string {

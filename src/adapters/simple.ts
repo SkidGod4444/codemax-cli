@@ -63,6 +63,17 @@ export const grok = simple({
   apiKeyEnv: ["XAI_API_KEY", "GROK_API_KEY"],
 });
 
+/** Google's coding agent for subscriptions (it replaced Gemini CLI for Google AI plans). */
+export const antigravity = simple({
+  id: "antigravity",
+  name: "Antigravity CLI",
+  bin: "agy",
+  resumeArgs: (id) => ["--conversation", id],
+  patterns: [/quota exceeded/i, /RESOURCE_EXHAUSTED/, /rate limit/i, /usage limit/i],
+  apiKeyEnv: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+});
+
+/** Gemini CLI: replaced by Antigravity CLI for Google AI plans; kept for existing installs. */
 export const gemini = simple({
   id: "gemini",
   name: "Gemini CLI",

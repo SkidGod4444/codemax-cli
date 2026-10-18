@@ -319,7 +319,7 @@ test("10. OpenCode-style agents: model from config options, exact turn usage, co
     await h.frame((f) => f.includes("new session"));
     await h.send("ping");
     const f = await h.frame((f) => f.includes("PONG") && f.includes("ctx 9%"));
-    expect(f).toContain("big-pickle");
+    expect(f).toContain("Big Pickle");
     const usage = h.ledger.usage();
     expect(usage).toHaveLength(1);
     expect(usage[0]).toMatchObject({ model: "opencode/big-pickle", input: 11142 - 6144, output: 16, cacheRead: 6144 });
@@ -367,11 +367,11 @@ test("12. one-model agents say so, and /effort switches reasoning effort through
   try {
     void h.app.start("opencode", true);
     await h.frame((f) => f.includes("new session"));
-    expect(await h.frame((f) => f.includes("grok-4.7 high"))).toBeTruthy();
+    expect(await h.frame((f) => f.includes("Grok 4.7 high"))).toBeTruthy();
     await h.send("/model");
     await h.frame((f) => f.includes("offers one model on your plan: Grok 4.7") && f.includes("/effort"));
     await h.send("/effort low");
-    await h.frame((f) => f.includes("reasoning effort: low") && f.includes("grok-4.7 low"));
+    await h.frame((f) => f.includes("reasoning effort: low") && f.includes("Grok 4.7 low"));
     expect(configCalls).toEqual([expect.objectContaining({ configId: "reasoning_effort", value: "low" })]);
   } finally { await h.cleanup(); }
 }, 30000);
@@ -385,7 +385,7 @@ test("13. agents that only list models (Claude adapter) switch through session/s
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
     await h.send("/model opus");
-    await h.frame((f) => f.includes("model: opus"));
+    await h.frame((f) => f.includes("model: Opus"));
     expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "opus" })]);
   } finally { await h.cleanup(); }
 }, 30000);
@@ -566,7 +566,7 @@ test("20. /awake turns keep-awake on with a footer badge, saves it, and quitting
   } finally { await h.cleanup(); }
 }, 30000);
 
-test("21. side agent: reviews each working turn, notes appear as cards, /forward aligns the main agent, its permission asks are refused", async () => {
+test("21. side agent: reviews each working turn, notes wait above the prompt (1 expand · 2 discuss · 0 dismiss), its permission asks are refused", async () => {
   let reviews = 0;
   const permOutcomes: string[] = [];
   const h = await harness({
@@ -586,14 +586,27 @@ test("21. side agent: reviews each working turn, notes appear as cards, /forward
   try {
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
-    await h.send("/side codex");
-    await h.frame((f) => f.includes("side agent: Codex reviews every turn"));
+    await (h.app as any).enableSide("codex", { forward: "ask", pickModel: false });
+    await h.frame((f) => f.includes("side agent: Codex reviews every turn") && f.includes("appear above the"));
     await h.send("ship the release");
-    let f = await h.frame((f) => f.includes("Note from Codex (side agent)"));
-    expect(f).toContain("Thin evidence");
-    expect(f).toContain("/forward sends this to");
+    let f = await h.frame((f) => f.includes("⚑ Heads up from Codex") && f.includes("1 expand · 2 discuss with Claude Code · 0 dismiss (type the number and pause)"));
+    expect(f).toContain("The tests only ran once, so a flaky pass would ship.");
+    expect(f).not.toContain("Thin evidence"); // collapsed until you press 1
     expect(permOutcomes).toEqual(["reject"]);
-    await h.send("/forward");
+    // A message that starts with a digit is a message: the note is untouched.
+    await h.setup.mockInput.typeText("2 more tests please");
+    await Bun.sleep(900);
+    f = await h.frame((f) => f.includes("❯ 2 more tests please"));
+    expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(1);
+    expect((h.app as any).notePanel.count).toBe(1);
+    for (let i = 0; i < "2 more tests please".length; i++) h.setup.mockInput.pressBackspace();
+    await h.frame((f) => f.includes('❯ Try "fix the failing test"'));
+    // A lone digit, then a pause: it acts on the note and leaves the prompt.
+    await h.setup.mockInput.typeText("1");
+    f = await h.frame((f) => f.includes("Thin evidence") && f.includes("1 collapse") && f.includes('❯ Try "fix the failing test"'));
+    expect(f).toContain("Consider running it twice");
+    expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(1); // nothing was sent
+    await h.setup.mockInput.typeText("2");
     await h.frame(() => h.prompts.filter((p) => p.agent === "claude").length === 2);
     const fwd = h.prompts.filter((p) => p.agent === "claude")[1]!.text;
     expect(fwd).toContain("A side agent (Codex) reviewing your work left this note");
@@ -606,6 +619,13 @@ test("21. side agent: reviews each working turn, notes appear as cards, /forward
     await h.frame(() => reviews === 2);
     await Bun.sleep(150);
     expect((h.app as any).notes).toHaveLength(1);
+    expect((h.app as any).notePanel.count).toBe(0); // the discussed note left the panel
+    // 0 dismisses a note without sending it
+    (h.app as any).addNote("codex", "Codex", "Heads up · The changelog still says 0.1.3 for this release.\n\n**Stale changelog**\n- x");
+    await h.frame((f) => f.includes("changelog still says 0.1.3"));
+    await h.setup.mockInput.typeText("0");
+    await h.frame((f) => f.includes("dismissed Codex's note: The changelog still says 0.1.3"));
+    expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(3);
     // reviewer turns stay out of the journal
     expect(h.ledger.journal.steps().some((s: any) => s.agent === "codex")).toBe(false);
   } finally { await h.cleanup(); }
@@ -624,7 +644,7 @@ test("22. side agent in auto mode forwards its note to the main agent by itself"
   try {
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
-    await h.send("/side codex auto");
+    await (h.app as any).enableSide("codex", { forward: "auto", pickModel: false });
     await h.frame((f) => f.includes("side agent: Codex reviews every turn") && f.includes("◆ side codex"));
     await h.send("rename the column");
     await h.frame((f) => f.includes("sent to Claude"));
@@ -662,13 +682,13 @@ test("23. the UI survives tiny and changing terminal sizes with long content, me
     await h.frame((f) => f.includes("Settings") || f.includes("Theme"));
     h.setup.mockInput.pressEscape();
     h.setup.resize(110, 30);
-    const f = await h.frame((f) => f.includes("Note from Codex"));
-    expect(f).toContain("Note from Codex");
+    const f = await h.frame((f) => f.includes("Heads up from Codex"));
+    expect(f).toContain("2 discuss with Claude Code");
     expect((h.app as any).uiErrors).toBe(0);
   } finally { await h.cleanup(); }
 }, 30000);
 
-test("24. /config changes settings and saves them; /side picks the side agent and its model from the agent's own list", async () => {
+test("24. /config changes settings and saves them, and turns on the side agent with a model from its own list", async () => {
   const calls: unknown[] = [];
   const h = await harness({ claude: reply("ok"), codex: reply("NO_NOTE") }, {}, undefined, {
     codex: { configCalls: calls, session: { models: { currentModelId: "gpt-5.6-terra", availableModels: [{ modelId: "gpt-5.6-terra", name: "Terra" }, { modelId: "gpt-5.6-mini", name: "Mini" }] } } },
@@ -687,21 +707,22 @@ test("24. /config changes settings and saves them; /side picks the side agent an
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("theme set to light"));
     expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).theme).toBe("light");
-    h.setup.mockInput.pressEscape();
-    await h.send("/side");
-    await h.frame((f) => f.includes("Side agent ·") && f.includes("Codex"));
+    await h.setup.mockInput.typeText("side agent");
+    await h.frame((f) => f.includes("Side agent") && !f.includes("Keep awake"));
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Side agent · now") && f.includes("its own subscription"));
     await h.setup.mockInput.typeText("codex");
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("Model for the side agent (Codex)"));
     await h.setup.mockInput.typeText("mini");
     h.setup.mockInput.pressEnter();
-    await h.frame((f) => f.includes("side agent model: gpt-5.6-mini") && f.includes("◆ side codex gpt-5.6-mini"));
+    await h.frame((f) => f.includes("side agent model: Mini") && f.includes("◆ side codex Mini"));
     expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "gpt-5.6-mini" })]);
     expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).sideAgent).toMatchObject({ agent: "codex", model: "gpt-5.6-mini" });
   } finally { await h.cleanup(); }
 }, 30000);
 
-test("25. side agent cadence: a shared plan is warned about, every 2nd turn reviews, /review forces one", async () => {
+test("25. side agent cadence: never on the main plan unless allowed, every 2nd turn reviews, paused reviews none", async () => {
   const reviewed: number[] = [];
   let turn = 0;
   const h = await harness({
@@ -714,8 +735,15 @@ test("25. side agent cadence: a shared plan is warned about, every 2nd turn revi
   try {
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
+    // Not chosen explicitly: a side agent on the main agent's own plan stays paused.
+    (h.app as any).config.sideAgent = { agent: "claude", forward: "ask", every: 1 };
+    await h.send("task 0");
+    await h.frame((fr) => fr.includes("work 1") && fr.includes("side agent paused: Claude Code is now the main agent"));
+    await Bun.sleep(150);
+    expect(reviewed).toEqual([]);
+    turn = 0;
     (h.app as any).config.sideAgent = { agent: null, forward: "ask", every: 2 };
-    await h.send("/side claude");
+    await (h.app as any).enableSide("claude", { forward: "ask", pickModel: false, samePlan: true });
     const f = await h.frame((f) => f.includes("is also the main agent"));
     expect(f).toContain("reviews every 2nd turn");
     for (let i = 1; i <= 4; i++) {
@@ -730,9 +758,9 @@ test("25. side agent cadence: a shared plan is warned about, every 2nd turn revi
     await h.frame((fr) => fr.includes("work 5"));
     await Bun.sleep(200);
     expect(reviewed).toHaveLength(2);
-    await h.send("/review");
-    await h.frame((fr) => fr.includes("found nothing worth a note"));
-    expect(reviewed).toHaveLength(3);
+    // The slash commands are gone: the side agent is set up in /config only.
+    const names = (h.app as any).builtins().map((b: any) => b.name);
+    for (const gone of ["/side", "/review", "/notes", "/forward"]) expect(names).not.toContain(gone);
   } finally { await h.cleanup(); }
 }, 30000);
 
@@ -745,7 +773,7 @@ test("26. auto mode cannot loop: note replies are not reviewed, auto-forwards ar
   try {
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
-    await h.send("/side codex auto");
+    await (h.app as any).enableSide("codex", { forward: "auto", pickModel: false });
     await h.frame((f) => f.includes("◆ side codex"));
     await h.send("build the parser");
     await h.frame((f) => f.includes("Agreed, adjusted."));
@@ -796,13 +824,15 @@ test("28. /model lists the agent's own models by name, newest first, and scrolls
     await h.frame((f) => f.includes("new session"));
     await h.send("/model");
     let f = await h.frame((f) => f.includes("Model for Claude Code") && f.includes("1/13"));
+    // One column: names only, never the ids ("opus", "claude-sonnet-5") beside them.
+    expect(f).not.toMatch(/claude-(opus|sonnet|haiku|fable)-|\b(opus|sonnet|haiku|fable)\b/);
     // newest first, Default pinned on top, equal versions in the agent's order
     const order = ["Default (recommended)", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5", "Fable 5.1", "Sonnet 5 ", "Opus 5 "];
     for (let i = 1; i < order.length; i++) expect(f.indexOf(order[i - 1]!)).toBeLessThan(f.indexOf(order[i]!));
     for (let i = 0; i < 9; i++) h.setup.mockInput.pressArrow("down");
     f = await h.frame((f) => f.includes("10/13") && f.includes("Opus 4.7"));
     h.setup.mockInput.pressEnter();
-    await h.frame((f) => f.includes("model: claude-opus-4-7"));
+    await h.frame((f) => f.includes("model: Opus 4.7"));
     expect(calls).toEqual([expect.objectContaining({ method: "session/set_model", modelId: "claude-opus-4-7" })]);
   } finally { await h.cleanup(); }
 }, 30000);
@@ -835,7 +865,8 @@ test("29. queued messages stay pinned above the prompt until sent; the spinner a
     const q2 = lines.findIndex((l) => l.includes("❯ second message"));
     const q3 = lines.findIndex((l) => l.includes("❯ third message"));
     expect(q3).toBe(q2 + 1);
-    expect(prompt - q3).toBeLessThanOrEqual(2); // directly above the input box (its top border in between)
+    expect(lines[q3 + 1]).toContain("↑ to edit or remove a queued message");
+    expect(prompt - q3).toBeLessThanOrEqual(3); // directly above the input box (the hint and its top border in between)
     release();
     await h.frame((fr) => fr.includes("Got: second message") && fr.includes("Got: third message"));
     const after = await h.frame((fr) => !fr.split("\n").slice(-6).some((l) => l.includes("third message") && l.trim().startsWith("❯ third")) || true);
@@ -878,5 +909,265 @@ test("31. Claude's plan limits show in /usage, a refused window offers the hando
     await h.frame((f) => f.includes("Claude's own usage screen"));
     await h.send("two");
     await h.frame((f) => f.includes("out of quota until") && f.includes("Continue in Codex"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("32. Warp sees the active agent's session, its permission wait and the end of the turn", async () => {
+  const { TerminalStatus } = await import("../src/core/termstatus.ts");
+  const sent: any[] = [];
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read a.ts", kind: "read", status: "completed" });
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: "p1", title: "Edit src/a.ts", kind: "edit" }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } as any);
+      await ctx.say(r.outcome.optionId === "allow" ? "Edited." : "Skipped.");
+    },
+  });
+  h.app.term = new TerminalStatus(
+    { status: (s) => void sent.push({ status: s.state }), notify: (m, t) => void sent.push(t === "warp://cli-agent" ? JSON.parse(m) : { plain: m }) },
+    { cwd: "/w/proj", env: { WARP_CLI_AGENT_PROTOCOL_VERSION: "1", WARP_CLIENT_VERSION: "v0.2026.09.30.08.29.stable_01" }, enabled: () => true, notify: () => true },
+  );
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("edit a.ts");
+    await h.frame((f) => f.includes("Do you want to proceed?"));
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Edited."));
+    await h.frame(() => sent.some((e) => e.event === "stop"));
+    const events = sent.filter((e) => e.event).map((e) => e.event);
+    expect(events).toEqual(["session_start", "prompt_submit", "tool_complete", "permission_request", "permission_replied", "stop"]);
+    expect(sent.find((e) => e.event === "permission_request")).toMatchObject({ agent: "claude", summary: "Edit src/a.ts", project: "proj" });
+    expect(sent.find((e) => e.event === "stop")).toMatchObject({ query: "edit a.ts", response: "Edited." });
+    expect(sent.filter((e) => e.status).map((e) => e.status)).toEqual(["idle", "working", "blocked", "working", "done"]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("33. an agent's questions open a dialog: digits pick, typing fills Other, Esc skips; the side agent never asks", async () => {
+  const { askUserQuestionsToCreateRequest } = await import("@agentclientprotocol/claude-agent-acp/dist/elicitation.js");
+  const qs: any[] = [
+    { question: "Which database should we use?", header: "Database", multiSelect: false, options: [{ label: "Postgres", description: "relational, the default" }, { label: "SQLite" }] },
+    { question: "Which checks should run?", header: "Checks", multiSelect: true, options: [{ label: "Lint" }, { label: "Tests" }] },
+  ];
+  const answers: any[] = [];
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      const r: any = await (ctx.conn as any).createElicitation(askUserQuestionsToCreateRequest(qs, ctx.sessionId, "t1"));
+      answers.push(r);
+      await ctx.say(r.action === "accept" ? "Thanks, going with that." : "OK, I'll pick myself.");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("set up storage");
+    let f = await h.frame((f) => f.includes("Claude Code has a question · 1 of 2"));
+    expect(f).toContain("[Database] Which database should we use?");
+    expect(f).toContain("relational, the default");
+    await h.frame((f) => f.includes("Waiting for your answer"));
+    // A letter does not pick an option: it starts the "something else" answer.
+    await h.setup.mockInput.typeText("s");
+    await h.frame((f) => f.includes("Type something else: s"));
+    h.setup.mockInput.pressBackspace();
+    await h.setup.mockInput.typeText("2");
+    f = await h.frame((f) => f.includes("Claude Code has a question · 2 of 2"));
+    expect(f).toContain("[ ] Lint");
+    await h.setup.mockInput.typeText("1");
+    await h.frame((f) => f.includes("[x] Lint"));
+    await h.setup.mockInput.typeText("Redis");
+    await h.frame((f) => f.includes("Add your own: Redis"));
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("Thanks, going with that."));
+    expect(answers[0]).toEqual({ action: "accept", content: { question_0: "SQLite", question_1: ["Lint"], question_1_custom: "Redis" } });
+    expect(f).toContain("Database: SQLite");
+    expect(f).toContain('Checks: Lint, "Redis"');
+    // Esc skips: the agent is told and carries on.
+    await h.send("again");
+    await h.frame((f) => f.includes("Claude Code has a question · 1 of 2"));
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => f.includes("OK, I'll pick myself.") && f.includes("skipped Claude Code's question"));
+    expect(answers[1]).toEqual({ action: "decline" });
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("34. the prompt grows as you type past one line, keeps the start in view, and shrinks after sending", async () => {
+  const h = await harness({ claude: reply("got it") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const long = "alpha " + "word ".repeat(40) + "omega";
+    await h.setup.mockInput.typeText(long);
+    // Both ends of the text are on screen: the box grew instead of scrolling to an empty line.
+    const f = await h.frame((f) => f.includes("❯ alpha word") && f.includes("omega"));
+    const rows = f.split("\n");
+    const top = rows.findIndex((r) => r.startsWith("❯ alpha word"));
+    const end = rows.findIndex((r) => r.includes("omega"));
+    expect(end - top).toBeGreaterThanOrEqual(1);
+    expect(rows[end + 1]).toMatch(/^─+$/); // the box border sits right below the last line
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("got it") && f.includes('❯ Try "fix the failing test"'));
+    const after = (await h.frame((f) => f.includes("got it"))).split("\n");
+    const p = after.findIndex((r) => r.startsWith('❯ Try "fix the failing test"'));
+    expect(after[p + 1]).toMatch(/^─+$/); // back to one line
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("35. typing after / narrows the command menu and highlights the best match", async () => {
+  const h = await harness({ claude: reply("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.setup.mockInput.typeText("/");
+    await h.frame((f) => f.includes("/agents"));
+    // Scroll first, then type: the highlight must jump back to the best match.
+    h.setup.mockInput.pressArrow("down");
+    h.setup.mockInput.pressArrow("down");
+    await h.setup.mockInput.typeText("usa");
+    let f = await h.frame((f) => /❯ \/usage\s/.test(f));
+    expect(f).not.toContain("/agents");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Usage for this project"));
+    // Letters in order find a command too.
+    await h.setup.mockInput.typeText("/mdl");
+    f = await h.frame((f) => /❯ \/model\s/.test(f));
+    h.setup.mockInput.pressEscape();
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("36. subagents the main agent spawns are listed under the prompt with their latest step, and leave when done", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      const launch = (id: string, type: string, description: string) =>
+        upd(ctx, { sessionUpdate: "tool_call", toolCallId: id, title: description, kind: "think", status: "in_progress", rawInput: { subagent_type: type, description, prompt: "..." }, _meta: { claudeCode: { toolName: "Agent" } } });
+      const child = (parent: string, id: string, title: string) =>
+        upd(ctx, { sessionUpdate: "tool_call", toolCallId: id, title, kind: "search", status: "in_progress", _meta: { claudeCode: { parentToolUseId: parent, toolName: "Grep" } } });
+      await launch("a1", "Explore", "find where auth is checked");
+      await launch("a2", "general-purpose", "update the tests");
+      await child("a1", "c1", "Grep(requireAuth)");
+      await child("a2", "c2", "Edit(test/auth.test.ts)");
+      await gate;
+      await upd(ctx, { sessionUpdate: "tool_call_update", toolCallId: "a1", status: "completed" });
+      await ctx.say("Both agents reported back.");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("audit auth");
+    const f = await h.frame((f) => f.includes("⏺ 2 agents running") && f.includes("Grep(requireAuth)") && f.includes("Edit(test/auth.test.ts)"));
+    expect(f).toMatch(/⎿ Explore · find where auth is checked · Grep\(requireAuth\) · \d+s/);
+    expect(f).toMatch(/⎿ general-purpose · update the tests · Edit\(test\/auth\.test\.ts\)/);
+    // The list sits in the footer area, right above the mode line.
+    const rows = f.split("\n");
+    expect(rows.findIndex((r) => r.includes("⏺ 2 agents running"))).toBeGreaterThan(rows.findIndex((r) => r.startsWith("❯ ")));
+    release();
+    // The turn ends: every agent is over, shown with ✓ for a moment, then the list goes.
+    await h.frame((f) => f.includes("Both agents reported back.") && f.includes("✓ Explore"));
+    await h.frame((f) => !f.includes("✓ Explore") && !f.includes("agents running"), 8000);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("37. queued messages can be edited, reordered back in place, removed, or left as they were", async () => {
+  let release!: () => void;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text === "long job") await new Promise<void>((r) => (release = r));
+      await ctx.say(`did: ${text}`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("long job");
+    await h.frame((f) => f.includes("esc to interrupt"));
+    await h.send("first queued");
+    await h.send("second queued");
+    await h.send("third queued");
+    let f = await h.frame((f) => f.includes("❯ third queued") && f.includes("↑ to edit or remove a queued message"));
+    // ↑ pulls the last one back; ↑ again moves to the one before it.
+    h.setup.mockInput.pressArrow("up");
+    await h.frame((f) => f.includes("editing a queued message") && /^❯ third queued\s*$/m.test(f));
+    h.setup.mockInput.pressArrow("up");
+    f = await h.frame((f) => /^❯ second queued\s*$/m.test(f));
+    expect((h.app as any).queue).toEqual(["first queued", "third queued"]);
+    // Edit it: Enter puts it back where it was.
+    await h.setup.mockInput.typeText(" (edited)");
+    h.setup.mockInput.pressEnter();
+    await h.frame(() => (h.app as any).queue.length === 3);
+    expect((h.app as any).queue).toEqual(["first queued", "second queued (edited)", "third queued"]);
+    // Remove one: pull it up, clear it, Enter.
+    h.setup.mockInput.pressArrow("up");
+    await h.frame((f) => /^❯ third queued\s*$/m.test(f));
+    for (let i = 0; i < "third queued".length; i++) h.setup.mockInput.pressBackspace();
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("removed from the queue: third queued"));
+    // Esc leaves one exactly as it was.
+    h.setup.mockInput.pressArrow("up");
+    await h.frame((f) => /^❯ second queued \(edited\)\s*$/m.test(f));
+    await h.setup.mockInput.typeText(" oops");
+    h.setup.mockInput.pressEscape();
+    await h.frame(() => (h.app as any).queue.length === 2);
+    expect((h.app as any).queue).toEqual(["first queued", "second queued (edited)"]);
+    expect(h.prompts.map((p) => p.text)).toEqual(["long job"]); // nothing interrupted, nothing sent early
+    release();
+    await h.frame((f) => f.includes("did: second queued (edited)"));
+    expect(h.prompts.map((p) => p.text)).toEqual(["long job", "first queued", "second queued (edited)"]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("38. while the main agent's question is open, a lone digit is the answer, not a note key", async () => {
+  const h = await harness({ claude: async (text, ctx) => ctx.say(text === "2" ? "Going with option 2." : "Should I use option 1 or 2?") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("plan the fix");
+    await h.frame((f) => f.includes("option 1 or 2?"));
+    (h.app as any).addNote("codex", "Codex", "Heads up · The fix skips the Windows path.\n\n**Windows**\n- x");
+    await h.frame((f) => f.includes("asked you something, so 1 · 2 · 0 are your answer for now"));
+    await h.setup.mockInput.typeText("2");
+    await Bun.sleep(1200);
+    await h.frame((f) => /^❯ 2\s*$/m.test(f)); // still in the prompt: not taken by the note
+    expect((h.app as any).notePanel.count).toBe(1);
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Going with option 2."));
+    expect(h.prompts.map((p) => p.text)).toEqual(["plan the fix", "2"]);
+    // You replied: the note keys are back.
+    await h.frame((f) => f.includes("2 discuss with Claude Code · 0 dismiss (type the number and pause)"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("39. a message typed during /compact is queued and delivered when the summary ends, even if it fails", async () => {
+  let release!: () => void;
+  let fail = false;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text.startsWith("[codemax] Write a compact project summary")) {
+        await new Promise<void>((r) => (release = r));
+        if (fail) throw new Error("summary blew up");
+        return ctx.say("Goal: ship v0.1.5. Done: questions dialog, note panel. Next: release notes and tag.");
+      }
+      await ctx.say(`did: ${text}`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/compact");
+    await h.frame((f) => f.includes("asking Claude Code for a handoff summary"));
+    await h.send("then run the tests");
+    await h.frame((f) => f.includes("❯ then run the tests") && f.includes("↑ to edit"));
+    release();
+    await h.frame((f) => f.includes("summary saved") && f.includes("did: then run the tests"));
+    expect((h.app as any).queue).toEqual([]);
+    // A summary turn that throws still frees the agent and sends what was queued.
+    fail = true;
+    await h.send("/compact");
+    await h.frame((f) => f.includes("asking Claude Code for a handoff summary") && !!release);
+    await Bun.sleep(50);
+    await h.send("and lint");
+    await h.frame((f) => f.includes("❯ and lint"));
+    release();
+    await h.frame((f) => f.includes("did: and lint"));
   } finally { await h.cleanup(); }
 }, 30000);

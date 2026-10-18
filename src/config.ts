@@ -36,12 +36,22 @@ export interface Config {
   /**
    * Side agent: another agent that reviews the main agent's work after each turn and
    * leaves a note when something needs attention. `forward: "auto"` sends notes to the
-   * main agent by itself; "ask" waits for /forward.
+   * main agent by itself; "ask" shows them above the prompt (1 expand · 2 discuss · 0 dismiss).
    */
-  /** `every`: review every Nth working turn (1 = each turn, 0 = only on /review). Each review is a request on the side agent's plan. */
-  sideAgent: { agent: AgentId | null; forward: "ask" | "auto"; model?: string; every?: number };
+  /** `every`: review every Nth working turn (1 = each turn, 0 = paused). Each review is a request on the side agent's plan. */
+  /** `samePlan`: the user chose to let the side agent review on the main agent's own plan (off unless picked explicitly). */
+  sideAgent: { agent: AgentId | null; forward: "ask" | "auto"; model?: string; every?: number; samePlan?: boolean };
   /** Check npm for a newer codemax at most every 12 hours and offer /update. */
   updateCheck: boolean;
+  /**
+   * Agent questions (Claude's AskUserQuestion, MCP forms): "ask" shows them and waits,
+   * "timeout" skips one left unanswered for 5 minutes (unattended runs), "off" never lets agents ask.
+   */
+  questions?: "ask" | "timeout" | "off";
+  /** Tell the terminal what codemax is doing: Warp's agent badge and status, OSC 7501 elsewhere. */
+  terminalStatus?: boolean;
+  /** Desktop notification when an agent waits for you, or a turn longer than bellAfterSeconds ends, while the terminal is not focused. */
+  notifications?: boolean;
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
   /**
@@ -52,7 +62,7 @@ export interface Config {
 }
 
 export const DEFAULT_CONFIG: Config = {
-  order: ["claude", "codex", "opencode", "cursor", "grok", "gemini", "copilot"],
+  order: ["claude", "codex", "opencode", "cursor", "grok", "antigravity", "copilot", "gemini"],
   hotkeys: ["ctrl+/", "ctrl+^"],
   autoSwitch: true,
   agentArgs: {},
@@ -65,6 +75,9 @@ export const DEFAULT_CONFIG: Config = {
   theme: "auto",
   awake: "off",
   updateCheck: true,
+  questions: "ask",
+  terminalStatus: true,
+  notifications: true,
   sideAgent: { agent: null, forward: "ask" },
   brief: { turns: 10, maxChars: 8000, turnChars: 1200, resumeChars: 24000 },
 };

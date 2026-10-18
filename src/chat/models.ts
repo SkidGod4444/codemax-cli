@@ -31,3 +31,28 @@ export function sortModels<T extends ModelEntry>(models: T[]): T[] {
     })
     .map((x) => x.m);
 }
+
+/**
+ * The one way a model is shown anywhere in codemax: the agent's own display name
+ * ("Opus 5.5"), never its id ("opus", "claude-opus-5-5"). When the agent's list
+ * does not have the id (a model reported in usage, a saved side-agent model), a
+ * Claude id is spelled out the same way ("claude-opus-5-5" → "Opus 5.5").
+ */
+export function displayModelName(id: string | undefined, models: ModelEntry[] = []): string {
+  if (!id) return "Default";
+  // Cursor appends settings in brackets: "claude-opus-5-5[context=300k,effort=medium]".
+  const bare = id.replace(/\[.*\]$/, "").replace(/^(anthropic|openai|xai|google|opencode)\//, "");
+  const listed = models.find((m) => m.id === id) ?? models.find((m) => m.id === bare);
+  const tidy = (n: string) => n.replace(/\s*\((recommended|default)\)\s*$/i, "");
+  if (listed && listed.name && listed.name !== listed.id) return tidy(listed.name);
+  if (!bare || /^(default|auto)$/i.test(bare)) return bare.toLowerCase() === "auto" ? "Auto" : "Default";
+  const claude = bare.match(/^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d{1,2})(?:[-.](\d{1,2}))?)?(?:-\d{8})?$/i);
+  if (claude) {
+    const family = claude[1]![0]!.toUpperCase() + claude[1]!.slice(1).toLowerCase();
+    if (claude[2]) return `${family} ${claude[2]}${claude[3] ? `.${claude[3]}` : ""}`;
+    // A bare alias ("opus"): the listed model of that family names its version.
+    const sameFamily = sortModels(models).find((m) => new RegExp(`^${family}\\b`, "i").test(m.name));
+    return sameFamily ? tidy(sameFamily.name) : family;
+  }
+  return listed?.name ?? bare;
+}

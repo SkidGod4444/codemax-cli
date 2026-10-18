@@ -58,6 +58,22 @@ jobs:
           codemax config
           codemax agents
 
+      - name: a leftover agent shim that does not run is not offered
+        # An uninstalled npm CLI can leave shims on PATH (seen with Codex on Windows).
+        run: |
+          shim="$RUNNER_TEMP/staleshim"
+          mkdir -p "$shim"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            printf '@echo off\r\nnode "%%~dp0\\node_modules\\@openai\\codex\\bin\\codex.js" %%*\r\n' > "$shim/codex.cmd"
+          else
+            printf '#!/bin/sh\nnode "$(dirname "$0")/node_modules/@openai/codex/bin/codex.js" "$@"\n' > "$shim/codex"
+            chmod +x "$shim/codex"
+          fi
+          cd "$RUNNER_TEMP"
+          out=$(PATH="$shim:$PATH" codemax agents)
+          echo "$out"
+          echo "$out" | grep -E '^codex .*✗ broken' || { echo "a broken codex was reported as installed"; exit 1; }
+
       - name: codemax runs through npx
         run: |
           cd "$RUNNER_TEMP"
