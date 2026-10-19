@@ -20,7 +20,9 @@ test("markdown: strips markers but keeps content, colours diff lines in fences",
   expect(added?.bg).toBeDefined();
 });
 
-test("code blocks are highlighted like Claude Code's (Monokai on dark): no rules, and only an unknown language is named", () => {
+test("code blocks are highlighted like Claude Code's (Monokai on dark, GitHub on light): no rules, and only an unknown language is named", async () => {
+  const { applyTheme } = await import("../src/chat/theme.ts");
+  applyTheme("dark"); // another test file may have left the light theme on
   const st = styleMarkdown("```ts\nconst x = \"s\" // c\n```\n```weird\nraw\n```");
   const rgb = (c: any) => c.fg && [c.fg.r, c.fg.g, c.fg.b].map((v: number) => Math.round(v * 255)).join(",");
   const of = (piece: string) => rgb(st.chunks.find((c: any) => c.text.includes(piece)));
@@ -29,6 +31,10 @@ test("code blocks are highlighted like Claude Code's (Monokai on dark): no rules
   expect(of("// c")).toBe("117,113,94"); // comment #75715e
   expect(text(st)).toBe("const x = \"s\" // c\nweird\nraw");
   expect(text(st)).not.toContain("──");
+  applyTheme("light");
+  const light = styleMarkdown("```ts\nconst x = 1\n```");
+  expect(rgb(light.chunks.find((c: any) => c.text.includes("const")))).toBe("167,29,93"); // GitHub storage #a71d5d
+  applyTheme("dark");
 });
 
 test("tool output: diffs read like Claude Code's (what happened, numbered lines, colour); other output stays dim", () => {
