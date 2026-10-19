@@ -25,3 +25,44 @@ export function shellArgv(cmd: string): string[] {
 }
 
 export const SHELL_SPAWN: { windowsVerbatimArguments?: boolean } = IS_WINDOWS ? { windowsVerbatimArguments: true } : {};
+
+/**
+ * Child processes codemax started (agents, checks, `!` commands). Each runs in its own
+ * process group (`detached`), so stopping it also stops what it started: an agent's shell,
+ * a dev server, `npm` → `node`. They are all stopped when codemax exits, however it exits.
+ */
+const children = new Set<Bun.Subprocess>();
+
+export const GROUP_SPAWN: { detached?: boolean } = IS_WINDOWS ? {} : { detached: true };
+
+/** Remember a child started with GROUP_SPAWN, until it exits. */
+export function trackChild<T extends Bun.Subprocess>(p: T): T {
+  children.add(p);
+  void p.exited.then(() => children.delete(p));
+  return p;
+}
+
+/** Stop a child and everything it started. */
+export function killTree(p: Bun.Subprocess, signal: NodeJS.Signals = "SIGTERM") {
+  if (p.exitCode !== null || p.signalCode !== null) return;
+  try {
+    if (IS_WINDOWS) Bun.spawnSync(["taskkill", "/T", "/F", "/PID", String(p.pid)], { stdout: "ignore", stderr: "ignore" });
+    else process.kill(-p.pid, signal);
+  } catch {
+    try {
+      p.kill(signal);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+let exitHooked = false;
+/** On exit (normal, crash or signal), stop every child still running. */
+export function stopChildrenOnExit() {
+  if (exitHooked) return;
+  exitHooked = true;
+  process.once("exit", () => {
+    for (const p of children) killTree(p, "SIGKILL");
+  });
+}

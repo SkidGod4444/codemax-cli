@@ -1,5 +1,6 @@
 import { join, relative } from "node:path";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { insideDir } from "./paths.ts";
 
 const SKIP = new Set([".git", "node_modules", "dist", "build", ".next", ".turbo", "target", ".venv", "__pycache__"]);
 
@@ -35,7 +36,8 @@ export function mentionedFiles(text: string, cwd: string): string[] {
   const out: string[] = [];
   for (const m of text.matchAll(/(?:^|\s)@([^\s@]+)/g)) {
     const p = m[1]!.replace(/[),.;:]+$/, "");
-    if (!out.includes(p) && existsSync(join(cwd, p)) && statSync(join(cwd, p)).isFile()) out.push(p);
+    // Only files in the project: "@../../.ssh/id_rsa" is not attached.
+    if (!out.includes(p) && insideDir(cwd, p) && existsSync(join(cwd, p)) && statSync(join(cwd, p)).isFile()) out.push(p);
   }
   return out;
 }
@@ -45,6 +47,7 @@ export function attachFiles(paths: string[], cwd: string, perFile = 30_000, tota
   let used = 0;
   const parts: string[] = [];
   for (const p of paths) {
+    if (!insideDir(cwd, p)) continue;
     let body = readFileSync(join(cwd, p), "utf8");
     if (body.includes("\u0000")) {
       parts.push(`--- ${p} (binary, not attached) ---`);

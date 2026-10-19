@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { SHELL_SPAWN, shellArgv } from "./spawn.ts";
+import { GROUP_SPAWN, killTree, SHELL_SPAWN, shellArgv, trackChild } from "./spawn.ts";
 
 /**
  * Checks after edits: the project's own test / typecheck command, run by
@@ -55,14 +55,23 @@ export interface VerifyResult {
 }
 
 /** Run the checks in the project; `stop()` ends them early. */
-export function runVerify(cmd: string, cwd: string, timeoutMs = VERIFY_TIMEOUT_MS): { done: Promise<VerifyResult>; stop: () => void } {
+export function runVerify(cmd: string, cwd: string, timeoutMs = VERIFY_TIMEOUT_MS, o: { ci?: boolean } = {}): { done: Promise<VerifyResult>; stop: () => void } {
   const t0 = Date.now();
-  const p = Bun.spawn(shellArgv(cmd), { ...SHELL_SPAWN, cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env, CI: process.env.CI ?? "1", FORCE_COLOR: "0", NO_COLOR: "1" } });
+  const env = o.ci === false ? process.env : { ...process.env, CI: process.env.CI ?? "1", FORCE_COLOR: "0", NO_COLOR: "1" };
+  // Its own process group: stopping it stops what it started too (a test runner's workers).
+  const p = trackChild(Bun.spawn(shellArgv(cmd), { ...SHELL_SPAWN, ...GROUP_SPAWN, cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", env }));
   let stopped = false;
   let timedOut = false;
+  let killed: () => void = () => {};
+  const wasKilled = new Promise<void>((r) => (killed = r));
+  const kill = () => {
+    killTree(p);
+    setTimeout(() => killTree(p, "SIGKILL"), 1500).unref?.();
+    killed();
+  };
   const timer = setTimeout(() => {
     timedOut = true;
-    p.kill();
+    kill();
   }, timeoutMs);
   const done = (async () => {
     let output = "";
@@ -73,8 +82,9 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = VERIFY_TIMEOUT_M
         if (output.length > KEEP_OUTPUT * 2) output = output.slice(-KEEP_OUTPUT);
       }
     };
-    await Promise.all([read(p.stdout as ReadableStream<Uint8Array>), read(p.stderr as ReadableStream<Uint8Array>)]);
-    const code = await p.exited;
+    // After a stop, a process that escaped the group may still hold the pipes: wait 2 s at most.
+    await Promise.race([Promise.all([read(p.stdout as ReadableStream<Uint8Array>), read(p.stderr as ReadableStream<Uint8Array>)]), wasKilled.then(() => Bun.sleep(2000))]);
+    const code = await Promise.race([p.exited, wasKilled.then(() => Bun.sleep(2000)).then(() => p.exitCode ?? 137)]);
     clearTimeout(timer);
     return { code, output: output.slice(-KEEP_OUTPUT).trimEnd(), ms: Date.now() - t0, timedOut, stopped };
   })();
@@ -82,7 +92,7 @@ export function runVerify(cmd: string, cwd: string, timeoutMs = VERIFY_TIMEOUT_M
     done,
     stop: () => {
       stopped = true;
-      p.kill();
+      kill();
     },
   };
 }

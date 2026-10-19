@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { CODEMAX_HOME, ensureDir } from "./core/paths.ts";
+import { CODEMAX_HOME, ensureDir, privateHome } from "./core/paths.ts";
 import type { AgentId } from "./adapters/types.ts";
 
 export interface Config {
@@ -101,7 +101,7 @@ export const DEFAULT_CONFIG: Config = {
 export const CONFIG_PATH = join(CODEMAX_HOME, "config.json");
 
 export function loadConfig(): Config {
-  ensureDir(CODEMAX_HOME);
+  privateHome();
   if (!existsSync(CONFIG_PATH)) {
     writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2) + "\n");
     return structuredClone(DEFAULT_CONFIG);

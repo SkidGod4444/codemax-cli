@@ -49,3 +49,23 @@ export function termSize(): { cols: number; rows: number } {
 export const out = (s: string) => {
   process.stdout.write(s);
 };
+
+/**
+ * Text from an agent, made safe to put on screen: escape sequences (colours, but also OSC 52
+ * clipboard writes, title changes, cursor moves) and other control characters are removed;
+ * newlines and tabs stay. Applied to every string in an engine event before it is shown.
+ */
+export function safeText(s: string): string {
+  if (!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(s)) return s;
+  return stripAnsi(s).replace(/\r\n/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
+
+/** Every string in a value, through safeText (objects and arrays are copied, not changed). */
+export function safeDeep<T>(v: T, depth = 0): T {
+  if (typeof v === "string") return safeText(v) as T;
+  if (!v || typeof v !== "object" || depth > 8) return v;
+  if (Array.isArray(v)) return v.map((x) => safeDeep(x, depth + 1)) as T;
+  const out: Record<string, unknown> = {};
+  for (const [k, x] of Object.entries(v)) out[k] = safeDeep(x, depth + 1);
+  return out as T;
+}

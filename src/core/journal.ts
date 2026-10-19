@@ -58,7 +58,7 @@ export class Journal {
   }
 
   append(step: Step) {
-    appendFileSync(this.path, JSON.stringify(step) + "\n");
+    appendFileSync(this.path, JSON.stringify(step) + "\n", { mode: 0o600 });
   }
 
   /** All steps in order, each at its latest version, without the ones a rewind took back. */

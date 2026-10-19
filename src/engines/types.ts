@@ -168,8 +168,8 @@ export interface Engine {
   readonly session: EngineSessionRef | null;
   onEvent(listener: (e: EngineEvent) => void): () => void;
   start(opts: EngineStartOptions): Promise<EngineInfo>;
-  /** Send one user turn. Resolves when the turn ends (turn_end has been emitted). */
-  prompt(text: string): Promise<StopReason>;
+  /** Send one user turn, with any images you attached. Resolves when the turn ends (turn_end has been emitted). */
+  prompt(text: string, images?: PromptImage[]): Promise<StopReason>;
   answerPermission(requestId: string, optionId: string): void;
   /** Engines that can ask the user questions (`question_request`) answer them here. */
   answerQuestion?(requestId: string, answer: QuestionAnswer): void;
@@ -187,6 +187,12 @@ export interface Engine {
   /** Continue in a copy of the conversation that ends at `point`: the later turns are gone from the agent's memory. */
   rewindConversation?(point: RewindPoint): Promise<void>;
   close(): Promise<void>;
+}
+
+/** An image file attached to a message (dropped into the prompt). */
+export interface PromptImage {
+  path: string;
+  mimeType: string;
 }
 
 /** A place in an agent's conversation: after message `messageId`, or before anything (null). */

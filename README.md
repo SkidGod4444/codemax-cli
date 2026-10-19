@@ -16,6 +16,7 @@
 - **One shared task across every agent.** Every step each agent takes is recorded, so a switch is a resume, not a summary. An agent you return to is caught up on what the others did.
 - **Only the subscriptions you already pay for.** No API keys, no per-token bills, no new account.
 - **Every agent asks before acting.** Edits and commands wait for your approval, just like in each agent's own app, and an edit shows you its diff first.
+- **Drop files and screenshots into the prompt.** Drag an image in and the agent sees it (`[Image #1]`); drop any other file and its contents go with your message.
 - **Undo any turn, or rewind further.** `/undo` rolls back the last reply's changes; **Esc Esc** (or `/rewind`) puts the files back to before any earlier message, and with Claude Code or Codex cuts its conversation back too.
 - **Checks after every edit.** Pick your test or typecheck command in `/config`: it runs after each turn that changes files, and a failure can go straight back to the agent to fix.
 - **See what you're getting.** `/usage` shows tokens and their API-equivalent value per agent, with daily budgets if you want them.

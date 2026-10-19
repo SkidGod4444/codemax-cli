@@ -1,4 +1,4 @@
-import { BoxRenderable, TextRenderable, TextareaRenderable, createCliRenderer, type CliRenderer, type KeyEvent } from "@opentui/core";
+import { BoxRenderable, TextRenderable, TextareaRenderable, createCliRenderer, type CliRenderer, type KeyEvent, type PasteEvent } from "@opentui/core";
 import type { Config } from "../config.ts";
 import { CONFIG_PATH, hotkeyLabel, saveConfigKey } from "../config.ts";
 import { homedir } from "node:os";
@@ -9,8 +9,11 @@ import { buildBrief, buildCatchup } from "../core/brief.ts";
 import { diffStat } from "../core/git.ts";
 import { isExhausted, quotaLabel } from "../core/quota.ts";
 import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
-import { createEngine, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
-import type { Engine, EngineEvent, PermissionRequest, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
+import { createEngine, EDITS_WITHOUT_ASKING, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
+import type { Engine, EngineEvent, PermissionRequest, PromptImage, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
+import { droppedContents, droppedFiles, imageType, splitDropped } from "./drop.ts";
+import { insideDir } from "../core/paths.ts";
+import { basename, relative } from "node:path";
 import { strippedKeys } from "../engines/env.ts";
 import { blockers } from "../core/doctor.ts";
 import { Transcript, type AgentBlock } from "./transcript.ts";
@@ -24,10 +27,11 @@ import { refreshLivePricesIfStale } from "../core/prices-live.ts";
 import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budget.ts";
 import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, checkpointChangeCounts, type Checkpoint } from "../core/checkpoint.ts";
 import { appendHistory, loadHistory } from "../core/history.ts";
-import { VERIFY_FIX_CAP, runVerify, tail, verifyCandidates } from "../core/verify.ts";
+import { VERIFY_FIX_CAP, VERIFY_TIMEOUT_MS, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { platformArgv, SHELL_SPAWN, shellArgv } from "../core/spawn.ts";
+import { platformArgv, stopChildrenOnExit } from "../core/spawn.ts";
+import { safeDeep } from "../core/terminal.ts";
 import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
@@ -247,6 +251,7 @@ export class ChatApp {
     renderer.on("focus", () => (this.term.focused = true));
     renderer.on("blur", () => (this.term.focused = false));
     renderer.keyInput.on("keypress", this.onKey);
+    renderer.keyInput.on("paste", this.onPaste);
     renderer.on("resize", () => this.safely("resize", () => {
       this.fitInput();
       this.palette?.render();
@@ -339,6 +344,61 @@ export class ChatApp {
 
   private onKey = (key: KeyEvent) => this.safely("key handling", () => this.handleKey(key));
 
+  /** Files and images dropped into the prompt (or pasted as paths), by their number. */
+  private dropped: { n: number; path: string; name: string; mimeType?: string }[] = [];
+  private dropSeq = 0;
+
+  /**
+   * Drag and drop: the terminal pastes a dropped file as its path. A paste that is only
+   * paths to existing files becomes attachments: `[Image #1]` for an image (sent to the
+   * agent as an image), `@path` for a file in the project, `[File #2: name]` for one outside.
+   */
+  private onPaste = (e: PasteEvent) =>
+    this.safely("paste", () => {
+      if (this.permission || this.onboarding || this.closed) return;
+      const files = droppedFiles(new TextDecoder().decode(e.bytes));
+      if (!files) return;
+      e.preventDefault();
+      const marks = files.map((path) => this.dropFile(path));
+      this.input.insertText(`${marks.join(" ")} `);
+      this.input.focus();
+    });
+
+  private dropFile(path: string): string {
+    const mimeType = imageType(path);
+    if (!mimeType && insideDir(this.cwd, path)) return `@${relative(this.cwd, path)}`;
+    const n = ++this.dropSeq;
+    const name = basename(path);
+    this.dropped.push({ n, path, name, mimeType });
+    return mimeType ? `[Image #${n}]` : `[File #${n}: ${name}]`;
+  }
+
+  /**
+   * The dropped attachments a message refers to: images to send with it, and notes (and the
+   * contents of dropped files) for its text. A plain image path typed into the message
+   * (terminals that type a drop instead of pasting it) is attached too.
+   */
+  private takeDropped(text: string): { text: string; images: PromptImage[] } {
+    const images: PromptImage[] = [];
+    const notes: string[] = [];
+    for (const d of this.dropped) {
+      const mark = d.mimeType ? `[Image #${d.n}]` : `[File #${d.n}: ${d.name}]`;
+      if (!text.includes(mark)) continue;
+      if (d.mimeType) {
+        images.push({ path: d.path, mimeType: d.mimeType });
+        notes.push(`${mark} is the attached image ${d.path}`);
+      } else notes.push(`${mark} is ${d.path}:${droppedContents(d.path)}`);
+    }
+    for (const m of text.matchAll(/(?:^|\s)((?:\/|~\/)(?:\\ |[^\s])+\.(?:png|jpe?g|gif|webp))(?=\s|$)/gi)) {
+      const path = splitDropped(m[1]!)[0]!;
+      if (images.some((i) => i.path === path) || !droppedFiles(m[1]!)) continue;
+      images.push({ path, mimeType: imageType(path)! });
+    }
+    this.dropped = [];
+    if (!notes.length) return { text, images };
+    return { text: `${text}\n\n[attached by the user]\n${notes.join("\n")}`, images };
+  }
+
   private handleKey(key: KeyEvent) {
     if (key.eventType === "release") return;
     if (this.onboarding && !this.onboardingAside) {
@@ -377,6 +437,12 @@ export class ChatApp {
       this.input.clear();
       this.renderQueue();
       this.renderFooter();
+      return;
+    }
+    if (key.name === "escape" && this.shellRun && !this.active?.turn) {
+      key.stopPropagation();
+      this.shellRun.stop();
+      this.setFlash("stopping the ! command…");
       return;
     }
     if (key.name === "escape" && this.verifying && !this.active?.turn) {
@@ -795,7 +861,7 @@ export class ChatApp {
     const engine = this.engineFactory(agent);
     const side: Active = { agent, name: adapter.name, engine, turn: null, replay: null, unsubscribe: () => {}, commands: [] };
     this.side.add(side);
-    side.unsubscribe = engine.onEvent((e) => this.onEngineEvent(side, e));
+    side.unsubscribe = engine.onEvent((e) => this.onEngineEvent(side, safeDeep(e)));
     this.transcript.divider(`${why} · ${adapter.name}`);
     this.transcript.user(text);
     try {
@@ -1118,12 +1184,14 @@ export class ChatApp {
     if (!o.verifyFix && !isForwardedNote(text)) this.verifyFixes = 0;
     const typed = o.shown ?? text;
     this.transcript.user(typed);
-    text = this.withAttachments(text);
+    const drop = this.takeDropped(text);
+    if (drop.images.length) this.transcript.note(`attached ${drop.images.length} image${drop.images.length === 1 ? "" : "s"}: ${drop.images.map((i) => basename(i.path)).join(", ")}`, C.dimmer);
+    text = this.withAttachments(drop.text);
     const cp = await this.checkpoint(active, text, typed);
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
     const rec = new TurnRecorder(this.ledger.journal, active.agent);
     rec.user(text, cp?.sha);
-    const r = await this.runTurn(active, text, { rec });
+    const r = await this.runTurn(active, text, { rec, images: drop.images });
     const fix = r ? await this.verifyAfterTurn(active, r, cp) : null;
     if (fix) return this.send(active, fix.text, { shown: fix.shown, verifyFix: true });
     await this.drainQueue(active);
@@ -1347,15 +1415,25 @@ export class ChatApp {
   }
 
   private pendingShell: string[] = [];
+  /** A running `!` command (stopped by Esc and on quit). */
+  private shellRun: { stop: () => void } | null = null;
+  /** Agents started for a moment (to list their models): closed on quit. */
+  private tempEngines = new Set<Engine>();
 
   /** `!cmd`: run locally, show output, and attach it to the next prompt as context. */
   private async shell(cmd: string) {
     if (!cmd) return;
+    if (this.shellRun) return this.transcript.note("a ! command is still running · Esc stops it", C.warn);
     this.transcript.user(`! ${cmd}`);
-    const p = Bun.spawn(shellArgv(cmd), { ...SHELL_SPAWN, cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
-    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
-    const code = await p.exited;
-    const body = (out + (err ? `\n${err}` : "")).trimEnd() || "(no output)";
+    // Bounded like the checks: the last 200 KB of output, a 10-minute limit, Esc or quitting stops it.
+    const run = runVerify(cmd, this.cwd, VERIFY_TIMEOUT_MS, { ci: false });
+    this.shellRun = run;
+    this.setFlash(`running ! ${cmd.slice(0, 40)} · esc to stop`);
+    const r = await run.done.finally(() => (this.shellRun = null));
+    if (this.closed) return;
+    const code = r.code;
+    const end = r.stopped ? "stopped" : r.timedOut ? "timed out after 10 min" : "";
+    const body = `${r.output || "(no output)"}${end ? `\n(${end})` : ""}`;
     const block = this.transcript.agent();
     block.tool(`sh-${Date.now()}`, `$ ${cmd}${code ? `  (exit ${code})` : ""}`, code ? "failed" : "completed", body);
     this.pendingShell.push(`$ ${cmd}\n${body.slice(0, 4000)}`);
@@ -1721,7 +1799,8 @@ export class ChatApp {
     const saved = this.ledger.sessions()[agent];
     const resume = !o.fresh && saved ? { agent, id: saved.id, cwd: this.cwd, startedAt: saved.startedAt, lastUsedAt: saved.lastUsedAt } : undefined;
     const active: Active = { agent, name: adapter.name, engine, turn: null, replay: null, unsubscribe: () => {}, commands: [] };
-    active.unsubscribe = engine.onEvent((e) => this.onEngineEvent(active, e));
+    // Agent output never reaches the terminal raw (see safeText).
+    active.unsubscribe = engine.onEvent((e) => this.onEngineEvent(active, safeDeep(e)));
     this.active = active;
     this.setWorking(`${pick(G.spinner, 0)} Starting ${adapter.name}…`);
     try {
@@ -1735,6 +1814,7 @@ export class ChatApp {
       const model = info.currentModel ? ` · ${displayModelName(info.currentModel, info.models)}` : "";
       this.transcript.divider(`${adapter.name}${version ? ` ${version}` : ""}${model} · ${resumed ? "resumed" : "new session"}`);
       if (NO_PERMISSION_PROMPTS.has(agent)) this.transcript.note(grokPermissionNote() ?? `${adapter.name} acts without asking permission`, C.warn);
+      else if (EDITS_WITHOUT_ASKING.has(agent)) this.transcript.note(`${adapter.name} edits files without asking (it asks only before shell commands), so its edits come without a prompt or diff here · /undo or Esc Esc puts the files back`, C.warn);
       else {
         const loose = selfApprovingMode(info.currentMode, info.modes);
         if (loose) this.transcript.note(`${adapter.name} starts in ${loose.what} mode (its own settings): ${loose.effect}, so you won't see those prompts or their diffs. Shift+Tab or /mode to switch${loose.ask ? ` to "${loose.ask}"` : ""}.`, C.warn);
@@ -1789,7 +1869,7 @@ export class ChatApp {
     }
   }
 
-  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean } = {}): Promise<{ stop: StopReason; edited: boolean } | undefined> {
+  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean; images?: PromptImage[] } = {}): Promise<{ stop: StopReason; edited: boolean } | undefined> {
     if (this.closed) return;
     const block = this.transcript.agent();
     const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
@@ -1798,7 +1878,7 @@ export class ChatApp {
     this.setTitle(`✳ ${active.name} working`);
     const main = !this.side.has(active);
     if (main) this.term.prompt(o.record === false ? "(handoff to " + active.name + ")" : text);
-    const stop = await active.engine.prompt(text);
+    const stop = await active.engine.prompt(text, o.images);
     if (this.closed) {
       active.turn?.rec?.end(stop);
       active.turn = null;
@@ -2437,11 +2517,15 @@ export class ChatApp {
         if (!models.length) {
           this.setFlash(`asking ${name} for its models…`);
           const engine = this.engineFactory(agent);
+          this.tempEngines.add(engine);
           try {
-            models = (await engine.start({ cwd: this.cwd, questions: false })).models ?? [];
+            // An agent that never answers must not hold the editor: 30 s.
+            const info = await Promise.race([engine.start({ cwd: this.cwd, questions: false }), Bun.sleep(30_000).then(() => Promise.reject(new Error("no answer in 30 s")))]);
+            models = info.models ?? [];
           } catch (e: any) {
             this.transcript.note(`${name} could not list its models (${String(e?.message ?? e).slice(0, 120)}); it will use its default`, C.warn);
           } finally {
+            this.tempEngines.delete(engine);
             await engine.close().catch(() => {});
           }
         }
@@ -2575,7 +2659,8 @@ export class ChatApp {
         let reply = "";
         let limited = false;
         const engine = r.engine;
-        const off = engine.onEvent((e) => {
+        const off = engine.onEvent((raw) => {
+          const e = safeDeep(raw);
           try {
           if (e.type === "text_delta") reply += e.text;
           else if (e.type === "permission_request") {
@@ -2627,6 +2712,8 @@ export class ChatApp {
     const sent = this.autoForwards.get(task) ?? 0;
     const capped = auto && sent >= AUTO_FORWARD_CAP;
     if (auto && !capped) {
+      // Only the current task's count matters.
+      if (!this.autoForwards.has(task)) this.autoForwards.clear();
       this.autoForwards.set(task, sent + 1);
       this.transcript.noteCard(`⚑ Heads up from ${name} (side agent)`, text, `sent to ${main} automatically`);
       this.forwardNote(this.notes.length - 1);
@@ -2897,8 +2984,13 @@ export class ChatApp {
   }
 
   async quit() {
+    if (this.closed) return;
     this.closed = true;
     if (this.updateTimer) clearTimeout(this.updateTimer);
+    // Nothing codemax started keeps running: checks, ! commands, agents started to list models.
+    this.verifying?.stop();
+    this.shellRun?.stop();
+    for (const e of this.tempEngines) void e.close().catch(() => {});
     if (this.noteArmTimer) clearTimeout(this.noteArmTimer);
     this.term.close();
     this.subagents.destroy();
@@ -2918,6 +3010,7 @@ export class ChatApp {
       this.ledger.addEvent({ kind: "exit", agent: a.agent, detail: "codemax quit", diffStat: await diffStat(this.cwd) });
     }
     this.renderer.keyInput.off("keypress", this.onKey);
+    this.renderer.keyInput.off("paste", this.onPaste);
     this.resolveDone();
   }
 }
@@ -2984,6 +3077,15 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
   const app = new ChatApp(renderer, config, ledger, cwd);
   process.once("exit", () => app.awake.releaseSync());
+  stopChildrenOnExit();
+  // Closing the terminal (SIGHUP) or a kill (SIGTERM): OpenTUI only takes the screen down,
+  // and its handler keeps the process from exiting, so quit properly (agents closed,
+  // sessions saved), then exit even if something hangs.
+  for (const sig of ["SIGTERM", "SIGHUP"] as const)
+    process.once(sig, () => {
+      setTimeout(() => process.exit(0), 5000).unref?.();
+      void app.quit().finally(() => setTimeout(() => process.exit(0), 50));
+    });
   try {
     await app.start(agent, fresh, { pick, explicit, pickThread, onboard });
   } finally {

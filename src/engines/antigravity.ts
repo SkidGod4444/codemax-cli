@@ -68,7 +68,10 @@ export async function antigravityInstallPlan(fetchImpl: typeof fetch = fetch): P
   } catch {
     /* size unknown */
   }
-  return { version: String(entry.version ?? "latest"), url, bytes };
+  // The version becomes a folder name under ~/.codemax/agents: plain version strings only.
+  const version = String(entry.version ?? "latest");
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version) || version.includes("..")) throw new Error(`refusing an Antigravity ACP server with the version name "${version.slice(0, 40)}"`);
+  return { version, url, bytes };
 }
 
 /** Download and unpack the server. Returns its command. */

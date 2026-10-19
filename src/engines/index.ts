@@ -142,6 +142,12 @@ export function grokPermissionNote(): string | null {
   return null;
 }
 
+/**
+ * Agents that write file edits straight to disk without a permission request (they ask only
+ * before shell commands), checked live: Cursor Agent sends the diff only after the edit.
+ */
+export const EDITS_WITHOUT_ASKING: ReadonlySet<AgentId> = new Set<AgentId>(["cursor"]);
+
 /** Agents whose protocol never asks before acting on this machine; shown as a warning in the menu. */
 export const NO_PERMISSION_PROMPTS: ReadonlySet<AgentId> = new Set(grokPermissionNote() ? ["grok"] : []);
 

@@ -1,11 +1,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
-import { ClientSideConnection, ndJsonStream, type Client, type Stream } from "@agentclientprotocol/sdk";
+import { insideDir, secretPlace } from "../core/paths.ts";
+import { ClientSideConnection, ndJsonStream, RequestError, type Client, type Stream } from "@agentclientprotocol/sdk";
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, QuestionAnswer, RewindPoint, StopReason } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, PromptImage, QuestionAnswer, RewindPoint, StopReason } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
-import { IS_WINDOWS, platformArgv } from "../core/spawn.ts";
+import { GROUP_SPAWN, IS_WINDOWS, killTree, platformArgv, trackChild } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
 
 export interface UsageSample {
@@ -77,6 +78,8 @@ export class AcpEngine implements Engine {
   private turnContext = 0;
   /** /rewind can fork this agent's session at a message. */
   private canFork = false;
+  /** The agent accepts images in a prompt. */
+  private takesImages = false;
   /**
    * The latest agent message id in this session, and whether the last prompt produced one
    * and ended cleanly (a turn cut off mid-tool can end on a tool call with no result,
@@ -116,8 +119,13 @@ export class AcpEngine implements Engine {
       extNotification: async (method: string, params: any) => {
         if (method === "cursor/task" && params?.toolCallId) this.emit({ type: "subagent", id: params.toolCallId, name: params.subagentType, task: params.description, status: "done" });
       },
-      readTextFile: async (p) => ({ content: await Bun.file(p.path).text() }),
+      // Inside the project these work as the agent's own tools do; outside it you are asked first.
+      readTextFile: async (p) => {
+        await this.allowOutside("read", p.path);
+        return { content: await Bun.file(p.path).text() };
+      },
       writeTextFile: async (p) => {
+        await this.allowOutside("write", p.path, p.content);
         await Bun.write(p.path, p.content);
         return {};
       },
@@ -164,6 +172,7 @@ export class AcpEngine implements Engine {
     }
     this.cwd = o.cwd;
     this.canFork = !!this.opts.forkAtMessage && !!(init as any).agentCapabilities?.sessionCapabilities?.fork;
+    this.takesImages = !!(init as any).agentCapabilities?.promptCapabilities?.image;
     this.fresh = !o.resume || sessionId !== o.resume.id;
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.tail = this.opts.usageTail?.(this.session) ?? null;
@@ -204,7 +213,7 @@ export class AcpEngine implements Engine {
 
   private spawn(cwd: string): Stream {
     const argv = this.opts.plainPipes && !IS_WINDOWS ? ["/bin/sh", "-c", 'cat | "$@" | cat', "sh", ...this.opts.cmd] : platformArgv(this.opts.cmd);
-    const proc = Bun.spawn(argv, { cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const proc = trackChild(Bun.spawn(argv, { ...GROUP_SPAWN, cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
@@ -222,6 +231,39 @@ export class AcpEngine implements Engine {
       },
     });
     return ndJsonStream(output, proc.stdout as ReadableStream<Uint8Array>);
+  }
+
+  /**
+   * The agent reads or writes a file through codemax (ACP fs). Inside the project this is
+   * the agent's own business. Outside it, a write always needs your yes (with the change
+   * shown), whatever the agent decided; a read needs it only where secrets live (secretPlace),
+   * so unattended runs reading a sibling repo or a package's source don't stop.
+   */
+  private async allowOutside(kind: "read" | "write", path: string, content?: string) {
+    if (insideDir(this.cwd, path)) return;
+    const secret = secretPlace(path);
+    if (kind === "read" && !secret) return;
+    const id = `perm-${++this.permSeq}`;
+    let old: string | null = null;
+    if (kind === "write") old = await Bun.file(path).text().catch(() => null);
+    const request: PermissionRequest = {
+      id,
+      kind: kind === "write" ? "edit" : "read",
+      title: `${kind === "write" ? (old === null ? "Create" : "Edit") : "Read"} outside this project: ${path}`,
+      detail: secret ? `This is ${secret}.` : undefined,
+      diff: kind === "write" ? simpleDiff(path, old, content ?? "") : undefined,
+      options: [
+        { id: "allow", label: "Allow once", kind: "allow_once" },
+        { id: "reject", label: "Deny", kind: "reject_once" },
+      ],
+    };
+    const choice = await new Promise<string | null>((resolve) => {
+      this.pendingPermissions.set(id, resolve);
+      this.emit({ type: "permission_request", request });
+    });
+    this.pendingPermissions.delete(id);
+    // A request error carries the reason to the agent (a plain Error arrives as "Internal error").
+    if (choice !== "allow") throw RequestError.invalidRequest({ path }, `The user did not allow ${kind === "write" ? "writing" : "reading"} ${path}, which is outside the project.`);
   }
 
   private async onPermission(p: any) {
@@ -294,6 +336,22 @@ export class AcpEngine implements Engine {
     this.idStale = false;
   }
 
+  /**
+   * Images as ACP image content, when the agent takes images (promptCapabilities.image) and
+   * the file is small enough to send (5 MB, what the models accept). Otherwise the message
+   * already names the file, and the agent can open it itself.
+   */
+  private async imageBlocks(images: PromptImage[]): Promise<any[]> {
+    if (!images.length || !this.takesImages) return [];
+    const out: any[] = [];
+    for (const im of images) {
+      const f = Bun.file(im.path);
+      if (!(await f.exists()) || f.size > 5 * 1024 * 1024) continue;
+      out.push({ type: "image", mimeType: im.mimeType, data: Buffer.from(await f.arrayBuffer()).toString("base64"), uri: `file://${im.path}` });
+    }
+    return out;
+  }
+
   rewindPoint(): RewindPoint | null {
     if (!this.canFork || !this.session || this.turnActive || this.idStale) return null;
     // Before anything was said, "back to here" is an empty conversation; a resumed one has no known start.
@@ -325,7 +383,7 @@ export class AcpEngine implements Engine {
     if (currentMode && nowMode && nowMode !== currentMode) await this.setMode(currentMode).catch(() => {});
   }
 
-  async prompt(text: string): Promise<StopReason> {
+  async prompt(text: string, images: PromptImage[] = []): Promise<StopReason> {
     if (!this.conn || !this.session) throw new Error("engine not started");
     this.turnActive = true;
     this.idStale = true;
@@ -333,7 +391,7 @@ export class AcpEngine implements Engine {
     this.cancelled = false;
     this.turnContext = 0;
     try {
-      const res: any = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] });
+      const res: any = await this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }, ...(await this.imageBlocks(images))] });
       this.session.lastUsedAt = Date.now();
       this.flushUsage();
       this.emitTurnUsage(res?.usage);
@@ -352,6 +410,8 @@ export class AcpEngine implements Engine {
       return "error";
     } finally {
       this.turnActive = false;
+      // Subagents end with their turn (the panel marks them done): forget their launches.
+      this.subagentLaunches.clear();
     }
   }
 
@@ -523,13 +583,10 @@ export class AcpEngine implements Engine {
       } catch {
         /* already closed */
       }
-      try {
-        this.proc.kill();
-      } catch {
-        /* already gone */
-      }
+      // The whole group: the agent and whatever it started (shells, dev servers).
+      killTree(this.proc);
       await Promise.race([this.proc.exited, Bun.sleep(1500)]);
-      if (!this.proc.killed) this.proc.kill("SIGKILL");
+      killTree(this.proc, "SIGKILL");
     }
   }
 }
@@ -594,9 +651,12 @@ function full(u: any): { output?: string } {
 
 /** A minimal line diff for ACP diff content (old/new file text): changed region with context. */
 export function simpleDiff(path: string, oldText: string | null | undefined, newText: string): string {
-  const a = (oldText ?? "").split("\n");
-  const b = (newText ?? "").split("\n");
+  // The empty "line" after a final newline is not a line.
+  const lines_ = (t: string) => (t.endsWith("\n") ? t.slice(0, -1) : t).split("\n");
+  const a = lines_(oldText ?? "");
+  const b = lines_(newText ?? "");
   if (!oldText) return [`--- /dev/null`, `+++ ${path}`, ...b.map((l) => `+${l}`)].join("\n");
+  if (oldText === newText) return `--- ${path}\n+++ ${path}\n(no change: the file already has this content)`;
   let s = 0;
   while (s < a.length && s < b.length && a[s] === b[s]) s++;
   let ea = a.length - 1, eb = b.length - 1;

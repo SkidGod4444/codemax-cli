@@ -1,8 +1,8 @@
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, QuestionAnswer, QuestionRequest, RewindPoint, StopReason, ToolStatus } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PromptImage, QuestionAnswer, QuestionRequest, RewindPoint, StopReason, ToolStatus } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
-import { platformArgv } from "../core/spawn.ts";
+import { GROUP_SPAWN, killTree, platformArgv, trackChild } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
 import pkg from "../../package.json" with { type: "json" };
 
@@ -114,7 +114,7 @@ export class CodexEngine implements Engine {
   }
 
   private spawn(cwd: string) {
-    const proc = Bun.spawn(platformArgv(this.opts.cmd ?? ["codex", "app-server"]), { cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const proc = trackChild(Bun.spawn(platformArgv(this.opts.cmd ?? ["codex", "app-server"]), { ...GROUP_SPAWN, cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {
@@ -146,12 +146,10 @@ export class CodexEngine implements Engine {
       },
       onLine: (f: (line: string) => void) => void (sink.cb = f),
       close: async () => {
-        try {
-          proc.kill();
-        } catch {
-          /* gone */
-        }
+        // The whole group: Codex and the commands it started.
+        killTree(proc);
         await Promise.race([proc.exited, Bun.sleep(1500)]);
+        killTree(proc, "SIGKILL");
       },
     };
   }
@@ -438,12 +436,12 @@ export class CodexEngine implements Engine {
     t?.resolve(reason);
   }
 
-  async prompt(text: string): Promise<StopReason> {
+  async prompt(text: string, images: PromptImage[] = []): Promise<StopReason> {
     if (!this.transport || !this.threadId) throw new Error("engine not started");
     const done = new Promise<StopReason>((resolve) => (this.turn = { resolve }));
     try {
       const approvalPolicy = this.info?.currentMode === "never" ? "never" : "on-request";
-      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }], model: this.model, approvalPolicy, ...(this.effort ? { effort: this.effort } : {}) });
+      const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }, ...images.map((im) => ({ type: "localImage", path: im.path }))], model: this.model, approvalPolicy, ...(this.effort ? { effort: this.effort } : {}) });
       if (this.turn) this.turn.id = res?.turn?.id;
       if (res?.turn?.id) this.lastTurnId = res.turn.id;
       this.fresh = false;

@@ -66,7 +66,7 @@ export class Ledger {
       this.threadId = id ?? newThreadId(this.dir);
       this.threadDir = ensureDir(join(this.dir, "threads", this.threadId));
       const meta = join(this.threadDir, "thread.json");
-      if (!existsSync(meta)) writeFileSync(meta, JSON.stringify({ id: this.threadId, createdAt: Date.now() }) + "\n");
+      if (!existsSync(meta)) writeFileSync(meta, JSON.stringify({ id: this.threadId, createdAt: Date.now() }) + "\n", { mode: 0o600 });
     }
     this.journal = new Journal(this.threadDir);
     for (const t of this.turns()) this.seen.add(turnKey(t));
@@ -142,7 +142,7 @@ export class Ledger {
       // Copied, not moved: an older codemax still reads them where they were.
       copyFileSync(join(this.dir, f), join(d, f));
     }
-    writeFileSync(join(d, "thread.json"), JSON.stringify({ id, createdAt, migrated: true }) + "\n");
+    writeFileSync(join(d, "thread.json"), JSON.stringify({ id, createdAt, migrated: true }) + "\n", { mode: 0o600 });
   }
 
   private file(name: string) {
@@ -170,7 +170,7 @@ export class Ledger {
       const k = turnKey(t);
       if (this.seen.has(k)) continue;
       this.seen.add(k);
-      appendFileSync(this.file("turns.jsonl"), JSON.stringify(t) + "\n");
+      appendFileSync(this.file("turns.jsonl"), JSON.stringify(t) + "\n", { mode: 0o600 });
       n++;
     }
     return n;
@@ -181,7 +181,7 @@ export class Ledger {
   }
 
   addEvent(e: Omit<LedgerEvent, "ts"> & { ts?: number }) {
-    appendFileSync(this.file("events.jsonl"), JSON.stringify({ ts: Date.now(), ...e }) + "\n");
+    appendFileSync(this.file("events.jsonl"), JSON.stringify({ ts: Date.now(), ...e }) + "\n", { mode: 0o600 });
   }
 
   sessions(): Partial<Record<AgentId, SessionRef>> {
@@ -197,7 +197,7 @@ export class Ledger {
   saveSession(ref: SessionRef) {
     const all = this.sessions();
     all[ref.agent] = ref;
-    writeFileSync(this.file("sessions.json"), JSON.stringify(all, null, 2) + "\n");
+    writeFileSync(this.file("sessions.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
   }
 
   summary(): string {
@@ -206,7 +206,7 @@ export class Ledger {
   }
 
   writeSummary(text: string) {
-    writeFileSync(this.file("summary.md"), text.trimEnd() + "\n");
+    writeFileSync(this.file("summary.md"), text.trimEnd() + "\n", { mode: 0o600 });
   }
 
   usage(): UsageRecord[] {
@@ -214,7 +214,7 @@ export class Ledger {
   }
 
   addUsage(r: UsageRecord) {
-    appendFileSync(this.file("usage.jsonl"), JSON.stringify(r) + "\n");
+    appendFileSync(this.file("usage.jsonl"), JSON.stringify(r) + "\n", { mode: 0o600 });
   }
 
   quota(): Partial<Record<AgentId, QuotaStatus>> {
@@ -230,13 +230,13 @@ export class Ledger {
   saveQuota(q: QuotaStatus) {
     const all = this.quota();
     all[q.agent] = q;
-    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
+    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
   }
 
   clearQuota(agent?: AgentId) {
     const all = agent ? this.quota() : {};
     if (agent) delete all[agent];
-    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
+    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
   }
 }
 

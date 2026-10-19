@@ -386,3 +386,26 @@ test("codex rewind: forks the thread through the turn before the message, or sta
   expect(e.session?.id).toBe("th2");
   expect(e.rewindPoint()).toEqual({ sessionId: "th2", messageId: null });
 });
+
+test("codex: images dropped into the prompt go as localImage input", async () => {
+  const { transport, sent } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+    else if (m.method === "turn/start") {
+      reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "t1" } } });
+      n("turn/completed", { threadId: "th", turn: { id: "t1", status: "completed" } });
+    }
+  });
+  const e = new CodexEngine({ transport });
+  await e.start({ cwd: "/tmp" });
+  await e.prompt("what is in [Image #1]?", [{ path: "/tmp/shot.png", mimeType: "image/png" }]);
+  expect(sent.find((m) => m.method === "turn/start").params.input).toEqual([{ type: "text", text: "what is in [Image #1]?" }, { type: "localImage", path: "/tmp/shot.png" }]);
+});
+
+test("edit diffs: Antigravity's client_edit_file (recorded from agy_acp_server 1.4.1); no trailing blank line; unchanged files say so", async () => {
+  const { contentDiff, simpleDiff } = await import("../src/engines/acp.ts");
+  // The permission request's content, as Antigravity sends it.
+  const content = [{ path: "/repo/notes.txt", oldText: "line one\noriginal\nline three\n", newText: "line one\nedited\nline three\n", _meta: { kind: "modify" }, type: "diff" }];
+  expect(contentDiff(content, "/repo")).toBe("--- notes.txt\n+++ notes.txt\n@@ line 1 @@\n line one\n-original\n+edited\n line three");
+  expect(simpleDiff("a.txt", "same\n", "same\n")).toContain("(no change");
+  expect(simpleDiff("new.txt", null, "x\ny\n")).toBe("--- /dev/null\n+++ new.txt\n+x\n+y");
+});
