@@ -27,7 +27,7 @@ import { appendHistory, loadHistory } from "../core/history.ts";
 import { VERIFY_FIX_CAP, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { platformArgv, shellArgv } from "../core/spawn.ts";
+import { platformArgv, SHELL_SPAWN, shellArgv } from "../core/spawn.ts";
 import { cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
@@ -1235,7 +1235,7 @@ export class ChatApp {
   private async shell(cmd: string) {
     if (!cmd) return;
     this.transcript.user(`! ${cmd}`);
-    const p = Bun.spawn(shellArgv(cmd), { cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
+    const p = Bun.spawn(shellArgv(cmd), { ...SHELL_SPAWN, cwd: this.cwd, stdout: "pipe", stderr: "pipe" });
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
     const code = await p.exited;
     const body = (out + (err ? `\n${err}` : "")).trimEnd() || "(no output)";

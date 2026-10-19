@@ -14,7 +14,14 @@ export function platformArgv(argv: string[]): string[] {
   return /\.(cmd|bat)$/i.test(path) ? ["cmd.exe", "/d", "/s", "/c", path, ...rest] : [path, ...rest];
 }
 
-/** argv that runs one shell command line (`!cmd` in the chat). */
+/**
+ * argv that runs one shell command line (`!cmd` in the chat, checks after edits). Spawn it
+ * with SHELL_SPAWN: on Windows the line must reach cmd.exe untouched. Bun's default quoting
+ * escapes `"` as `\"`, which cmd.exe does not understand, so `/s /c "<line>"` is passed
+ * verbatim and cmd.exe strips only the outer quotes.
+ */
 export function shellArgv(cmd: string): string[] {
-  return IS_WINDOWS ? ["cmd.exe", "/d", "/s", "/c", cmd] : ["sh", "-c", cmd];
+  return IS_WINDOWS ? ["cmd.exe", "/d", "/s", "/c", `"${cmd}"`] : ["sh", "-c", cmd];
 }
+
+export const SHELL_SPAWN: { windowsVerbatimArguments?: boolean } = IS_WINDOWS ? { windowsVerbatimArguments: true } : {};

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { shellArgv } from "./spawn.ts";
+import { SHELL_SPAWN, shellArgv } from "./spawn.ts";
 
 /**
  * Checks after edits: the project's own test / typecheck command, run by
@@ -57,7 +57,7 @@ export interface VerifyResult {
 /** Run the checks in the project; `stop()` ends them early. */
 export function runVerify(cmd: string, cwd: string, timeoutMs = VERIFY_TIMEOUT_MS): { done: Promise<VerifyResult>; stop: () => void } {
   const t0 = Date.now();
-  const p = Bun.spawn(shellArgv(cmd), { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env, CI: process.env.CI ?? "1", FORCE_COLOR: "0", NO_COLOR: "1" } });
+  const p = Bun.spawn(shellArgv(cmd), { ...SHELL_SPAWN, cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: { ...process.env, CI: process.env.CI ?? "1", FORCE_COLOR: "0", NO_COLOR: "1" } });
   let stopped = false;
   let timedOut = false;
   const timer = setTimeout(() => {
