@@ -1,6 +1,6 @@
 {
   "name": "codemax-cli",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "One terminal for every coding agent you pay for: drive Claude Code, Codex, OpenCode, Grok and Gemini CLI from one chat, on your subscriptions, with context that survives switching agents.",
   "keywords": [
     "acp",
@@ -52,7 +52,8 @@
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.93.0",
     "@agentclientprotocol/sdk": "1.9.0",
-    "@opentui/core": "0.6.6"
+    "@opentui/core": "0.6.6",
+    "highlight.js": "11.11.1"
   },
   "optionalDependencies": {
     "@oven/bun-darwin-aarch64": "1.4.3",

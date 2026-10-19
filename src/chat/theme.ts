@@ -49,8 +49,22 @@ export interface Palette {
   /** Selected row inside an overlay. */
   selBg: string;
   selFg: string;
+  /** Diff +/- signs and line text. */
   diffAdd: string;
   diffDel: string;
+  /** Full-width background bands of added / removed lines, and of the words that changed in them. */
+  diffAddBg: string;
+  diffDelBg: string;
+  diffAddWord: string;
+  diffDelWord: string;
+  /** Inline `code` and code without a known language (Claude Code's lavender). */
+  code: string;
+  /** Links. */
+  link: string;
+  /** The band behind your own messages. */
+  userBg: string;
+  /** Code highlighting, by highlight.js class (Monokai Extended dark, GitHub light, as Claude Code). */
+  syntax: Record<string, string>;
   /** Reasoning text. */
   thought: string;
   /** Terminal default foreground. */
@@ -72,8 +86,20 @@ const DARK: Palette = {
   panelDim: "#b88a9f",
   selBg: "#ff5c8d",
   selFg: "#3a0d25",
-  diffAdd: "#4ade80",
-  diffDel: "#f87171",
+  diffAdd: "#50c850",
+  diffDel: "#dc5a5a",
+  diffAddBg: "#225c2b",
+  diffDelBg: "#7a2936",
+  diffAddWord: "#38a660",
+  diffDelWord: "#b3596b",
+  code: "#b1b9f9",
+  link: "#6cb6ff",
+  userBg: "#373737",
+  syntax: {
+    keyword: "#f92672", operator: "#f92672", storage: "#66d9ef", built_in: "#a6e22e", type: "#a6e22e", title: "#a6e22e",
+    literal: "#be84ff", number: "#be84ff", symbol: "#be84ff", string: "#e6db74", regexp: "#e6db74", params: "#fd971f",
+    comment: "#75715e", meta: "#75715e", variable: "#ffffff", property: "#ffffff", attr: "#a6e22e", punctuation: "#f8f8f2",
+  },
   thought: "#b88a9f",
   text: undefined,
 };
@@ -93,8 +119,20 @@ const LIGHT: Palette = {
   panelDim: "#8a6a7a",
   selBg: "#ffc3d6",
   selFg: "#3a0d25",
-  diffAdd: "#15803d",
-  diffDel: "#c81e1e",
+  diffAdd: "#248a3d",
+  diffDel: "#cf222e",
+  diffAddBg: "#69db7c",
+  diffDelBg: "#ffa8b4",
+  diffAddWord: "#2f9d44",
+  diffDelWord: "#d1454b",
+  code: "#5769f7",
+  link: "#0b5cd5",
+  userBg: "#f0f0f0",
+  syntax: {
+    keyword: "#a71d5d", operator: "#a71d5d", storage: "#a71d5d", built_in: "#0086b3", type: "#0086b3", title: "#795da3",
+    literal: "#0086b3", number: "#0086b3", symbol: "#0086b3", string: "#183691", regexp: "#183691", params: "#0086b3",
+    comment: "#969896", meta: "#969896", variable: "#0086b3", property: "#0086b3", attr: "#795da3", punctuation: "#333333",
+  },
   thought: "#8a6a7a",
   text: undefined,
 };

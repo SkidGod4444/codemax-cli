@@ -1,6 +1,7 @@
-import { BoxRenderable, ScrollBoxRenderable, StyledText, TextRenderable, fg, italic, strikethrough, stringToStyledText, type CliRenderer, type TextChunk } from "@opentui/core";
+import { BoxRenderable, ScrollBoxRenderable, StyledText, TextRenderable, bold, dim, fg, italic, strikethrough, stringToStyledText, type CliRenderer, type TextChunk } from "@opentui/core";
 import { C, G } from "./theme.ts";
 import { styleMarkdown, styleToolOutput } from "./markdown.ts";
+import { collapsedDiff, diffRows, isDiff, styleDiffRows } from "./diffview.ts";
 import { fmtTime12 } from "../core/time.ts";
 
 export interface PlanEntry {
@@ -15,7 +16,7 @@ export interface AgentBlock {
   thought(text: string, messageId?: string): void;
   /** Show or update the agent's plan as a checklist. */
   plan(entries: PlanEntry[]): void;
-  tool(id: string, title: string, status: string, detail?: string): void;
+  tool(id: string, title: string, status: string, detail?: string, kind?: string): void;
   toolUpdate(id: string, status?: string, title?: string, detail?: string): void;
   /** Closing dim line, e.g. "✻ Worked for 13s · done 7:25 PM". */
   footer(text: string): void;
@@ -29,6 +30,8 @@ interface Collapsible {
   node: TextRenderable;
   full: string;
   render: (text: string, expanded: boolean) => string | StyledText;
+  /** A file read: collapsed it says how many lines were read, not what they say. */
+  read?: boolean;
 }
 
 /**
@@ -112,8 +115,8 @@ export class Transcript {
 
   /** Your message, with the time it was sent ("· 7:25 PM", 12-hour). */
   user(text: string, ts = Date.now()) {
-    this.gap();
-    const node = this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.accent });
+    // Claude Code's look: a grey "❯" and your words, normal weight, on a grey band.
+    const node = this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.dim, gap: true, bg: C.userBg });
     node.content = new StyledText([...stringToStyledText(text).chunks, fg(C.dimmer)(`  · ${fmtTime12(ts)}`)]);
   }
 
@@ -141,7 +144,7 @@ export class Transcript {
     let thinking: { node: TextRenderable; c: Collapsible; id?: string } | null = null;
     let planNode: TextRenderable | null = null;
     let styleTimer: ReturnType<typeof setTimeout> | null = null;
-    const tools = new Map<string, { glyph: TextRenderable; title: TextRenderable; result?: Collapsible; name: string; status: string }>();
+    const tools = new Map<string, { glyph: TextRenderable; title: TextRenderable; result?: Collapsible; name: string; status: string; kind?: string }>();
     const paragraphs: string[] = [];
 
     const settle = () => {
@@ -151,12 +154,15 @@ export class Transcript {
         para.node.content = styleMarkdown(para.text);
       }
     };
-    const toolResult = (detail: string, failed: boolean): Collapsible => {
+    const toolResult = (detail: string, failed: boolean, kind?: string): Collapsible => {
       detail = displayCap(detail);
       const c: Collapsible = {
         node: null as unknown as TextRenderable,
         full: detail,
-        render: (t, expanded) => styleToolOutput(expanded ? t.replace(/\s+$/, "") : summarize(t)),
+        ...(kind === "read" && !failed ? { read: true } : {}),
+        // A diff collapses to its summary and first changed lines, not its first raw lines.
+        // The band of a changed line spans the transcript, less the "  ⎿  " indent and padding.
+        render: (t, expanded) => (c.read && !expanded ? readSummary(t) : isDiff(t) ? styleDiffRows(expanded ? diffRows(t) : collapsedDiff(diffRows(t)), Math.max(20, self.renderer.width - 8)) : styleToolOutput(expanded ? t.replace(/\s+$/, "") : summarize(t))),
       };
       c.node = self.nestedNode("", failed ? C.error : C.dim);
       c.node.content = c.render(detail, self.expanded);
@@ -173,7 +179,7 @@ export class Transcript {
         thinking = null;
         if (!para) {
           const start = t.replace(/^\n+/, "");
-          const node = self.line(`${G.bullet} `, start, { glyphFg: C.assistant });
+          const node = self.line(`${G.bullet} `, start, { glyphFg: C.assistant, gap: true });
           para = { node, text: start, id: messageId };
           paragraphs.push(start);
         } else {
@@ -199,7 +205,7 @@ export class Transcript {
               return new StyledText([fg(C.thought)(italic(`Thinking${shown ? "… " : "…"}`)), fg(C.thought)(italic(shown))]);
             },
           };
-          c.node = self.line(`${G.thought} `, "", { glyphFg: C.thought });
+          c.node = self.line(`${G.thought} `, "", { glyphFg: C.thought, gap: true });
           self.collapsibles.push(c);
           thinking = { node: c.node, c, id: messageId };
         }
@@ -226,21 +232,22 @@ export class Transcript {
         // One live checklist per turn: later updates redraw it in place.
         if (planNode) planNode.content = content;
         else {
-          planNode = self.line(`${G.bullet} `, "", { glyphFg: C.tool });
+          planNode = self.line(`${G.bullet} `, "", { glyphFg: C.tool, gap: true });
           planNode.content = content;
         }
         self.scrollToEnd();
       },
-      tool(id, title, status, detail) {
+      tool(id, title, status, detail, kind) {
         settle();
         para = null;
         thinking = null;
         if (self.gone) return;
         const glyph = new TextRenderable(self.renderer, { id: `tg-${++self.n}`, content: `${G.bullet} `, width: 2, fg: toolColor(status), wrapMode: "none" });
-        const title_ = self.lineWithGlyph(glyph, title);
-        const entry = { glyph, title: title_, name: title, status, result: undefined as Collapsible | undefined };
+        const title_ = self.lineWithGlyph(glyph, title, { gap: true });
+        title_.content = toolTitle(title);
+        const entry = { glyph, title: title_, name: title, status, kind, result: undefined as Collapsible | undefined };
         tools.set(id, entry);
-        if (detail) entry.result = toolResult(detail, status === "failed");
+        if (detail) entry.result = toolResult(detail, status === "failed", kind);
         self.scrollToEnd();
       },
       toolUpdate(id, status, title, detail) {
@@ -248,7 +255,7 @@ export class Transcript {
         if (!e) return;
         if (title) {
           e.name = title;
-          e.title.content = title;
+          e.title.content = toolTitle(title);
         }
         if (status) {
           e.status = status;
@@ -260,14 +267,14 @@ export class Transcript {
             detail = displayCap(detail);
             e.result.full = detail;
             e.result.node.content = e.result.render(detail, self.expanded);
-          } else e.result = toolResult(detail, status === "failed");
+          } else e.result = toolResult(detail, status === "failed", e.kind);
         }
       },
       footer(text) {
         settle();
         para = null;
         thinking = null;
-        self.line(`${G.done} `, text, { fg: C.dim, glyphFg: C.dim });
+        self.line(`${G.done} `, text, { fg: C.dim, glyphFg: C.dim, gap: true });
         self.scrollToEnd();
       },
       text: () => paragraphs.map((p) => p.trim()).filter(Boolean).join("\n\n"),
@@ -287,15 +294,16 @@ export class Transcript {
     this.box.add(new TextRenderable(this.renderer, { id: `gap-${++this.n}`, content: "", height: 1 }));
   }
 
-  private line(glyph: string, text: string, o: { fg?: string; glyphFg?: string; bold?: boolean } = {}): TextRenderable {
+  /** `gap`: one blank line before it (Claude Code puts one before every block, none before results). `bg`: a band behind the whole row. */
+  private line(glyph: string, text: string, o: { fg?: string; glyphFg?: string; bold?: boolean; gap?: boolean; bg?: string } = {}): TextRenderable {
     if (this.gone) return { content: "" } as unknown as TextRenderable;
     const g = glyph ? new TextRenderable(this.renderer, { id: `g-${++this.n}`, content: glyph, width: glyph.length, fg: o.glyphFg ?? o.fg, wrapMode: "none" }) : null;
     return this.lineWithGlyph(g, text, o);
   }
 
-  private lineWithGlyph(glyph: TextRenderable | null, text: string, o: { fg?: string; bold?: boolean } = {}): TextRenderable {
+  private lineWithGlyph(glyph: TextRenderable | null, text: string, o: { fg?: string; bold?: boolean; gap?: boolean; bg?: string } = {}): TextRenderable {
     if (this.gone) return { content: "" } as unknown as TextRenderable;
-    const row = new BoxRenderable(this.renderer, { id: `row-${++this.n}`, width: "100%", flexDirection: "row" });
+    const row = new BoxRenderable(this.renderer, { id: `row-${++this.n}`, width: "100%", flexDirection: "row", ...(o.gap ? { marginTop: 1 } : {}), ...(o.bg ? { backgroundColor: o.bg } : {}) });
     if (glyph) row.add(glyph);
     const body = new TextRenderable(this.renderer, { id: `t-${this.n}`, content: text, fg: o.fg, flexGrow: 1, flexShrink: 1, wrapMode: "word", attributes: o.bold ? 1 : undefined } as any);
     row.add(body);
@@ -340,7 +348,7 @@ function clip(text: string, lines: number, width: number): string {
 }
 
 /** Tool output: first lines, then "… +N lines" like Claude Code's collapsed results. */
-export function summarize(detail: string, keep = 3): string {
+export function summarize(detail: string, keep = 5): string {
   const lines = detail.replace(/\s+$/, "").split("\n");
   if (lines.length <= keep) return lines.join("\n");
   return lines.slice(0, keep).join("\n") + `\n… +${lines.length - keep} lines (ctrl+o to expand)`;
@@ -353,4 +361,17 @@ export function summarize(detail: string, keep = 3): string {
 const DISPLAY_KEEP = 100_000;
 export function displayCap(s: string): string {
   return s.length <= 2 * DISPLAY_KEEP ? s : `${s.slice(0, DISPLAY_KEEP)}\n… ${s.length - 2 * DISPLAY_KEEP} characters not shown …\n${s.slice(-DISPLAY_KEEP)}`;
+}
+
+/** "Read src/auth.ts" → **Read** src/auth.ts: the tool's name bold, its arguments normal (Claude Code's header). */
+function toolTitle(title: string): StyledText {
+  const m = title.match(/^([A-Za-z][\w.-]*)(\(.*\)|\s.*)?$/s);
+  if (!m) return new StyledText(stringToStyledText(title).chunks);
+  return new StyledText([bold(m[1]!), ...(m[2] ? stringToStyledText(m[2]).chunks : [])]);
+}
+
+/** A file read, collapsed: "Read 42 lines" (ctrl+o shows the content), as Claude Code shows reads. */
+function readSummary(content: string): StyledText {
+  const n = content.replace(/\n+$/, "").split("\n").length;
+  return new StyledText([...stringToStyledText("Read ").chunks, bold(String(n)), ...stringToStyledText(` line${n === 1 ? "" : "s"}`).chunks, dim(" (ctrl+o to expand)")]);
 }

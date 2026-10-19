@@ -55,6 +55,9 @@ export const TIPS: Tip[] = [
   { text: "Tip: /new starts a fresh session with this agent · the conversation history stays" },
   { text: "Tip: helper agents the agent starts are listed under the prompt with their latest step" },
   { text: "Tip: /clear clears the screen · nothing is lost" },
+  { text: "Tip: Ctrl+G writes your message in your own editor ($EDITOR) · /editor does the same" },
+  { text: "Tip: /copy copies the last reply · /copy 2 the one before" },
+  { text: "Tip: /export saves this conversation as Markdown" },
   // Usage, machine and codemax
   { text: "Tip: /usage shows tokens and what your subscription use would cost on the API" },
   { text: "Tip: /config → Daily budget caps the day's usage value · /budget shows where you are" },

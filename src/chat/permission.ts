@@ -1,6 +1,6 @@
 import { BoxRenderable, TextRenderable, type CliRenderer, type KeyEvent } from "@opentui/core";
 import type { PermissionRequest } from "../engines/types.ts";
-import { styleToolOutput } from "./markdown.ts";
+import { diffRows, styleDiffRows, type DiffRow } from "./diffview.ts";
 import { C, G } from "./theme.ts";
 
 export type PermissionChoice = { optionId: string | null; tellAgent?: boolean };
@@ -20,7 +20,7 @@ export class PermissionDialog {
   private cursor = 0;
   private rows: TextRenderable[] = [];
   private choices: { label: string; optionId: string | null; tellAgent?: boolean }[];
-  private diffLines: string[] = [];
+  private diffLines: DiffRow[] = [];
   private diffView: TextRenderable | null = null;
   private diffMore: TextRenderable | null = null;
   private expanded = false;
@@ -56,7 +56,7 @@ export class PermissionDialog {
     const detail = request.detail && !request.title.includes(request.detail.split("\n")[0]!.replace(/^\w+: /, "")) ? request.detail : undefined;
     if (request.diff) {
       // The diff replaces the raw input dump (old_string/new_string say the same thing, worse).
-      this.diffLines = request.diff.replace(/\n+$/, "").split("\n");
+      this.diffLines = diffRows(request.diff);
       this.diffView = new TextRenderable(renderer, { content: "", wrapMode: "none", truncate: true, width: "100%" });
       this.diffMore = new TextRenderable(renderer, { content: "", fg: C.dim });
       this.box.add(this.diffView);
@@ -84,7 +84,8 @@ export class PermissionDialog {
     if (!this.diffView || !this.diffMore) return;
     const rows = this.diffRows();
     this.diffTop = Math.max(0, Math.min(this.diffTop, this.diffLines.length - rows));
-    this.diffView.content = styleToolOutput(this.diffLines.slice(this.diffTop, this.diffTop + rows).join("\n"));
+    // Bands span the dialog, inside its border and padding.
+    this.diffView.content = styleDiffRows(this.diffLines.slice(this.diffTop, this.diffTop + rows), Math.max(20, this.renderer.width - 4));
     const below = this.diffLines.length - this.diffTop - rows;
     const above = this.diffTop;
     this.diffMore.content =

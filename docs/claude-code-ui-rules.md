@@ -86,3 +86,12 @@ Sources: [IM]=https://code.claude.com/docs/en/interactive-mode, [SC]=https://cod
 8. Shift+Tab cycles permission modes and shows an indicator line (`plan mode on`, etc.). [CAP] [CW]
 9. `Ctrl+O` for a detailed transcript view; `Ctrl+R` for history search. [IM]
 10. Status line as a script on stdin/stdout with debounced updates and `COLUMNS`/`LINES`. [SL]
+
+## 8. Rendering details read from the Claude Code 2.1.303 bundle (what codemax follows)
+60. Every block (user prompt, assistant text, tool call, system line) has `marginTop: 1`; tool results (`  ⎿  `) have none.
+61. User prompt: `❯` in `inactive` grey, text in normal colour, the row on `userMessageBackground` (dark rgb(55,55,55), light rgb(240,240,240)).
+62. Tool header: dot (green resolved, red failed, dim blinking while running), tool name bold, `(args)` normal weight.
+63. Assistant prose normal; inline code in `permission` (dark rgb(177,185,249), light rgb(87,105,247)), no backticks; links OSC-8 in blueBright / blue; h1 bold+italic+underline, h2-h6 bold; `-` bullets.
+64. Code blocks: highlight.js, Monokai Extended (dark) / GitHub (light); no background, border or line numbers; language label only when unsupported; a fence without a language in `permission` colour.
+65. Reads: `Read **N** lines` with no content. Output: 5 rows, then dim `… +N lines (ctrl+o to expand)`.
+66. Edit diffs: `Added **N** lines, removed **N** lines`; gutter ` <n> ` (dim on context); full-width backgrounds `diffAdded` dark rgb(34,92,43) light rgb(105,219,124), `diffRemoved` dark rgb(122,41,54) light rgb(255,168,180); changed words on `diffAddedWord` / `diffRemovedWord` (dark rgb(56,166,96) / rgb(179,89,107), light rgb(47,157,68) / rgb(209,69,75)), skipped when over 40% of the line changed; added and context lines syntax-highlighted, removed not; hunks separated by dim `...`.

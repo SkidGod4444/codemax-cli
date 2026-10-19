@@ -109,7 +109,7 @@ export class Palette {
     this.titleRow.content = `${this.opts.title ?? ""}${more ? `${this.opts.title ? " · " : ""}${this.cursor + 1}/${this.matches.length} · ↑↓ to scroll` : ""}`;
     this.box.height = shown + titleLines + (shown === 0 ? 1 : 0);
     this.box.top = Math.max(0, top - this.box.height);
-    const labelW = Math.min(Math.max(28, Math.floor(width * 0.35)), Math.max(10, ...visible.map((v) => v.label.length + 2)));
+    const labelW = Math.min(Math.max(30, Math.floor(width * 0.42)), Math.max(10, ...visible.map((v) => v.label.length + 2)));
     this.rows.forEach((row, i) => {
       const it = visible[i];
       if (!it) {
@@ -195,6 +195,7 @@ function isSubsequence(needle: string, hay: string): boolean {
   return needle.length >= 3 && hay[0] === needle[0] && i === needle.length;
 }
 
+/** The label in `n` columns: cut with "…" when too long, and always two spaces before what follows. */
 function pad(s: string, n: number): string {
-  return s.length >= n ? s.slice(0, n - 1) + " " : s + " ".repeat(n - s.length);
+  return s.length > n - 2 ? s.slice(0, Math.max(1, n - 3)) + "…  " : s + " ".repeat(n - s.length);
 }

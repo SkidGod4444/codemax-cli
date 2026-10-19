@@ -1,7 +1,8 @@
 import { BoxRenderable, TextRenderable, TextareaRenderable, createCliRenderer, type CliRenderer, type KeyEvent, type PasteEvent } from "@opentui/core";
 import type { Config } from "../config.ts";
 import { CONFIG_PATH, hotkeyLabel, saveConfigKey } from "../config.ts";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AgentId, QuotaStatus, SessionRef } from "../adapters/types.ts";
 import { listAdapters, getAdapter } from "../adapters/index.ts";
 import { Ledger } from "../core/ledger.ts";
@@ -12,8 +13,9 @@ import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
 import { createEngine, EDITS_WITHOUT_ASKING, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
 import type { Engine, EngineEvent, PermissionRequest, PromptImage, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
 import { droppedContents, droppedFiles, imageType, splitDropped } from "./drop.ts";
-import { insideDir } from "../core/paths.ts";
-import { basename, relative } from "node:path";
+import { CODEMAX_HOME, ensureDir, insideDir } from "../core/paths.ts";
+import { threadMarkdown } from "../core/export.ts";
+import { basename, join, relative, resolve } from "node:path";
 import { strippedKeys } from "../engines/env.ts";
 import { blockers } from "../core/doctor.ts";
 import { Transcript, type AgentBlock } from "./transcript.ts";
@@ -30,7 +32,7 @@ import { appendHistory, loadHistory } from "../core/history.ts";
 import { VERIFY_FIX_CAP, VERIFY_TIMEOUT_MS, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { platformArgv, stopChildrenOnExit } from "../core/spawn.ts";
+import { platformArgv, SHELL_SPAWN, shellArgv, stopChildrenOnExit } from "../core/spawn.ts";
 import { safeDeep } from "../core/terminal.ts";
 import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
@@ -511,6 +513,12 @@ export class ChatApp {
       this.setFlash(this.transcript.toggleExpanded() ? "showing full output · ctrl+o to collapse" : "output collapsed");
       return;
     }
+    // Ctrl+G: write the message in your own editor (Claude Code's and OpenCode's key).
+    if (key.name === "g" && key.ctrl && !this.palette) {
+      key.stopPropagation();
+      void this.composeInEditor();
+      return;
+    }
     if (key.name === "c" && key.ctrl) {
       key.stopPropagation();
       const now = Date.now();
@@ -910,6 +918,58 @@ export class ChatApp {
       this.side.delete(side);
       await engine.close().catch(() => {});
       if (this.active) this.transcript.divider(`back to ${this.active.name}`);
+    }
+  }
+
+  /** The editor for Ctrl+G and /editor: $VISUAL, $EDITOR, else vi (Notepad on Windows). */
+  editorCommand = () => process.env.VISUAL || process.env.EDITOR || (process.platform === "win32" ? "notepad" : "vi");
+
+  /** Ctrl+G / /editor: edit the prompt's text in your editor; what you save comes back into the prompt. */
+  private async composeInEditor() {
+    const file = join(tmpdir(), `codemax-message-${process.pid}-${Date.now()}.md`);
+    writeFileSync(file, this.input.plainText, { mode: 0o600 });
+    const editor = this.editorCommand();
+    let code = 1;
+    await this.withTerminal(async () => {
+      const p = Bun.spawn(shellArgv(`${editor} ${JSON.stringify(file)}`), { ...SHELL_SPAWN, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+      code = await p.exited;
+    });
+    try {
+      const text = readFileSync(file, "utf8").replace(/\s+$/, "");
+      if (code === 0) {
+        this.input.setText(text);
+        this.input.gotoBufferEnd?.();
+      } else this.setFlash(`${editor} exited with ${code}; the prompt is unchanged`);
+    } catch {
+      this.setFlash("could not read the message back from the editor");
+    } finally {
+      rmSync(file, { force: true });
+    }
+    this.input.focus();
+  }
+
+  /** /copy: the last reply (or the last N back) onto the clipboard. */
+  private async copyLastReply(arg: string) {
+    const back = Math.max(1, Number(arg) || 1);
+    const replies = this.ledger.turns().filter((t) => t.role === "assistant" && t.text.trim());
+    const t = replies[replies.length - back];
+    if (!t) return this.transcript.note("no reply to copy yet", C.warn);
+    const ok = await this.copyText(t.text);
+    this.transcript.note(ok ? `copied ${back === 1 ? "the last reply" : `the reply ${back} back`} (${t.text.length} chars)` : "could not copy: no clipboard available", ok ? C.ok : C.warn);
+  }
+
+  /**
+   * /export [path]: this conversation as Markdown: your messages, the agents' replies and
+   * the steps they took. Saved under ~/.codemax/exports (yours only) unless you name a path.
+   */
+  private exportThread(arg: string) {
+    const md = threadMarkdown(this.ledger, listAdapters(this.config.order));
+    const target = arg.trim() ? resolve(this.cwd, arg.trim()) : join(ensureDir(join(CODEMAX_HOME, "exports")), `${this.ledger.threadId}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.md`);
+    try {
+      writeFileSync(target, md, { mode: 0o600 });
+      this.transcript.note(`exported this conversation (${md.split("\n").length} lines) to ${target}`, C.ok);
+    } catch (e: any) {
+      this.transcript.error(`could not export: ${e?.message ?? e}`);
     }
   }
 
@@ -1542,6 +1602,9 @@ export class ChatApp {
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
       { name: "/update", description: "Update codemax to the latest version", run: () => void this.runUpdate() },
       { name: "/config", description: "Settings: theme, keep awake, side agent and model, handoffs, checkpoints…", run: () => this.openConfig() },
+      { name: "/editor", description: "Write your message in your editor ($EDITOR) · also Ctrl+G", run: () => void this.composeInEditor() },
+      { name: "/copy", description: "Copy the last reply to the clipboard · /copy 2 for the one before", run: (a) => void this.copyLastReply(a) },
+      { name: "/export", description: "Save this conversation as Markdown · /export <path> to choose where", run: (a) => this.exportThread(a) },
       { name: "/setup", description: "Go through every setting one by one, as on first run", run: () => void this.runOnboarding() },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/theme", description: "Colour theme: /theme dark | light | auto (saved; restart to apply everywhere)", run: (a) => this.setThemePref(a) },
@@ -2189,7 +2252,7 @@ export class ChatApp {
         active.turn?.tools.add(e.title.split(/[\s(]/)[0] ?? e.title);
         if (active.turn && (/^(edit|delete|move|fileChange)$/.test(e.kind ?? "") || e.files?.length && e.kind !== "read" && e.kind !== "search")) active.turn.edited = true;
         active.turn?.rec?.tool(e.id, { title: e.title, kind: e.kind, status: e.status, input: e.input, output: e.output, files: e.files });
-        target().tool(e.id, e.title, e.status, e.detail);
+        target().tool(e.id, e.title, e.status, e.detail, e.kind);
         if (e.status === "completed" && this.active === active) this.term.toolDone(e.title);
         break;
       case "tool_update":
@@ -3095,9 +3158,8 @@ export class ChatApp {
       const tok = approx ? ` · ↓ ${t.tokens ? "" : "~"}${approx} tokens` : "";
       if (this.permission) this.setWorking(this.permission instanceof QuestionDialog ? `${glyph} Waiting for your answer (${secs}) · esc to skip` : `${glyph} Waiting for your approval (${secs}) · esc to say no`);
       else {
-        const elapsed = Date.now() - t.startedAt;
-        const tip = elapsed > 8000 ? `  ⎿  ${pick(TIPS, Math.floor(t.startedAt / 1000)).text.replace("{hotkey}", this.config.hotkeys.at(-1) ?? "ctrl+^").replace(/^Tip:/, "tip:")}` : "";
-        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)} · esc to interrupt${tip}`);
+        // Tips live in the empty prompt only, never on this line above it.
+        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)} · esc to interrupt`);
       }
     }, 120);
   }
