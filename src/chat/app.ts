@@ -28,7 +28,7 @@ import { VERIFY_FIX_CAP, runVerify, tail, verifyCandidates } from "../core/verif
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
 import { platformArgv, SHELL_SPAWN, shellArgv } from "../core/spawn.ts";
-import { cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
+import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
@@ -38,11 +38,14 @@ import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
 import { NotePanel, splitNote } from "./notes.ts";
+import { Onboarding, type OnboardingStep } from "./onboarding.ts";
 import { SubagentPanel } from "./subagents.ts";
 import { antigravityInstallPlan, installAntigravityServer, type InstallPlan } from "../engines/antigravity.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
+/** First re-check for a codemax update in a long session; each later one waits twice as long. */
+const UPDATE_RECHECK_FIRST_MS = 30 * 60_000;
 const MODE_CYCLE = ["default", "acceptEdits", "plan"];
 /** How long a lone 0 / 1 / 2 must sit in the prompt before it acts on the side agent's note. */
 const NOTE_ARM_MS = 800;
@@ -80,6 +83,10 @@ export class ChatApp {
   private palette: Palette | null = null;
   /** The open dialog (a permission prompt or an agent's question); one at a time, the rest queue. */
   private permission: PermissionDialog | QuestionDialog | null = null;
+  /** First-run setup (or /setup), shown where permission prompts go. */
+  private onboarding: Onboarding | null = null;
+  /** A setup step opened its own picker (the handoff order editor): keys go there meanwhile. */
+  private onboardingAside = false;
   private permissionQueue: ({ request: PermissionRequest; engine: Engine } | { question: QuestionRequest; engine: Engine })[] = [];
   /** `engine` implies `installed`: every check on `engine` also means the CLI really runs. */
   private detect = new Map<AgentId, { installed: boolean; version?: string; engine: boolean; problem?: string }>();
@@ -140,7 +147,13 @@ export class ChatApp {
   /** Set by a successful /update: after quitting, runChat starts the new version resuming this agent. */
   restartAfterQuit: { agent?: AgentId; version: string | null } | null = null;
   /** Update check (tests swap it; it never runs under `bun test`). */
-  updateChecker: (current: string) => Promise<string | null> = (current) => (process.env.NODE_ENV === "test" ? Promise.resolve(null) : checkForUpdate(current));
+  updateChecker: (current: string, force?: boolean) => Promise<string | null> = (current, force) => (process.env.NODE_ENV === "test" ? Promise.resolve(null) : checkForUpdate(current, { force }));
+  /**
+   * Long sessions look for a new codemax again: 30 minutes in, then an hour after that, then
+   * two hours, doubling, each time asking npm / GitHub directly (the 12-hour cache is skipped).
+   */
+  updateRecheckMs = UPDATE_RECHECK_FIRST_MS;
+  private updateTimer: ReturnType<typeof setTimeout> | null = null;
   /** Keep-awake (/awake). Tests swap its system runner. */
   awake = new Awake({ ...defaultAwakeDeps(), interactive: (fn) => this.withTerminal(fn) });
   /** Terminal tab status (Warp badge, OSC 7501) and desktop notifications; swapped in tests. */
@@ -245,13 +258,30 @@ export class ChatApp {
   }
 
   /** `explicit`: the user named this agent (--agent), so never start a different one. */
-  async start(agent: AgentId, fresh: boolean, o: { pick?: boolean; explicit?: boolean } = {}) {
+  /** This conversation thread (`codemax --resume <id>`). */
+  get threadId(): string {
+    return this.ledger.threadId;
+  }
+
+  /** Whether this thread has anything to come back to. */
+  get threadUsed(): boolean {
+    return this.ledger.journal.steps().some((s) => s.kind === "user") || this.ledger.turns().length > 0;
+  }
+
+  async start(agent: AgentId, fresh: boolean, o: { pick?: boolean; explicit?: boolean; pickThread?: boolean; onboard?: boolean } = {}) {
     try {
       this.today = spendToday();
     } catch {
       /* no usage yet */
     }
     await this.refreshDetect();
+    // Until setup has been done once (new users, and everyone updating to it): set everything up
+    // first, then carry on into the thread as usual. A default agent changed there is used.
+    if (o.onboard) {
+      const before = this.config.order[0];
+      await this.runOnboarding();
+      if (!o.explicit && this.config.order[0] !== before) agent = this.config.order[0] ?? agent;
+    }
     const ok = (a: AgentId) => this.detect.get(a)?.installed && this.detect.get(a)?.engine;
     if (!ok(agent) && o.explicit) throw new Error(`${agent} is ${this.detect.get(agent)?.installed ? "installed but has no protocol engine (try codemax --tui --agent " + agent + ")" : "not installed"}. Available: ${listAdapters(this.config.order).filter((a) => ok(a.id)).map((a) => a.id).join(", ") || "none"}`);
     const first = ok(agent) ? agent : listAdapters(this.config.order).find((a) => ok(a.id))?.id;
@@ -273,10 +303,13 @@ export class ChatApp {
     // Card border (2) + padding (2) + transcript padding (2): the logo must fit inside without wrapping.
     this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes, logo: logoLines(this.renderer.width - 6) });
     if ((this.config as any).priceUpdates !== false) void refreshLivePricesIfStale().then((l) => l && resetPriceCache());
-    if (this.config.updateCheck !== false)
+    if (this.config.updateCheck !== false) {
       void this.updateChecker(VERSION)
         .then((v) => v && this.announceUpdate(v))
         .catch(() => {});
+      this.scheduleUpdateCheck(this.updateRecheckMs);
+    }
+    if (o.pickThread && this.openThreadPicker(first)) return this.done;
     if (o.pick && !fresh && this.openPicker(first)) return this.done;
     await this.launch(first, { fresh });
     return this.done;
@@ -308,6 +341,11 @@ export class ChatApp {
 
   private handleKey(key: KeyEvent) {
     if (key.eventType === "release") return;
+    if (this.onboarding && !this.onboardingAside) {
+      key.stopPropagation();
+      this.onboarding.handleKey(key);
+      return;
+    }
     if (this.permission) {
       key.stopPropagation();
       this.permission.handleKey(key);
@@ -558,7 +596,7 @@ export class ChatApp {
   private async checkpoint(active: Active, text: string, message?: string): Promise<Checkpoint | null> {
     if (!this.config.checkpoints) return null;
     const point = active.engine.rewindPoint?.() ?? undefined;
-    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`, point && { agent: active.agent, ...point }).catch(() => null);
+    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`, point && { agent: active.agent, ...point }, this.ledger.threadId).catch(() => null);
     if (cp) this.checkpoints.push({ ...cp, agent: active.agent, message, fork: point });
     return cp;
   }
@@ -575,7 +613,8 @@ export class ChatApp {
     if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /rewind", C.warn);
     if (!this.config.checkpoints) return this.transcript.note("rewind needs snapshots: /config → Snapshots for /undo → on", C.warn);
     const mine = [...this.checkpoints].reverse().filter((c) => c.message !== undefined && !c.label.startsWith("before rewind: "));
-    const older = (await listCheckpoints(this.cwd, 30)).filter((c) => !this.checkpoints.some((m) => m.sha === c.sha) && /^before \w+: /.test(c.label) && !/^before (rewind: |\w+: handoff to )/.test(c.label));
+    // Older snapshots of this thread (ones from before threads carry none and are kept).
+    const older = (await listCheckpoints(this.cwd, 30)).filter((c) => !this.checkpoints.some((m) => m.sha === c.sha) && (!c.thread || c.thread === this.ledger.threadId) && /^before \w+: /.test(c.label) && !/^before (rewind: |\w+: handoff to )/.test(c.label));
     const all = [...mine.map((c) => ({ ...c, text: c.message! })), ...older.map((c) => ({ ...c, agent: c.label.match(/^before (\w+):/)![1] as AgentId, text: c.label.replace(/^before \w+: /, "") }))];
     if (!all.length) return this.transcript.note("nothing to rewind to yet (snapshots need a git repo)", C.warn);
     const counts = await checkpointChangeCounts(this.cwd, all.map((c) => c.sha)).catch(() => new Map<string, number>());
@@ -801,19 +840,45 @@ export class ChatApp {
     }
   }
 
-  /** Best agent to continue on: config order, installed with an engine, not exhausted or over budget. */
-  private nextAgent(from: AgentId): AgentId | null {
+  /**
+   * The handoff order: your list of agents (each with an optional model), else every agent
+   * in `order` on its default model.
+   */
+  private chain(): { agent: AgentId; model?: string; modelName?: string }[] {
+    const c = this.config.handoffChain;
+    return c?.length ? c : this.config.order.map((agent) => ({ agent }));
+  }
+
+  private chainEntry(agent: AgentId) {
+    return this.config.handoffChain?.find((e) => e.agent === agent);
+  }
+
+  /** The entry to continue on: the next in the handoff order after `from`, installed, not out of quota or over budget. */
+  private nextAgent(from: AgentId): { agent: AgentId; model?: string; modelName?: string } | null {
     const b = this.config.budgets ?? {};
-    for (const a of listAdapters(this.config.order)) {
-      if (a.id === from) continue;
-      const d = this.detect.get(a.id);
+    const list = this.chain();
+    const at = list.findIndex((e) => e.agent === from);
+    // After the current one first, then from the top (an earlier agent's limit may have reset).
+    const ordered = at >= 0 ? [...list.slice(at + 1), ...list.slice(0, at)] : list;
+    for (const e of ordered) {
+      if (e.agent === from || this.broken.has(e.agent)) continue;
+      const d = this.detect.get(e.agent);
       if (!d?.installed || !d.engine) continue;
-      if (isExhausted(this.quota.get(a.id))) continue;
-      if (budgetLevel(this.today.get(a.id) ?? 0, b[a.id]) === "over") continue;
-      return a.id;
+      if (isExhausted(this.quota.get(e.agent))) continue;
+      if (budgetLevel(this.today.get(e.agent) ?? 0, b[e.agent]) === "over") continue;
+      return e;
     }
     return null;
   }
+
+  /** "Cursor Agent · Opus 5.5" (or just the agent on its default model). */
+  private entryLabel(e: { agent: AgentId; model?: string; modelName?: string }): string {
+    const name = listAdapters(this.config.order).find((a) => a.id === e.agent)?.name ?? e.agent;
+    return e.model ? `${name} · ${e.modelName ?? displayModelName(e.model)}` : name;
+  }
+
+  /** Agents that refused to work this run (their own setup is broken); handoffs skip them until you switch to one. */
+  private broken = new Set<AgentId>();
 
   /** One-key handoff offer: Enter continues the task in the next agent. */
   private pendingOffer: { from: AgentId; reason: string; allAgents: boolean } | null = null;
@@ -832,21 +897,29 @@ export class ChatApp {
       this.transcript.note(allAgents ? "every agent shares that budget · raise it in ~/.codemax/config.json to continue" : "no other agent is available · /switch to pick one anyway", C.warn);
       return;
     }
+    // "Hand off automatically": the next agent in your order takes over without asking.
+    if (this.config.autoHandoff) {
+      this.transcript.note(`handing off to ${this.entryLabel(next)} (next in your handoff order) · /switch to pick another`, C.accent);
+      void this.switchTo(next.agent, false, { resumeTask: true, model: next.model });
+      return;
+    }
     this.closePalette();
+    // The rest of the order, then any other agent, each once.
+    const rest = [...this.chain(), ...listAdapters(this.config.order).map((a): { agent: AgentId; model?: string; modelName?: string } => ({ agent: a.id }))].filter((e, i, all) => e.agent !== next.agent && e.agent !== from && all.findIndex((x) => x.agent === e.agent) === i && this.detect.get(e.agent)?.engine);
+    const entries = [next, ...rest];
     const items: PaletteItem[] = [
-      { label: `Continue in ${getAdapter(next).name}`, description: "hand over the conversation and the unfinished request", value: next },
-      ...listAdapters(this.config.order)
-        .filter((a) => a.id !== next && a.id !== from && this.detect.get(a.id)?.engine)
-        .map((a) => ({ label: `Continue in ${a.name}`, description: isExhausted(this.quota.get(a.id)) ? "out of quota" : "", value: a.id, disabled: isExhausted(this.quota.get(a.id)) })),
+      { label: `Continue in ${this.entryLabel(next)}`, description: "next in your handoff order: hand over the conversation and the unfinished request", value: "0" },
+      ...rest.map((e, i) => ({ label: `Continue in ${this.entryLabel(e)}`, description: isExhausted(this.quota.get(e.agent)) ? "out of quota" : "", value: String(i + 1), disabled: isExhausted(this.quota.get(e.agent)) })),
       { label: `Stay on ${getAdapter(from).name}`, description: "keep going here anyway", value: "__stay" },
     ];
     this.paletteKind = "handoff";
     this.palette = new Palette(this.renderer, {
-      title: `${reason} · Enter to continue in ${getAdapter(next).name}`,
+      title: `${reason} · Enter to continue in ${this.entryLabel(next)}`,
       items,
       onPick: (it) => {
         this.closePalette();
-        if (it.value !== "__stay") void this.switchTo(it.value as AgentId, false, { resumeTask: true });
+        const e = entries[Number(it.value)];
+        if (it.value !== "__stay" && e) void this.switchTo(e.agent, false, { resumeTask: true, model: e.model });
       },
       onClose: () => this.closePalette(),
     }, this.paletteAnchor);
@@ -901,7 +974,8 @@ export class ChatApp {
       return { label: a.name, description: bits.join(" · "), value: `resume:${a.id}`, weight: 100 - i };
     });
     const fresh = recent[0]!;
-    items.push({ label: `Start fresh with ${fresh.name}`, description: "new session (history stays in the ledger)", value: `new:${fresh.id}`, weight: 0 });
+    const used = this.threadUsed;
+    items.push({ label: `New thread with ${fresh.name}`, description: used ? `this one stays: codemax --resume ${this.ledger.threadId}` : "a new conversation", value: `new:${fresh.id}`, weight: 0 });
     defaultAgent = sessions[fresh.id] ? fresh.id : defaultAgent;
     this.paletteKind = "picker";
     this.palette = new Palette(this.renderer, {
@@ -910,6 +984,7 @@ export class ChatApp {
       onPick: (it) => {
         this.closePalette();
         const [kind, agent] = it.value.split(":") as ["resume" | "new", AgentId];
+        if (kind === "new" && used) this.ledger = new Ledger(this.cwd, undefined, "new");
         void this.launch(agent, { fresh: kind === "new" });
       },
       onClose: () => {
@@ -917,6 +992,47 @@ export class ChatApp {
         void this.launch(defaultAgent, { fresh: false });
       },
     }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+    return true;
+  }
+
+  /**
+   * `codemax --resume` without an id: pick one of this project's threads (newest first), or
+   * start a new one. The chosen thread continues with the agent that last worked in it.
+   */
+  private openThreadPicker(defaultAgent: AgentId): boolean {
+    const threads = Ledger.threads(this.ledger.dir).filter((t) => t.title);
+    if (!threads.length) {
+      this.transcript.note("no earlier threads in this project; starting a new one");
+      return false;
+    }
+    const ok = (a?: AgentId) => !!a && !!this.detect.get(a)?.installed && !!this.detect.get(a)?.engine;
+    const name = (a?: AgentId) => (a ? (listAdapters(this.config.order).find((x) => x.id === a)?.name ?? a) : "");
+    const items: PaletteItem[] = threads.map((t, i) => ({
+      label: t.title!,
+      description: `${ago(t.updatedAt)}${t.agent ? ` · ${name(t.agent)}` : ""} · ${t.id}`,
+      value: t.id,
+      weight: threads.length - i + 1,
+    }));
+    items.push({ label: "New thread", description: `with ${name(defaultAgent)}`, value: "", weight: 0 });
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: "Resume which thread? · type to filter · Enter to open · Esc for a new thread",
+      items,
+      maxRows: 10,
+      onPick: (it) => {
+        this.closePalette();
+        const t = threads.find((x) => x.id === it.value);
+        this.ledger = new Ledger(this.cwd, undefined, t ? t.id : "new");
+        void this.launch(t && ok(t.agent) ? t.agent! : defaultAgent, { fresh: !t });
+      },
+      onClose: () => {
+        this.closePalette();
+        this.ledger = new Ledger(this.cwd, undefined, "new");
+        void this.launch(defaultAgent, { fresh: true });
+      },
+    }, this.paletteAnchor);
+    this.paletteFiltered = true;
     this.renderer.root.add(this.palette.box);
     return true;
   }
@@ -1136,6 +1252,7 @@ export class ChatApp {
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
       { name: "/update", description: "Update codemax to the latest version", run: () => void this.runUpdate() },
       { name: "/config", description: "Settings: theme, keep awake, side agent and model, handoffs, checkpoints…", run: () => this.openConfig() },
+      { name: "/setup", description: "Go through every setting one by one, as on first run", run: () => void this.runOnboarding() },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/theme", description: "Colour theme: /theme dark | light | auto (saved; restart to apply everywhere)", run: (a) => this.setThemePref(a) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
@@ -1408,7 +1525,7 @@ export class ChatApp {
     const lines = [
       `agent: ${a ? `${a.name}${a.engine.info?.currentModel ? ` · ${displayModelName(a.engine.info.currentModel, a.engine.info.models)}` : ""}` : "none"}`,
       `session: ${a?.engine.session?.id ?? "-"}  mode: ${a?.mode ?? "-"}`,
-      `ledger: ${this.ledger.dir} (${this.ledger.turns().length} turns)`,
+      `thread: ${this.ledger.threadId} (codemax --resume ${this.ledger.threadId}) · ${this.ledger.turns().length} turns · ${this.ledger.threadDir}`,
     ];
     const q = [...this.quota.values()].map((x) => `${x.agent} ${quotaLabel(x)}`.trim()).filter((s) => !/\s$/.test(s) && s.includes(" "));
     if (q.length) lines.push(`quota: ${q.join(", ")}`);
@@ -1592,7 +1709,7 @@ export class ChatApp {
 
   // ---------- engine lifecycle ----------
 
-  private async launch(agent: AgentId, o: { fresh: boolean; from?: AgentId; reason?: string }) {
+  private async launch(agent: AgentId, o: { fresh: boolean; from?: AgentId; reason?: string; model?: string }) {
     const adapter = getAdapter(agent);
     const blocked = this.checkBlockers(agent);
     if (blocked.length) {
@@ -1621,6 +1738,17 @@ export class ChatApp {
       else {
         const loose = selfApprovingMode(info.currentMode, info.modes);
         if (loose) this.transcript.note(`${adapter.name} starts in ${loose.what} mode (its own settings): ${loose.effect}, so you won't see those prompts or their diffs. Shift+Tab or /mode to switch${loose.ask ? ` to "${loose.ask}"` : ""}.`, C.warn);
+      }
+      // The handoff order's model for this agent: on a handoff, and on a new session (a
+      // resumed one keeps whatever model you chose there).
+      const want = o.model ?? (resumed ? undefined : this.chainEntry(agent)?.model);
+      if (want && engine.setModel && info.currentModel !== want) {
+        try {
+          await engine.setModel(want);
+          this.transcript.note(`using ${displayModelName(want, info.models)} (handoff order)`);
+        } catch (e: any) {
+          this.transcript.note(`could not use ${displayModelName(want, info.models)} on ${adapter.name} (${String(e?.message ?? e).slice(0, 120)}); staying on ${displayModelName(info.currentModel, info.models)}`, C.warn);
+        }
       }
       this.setWorking(null);
       this.renderFooter();
@@ -1689,12 +1817,14 @@ export class ChatApp {
       const who = `${active.name} · ${this.modelName(active, turn.model)}`;
       block.footer(stop === "cancelled" ? `Interrupted after ${dur} · ${who}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())} · ${who}`);
       const reply = block.text().trim();
+      const broken = agentSetupFailure(reply);
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
+      else if (broken) turn.rec?.markError(`${active.name} could not start its MCP server "${broken.mcpServer}"`);
       turn.rec?.end(stop);
       // The side agent reviews main-agent turns that did work (not /ask, not summaries).
       // A turn that only answers a forwarded note is not reviewed: note → turn → review → note
       // would loop on both plans. Its work is covered by the next review after a user turn.
-      if (turn.rec && this.active === active && !this.side.has(active) && !isForwardedNote(text) && (turn.tools.size > 0 || reply.length > 0)) {
+      if (turn.rec && this.active === active && !this.side.has(active) && !isForwardedNote(text) && !broken && (turn.tools.size > 0 || reply.length > 0)) {
         const every = this.config.sideAgent?.every ?? 1;
         this.turnsSinceReview++;
         if (every > 0 && this.turnsSinceReview >= every) void this.review();
@@ -1703,6 +1833,15 @@ export class ChatApp {
         // The agent ended the turn with only a limit notice: treat it as running out, and leave
         // the user's request unanswered in the ledger so the next agent is asked to finish it.
         this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: reply.slice(0, 120), resetsAt: parseResetTime(reply), at: Date.now() });
+      } else if (broken) {
+        // The agent refuses every turn until its own MCP setup works: the request stays
+        // unanswered for the next agent, and you get what to do about it.
+        const fix = active.agent === "antigravity"
+          ? `It is in Antigravity's own setup, not codemax's: \`agy mcp list\` and \`agy mcp disable ${broken.mcpServer}\` (or \`agy plugin list\` / \`disable\`), or open the Antigravity IDE if the server belongs to it, then /switch antigravity.`
+          : `Fix or turn off that MCP server in ${active.name}'s own settings, then /switch ${active.agent}.`;
+        this.transcript.note(`${active.name} won't work until its MCP server "${broken.mcpServer}" starts (${cleanError(broken.reason).slice(0, 160)}). ${fix}`, C.warn);
+        this.broken.add(active.agent);
+        if (this.active === active) this.offerHandoff(active.agent, `${active.name} cannot run: its MCP server "${broken.mcpServer}" fails`);
       } else if (o.record !== false) {
         if (reply || turn.tools.size) {
           this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "assistant", text: reply, tools: turn.tools.size ? [...turn.tools] : undefined }]);
@@ -1990,7 +2129,53 @@ export class ChatApp {
     };
     const side = c.sideAgent ?? { agent: null, forward: "ask" as const };
     const agents = listAdapters(c.order).filter((a) => this.detect.get(a.id)?.engine);
+    const installed = listAdapters(c.order).filter((a) => this.detect.get(a.id)?.installed && this.detect.get(a.id)?.engine);
     return [
+      {
+        key: "agent",
+        label: "Default agent",
+        value: listAdapters(c.order).find((a) => a.id === c.order[0])?.name ?? c.order[0] ?? "claude",
+        choices: installed.map((a) => ({ value: a.id, label: a.name, description: this.detect.get(a.id)?.version ? `v${this.detect.get(a.id)!.version}` : undefined })),
+        apply: (v) => {
+          c.order = [v as AgentId, ...c.order.filter((x) => x !== v)];
+          saveConfigKey("order", c.order);
+          // The handoff order starts with the default agent too.
+          const ch = c.handoffChain;
+          const at = ch?.findIndex((e) => e.agent === v) ?? -1;
+          if (ch && at > 0) this.saveChain([ch[at]!, ...ch.filter((_, i) => i !== at)]);
+        },
+      },
+      {
+        key: "budget",
+        label: "Daily budget",
+        value: c.budgets?.all ? `$${c.budgets.all} a day` : "none",
+        choices: [
+          { value: "0", label: "none", description: "no limit on how much you use" },
+          ...[5, 10, 20, 50, 100].map((n) => ({ value: String(n), label: `$${n} a day`, description: "all agents together · per-agent budgets: \"budgets\" in config.json" })),
+        ],
+        apply: (v) => {
+          const b = { ...(c.budgets ?? {}) };
+          if (Number(v) > 0) b.all = Number(v);
+          else delete b.all;
+          c.budgets = b;
+          saveConfigKey("budgets", b);
+        },
+      },
+      {
+        key: "hotkeys",
+        label: "Agent menu hotkey",
+        value: c.hotkeys.join(" or "),
+        choices: [
+          { value: "ctrl+/,ctrl+^", label: "ctrl+/ or ctrl+^", description: "either one opens the agent menu" },
+          { value: "ctrl+^", label: "ctrl+^", description: "for terminals that keep ctrl+/ for themselves (Warp)" },
+          { value: "ctrl+]", label: "ctrl+]" },
+        ],
+        apply: (v) => {
+          c.hotkeys = v.split(",");
+          this.hotkeys = parseHotkeys(c.hotkeys);
+          saveConfigKey("hotkeys", c.hotkeys);
+        },
+      },
       { key: "theme", label: "Theme", value: c.theme ?? "auto", choices: [{ value: "auto", description: "follow the terminal's background" }, { value: "dark" }, { value: "light" }], apply: (v) => this.setThemePref(v) },
       { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
       { key: "side", label: "Side agent", value: side.agent ?? "off", choices: [{ value: "off" }, ...agents.map((a) => ({ value: a.id, label: a.name, description: a.id === this.active?.agent ? "same plan as the main agent: reviews count against its limit · pick its model next" : "its own subscription · pick its model next" }))], apply: (v) => (v === "off" ? this.disableSide() : this.enableSide(v as AgentId, { forward: side.forward, pickModel: true, samePlan: v === this.active?.agent })) },
@@ -2004,7 +2189,29 @@ export class ChatApp {
         apply: (v) => this.saveSide({ ...side, every: Number(v) }),
       },
       { key: "sideForward", label: "Side agent notes", value: side.forward, choices: [{ value: "ask", description: "show them above the prompt: 1 expand · 2 discuss · 0 dismiss" }, { value: "auto", description: "send each note to the main agent" }], apply: (v) => this.saveSide({ ...side, forward: v === "auto" ? "auto" : "ask" }) },
-      { key: "autoSwitch", label: "Offer a handoff at limits", value: onOff(c.autoSwitch), choices: [{ value: "on" }, { value: "off" }], apply: bool("autoSwitch") },
+      {
+        key: "autoSwitch",
+        label: "At a usage limit",
+        value: !c.autoSwitch ? "do nothing" : c.autoHandoff ? "hand off automatically" : "offer a handoff",
+        choices: [
+          { value: "offer", label: "offer a handoff", description: "the next agent in your handoff order, one Enter away" },
+          { value: "auto", label: "hand off automatically", description: "the next agent in your order takes over right away (unattended runs)" },
+          { value: "off", label: "do nothing", description: "you switch yourself (/switch)" },
+        ],
+        apply: (v) => {
+          c.autoSwitch = v !== "off";
+          c.autoHandoff = v === "auto";
+          saveConfigKey("autoSwitch", c.autoSwitch);
+          saveConfigKey("autoHandoff", c.autoHandoff);
+        },
+      },
+      {
+        key: "chain",
+        label: "Handoff order",
+        value: c.handoffChain?.length ? c.handoffChain.map((e) => this.entryLabel(e)).join(" → ") : "installed agents, default models",
+        choices: [{ value: "edit", label: "Edit the order", description: "which agent (and model) takes over when one hits its limit, first to last" }],
+        apply: () => this.openChainEditor(),
+      },
       { key: "summarizeOnSwitch", label: "Summary before switching", value: onOff(c.summarizeOnSwitch), choices: [{ value: "on", description: "only for history without a step journal" }, { value: "off" }], apply: bool("summarizeOnSwitch") },
       {
         key: "verify",
@@ -2034,6 +2241,232 @@ export class ChatApp {
       { key: "updateCheck", label: "Check for codemax updates", value: c.updateCheck === false ? "off" : "on", choices: [{ value: "on", description: "asks npm at most every 12 hours" }, { value: "off" }], apply: (v) => { c.updateCheck = v === "on"; saveConfigKey("updateCheck", c.updateCheck); } },
       { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
     ];
+  }
+
+  /**
+   * First-run setup (and /setup): every /config row in turn, each with why it matters. Rows
+   * that only matter after an earlier answer (side-agent details, what to do when checks
+   * fail) appear only then. The side agent's model is picked later in /config: listing its
+   * models means starting it.
+   */
+  private runOnboarding(): Promise<void> {
+    if (this.onboarding) return Promise.resolve();
+    const why: Record<string, string> = {
+      agent: "The agent codemax starts with. You can switch any time (Ctrl+^ or /switch), and the next one picks up where it left off.",
+      chain: "Which agent takes over when one runs out, and on which model: e.g. Claude Code on Opus, then Cursor on Opus, then Antigravity on Gemini Flash. The first one is also where codemax starts.",
+      autoSwitch: "When an agent hits its usage limit, the same task can continue in the next agent you pay for: offered (one Enter), automatic, or not at all.",
+      budget: "A daily limit on the API-equivalent value of what you use (your subscription is never billed more). At the limit, codemax offers the next agent.",
+      theme: "Colours for a dark or a light terminal. Auto reads your terminal's background.",
+      hotkeys: "The keys that open the agent menu from anywhere. Warp keeps ctrl+/ for itself, so pick ctrl+^ there.",
+      questions: "Agents like Claude and Codex can stop to ask you something (\"which approach?\") instead of guessing.",
+      checkpoints: "A snapshot of your files before each message, so /undo and Esc Esc (rewind) can put them back. It never touches your git branches or index.",
+      verify: "Your own test or typecheck command, run after every turn that changes files, so a broken build shows up right away.",
+      verifyOnFail: "What happens when those checks fail.",
+      side: "A second agent that reads the main agent's work after a turn and points out problems in one short note.",
+      sideSamePlan: "Whether reviews may run on the same plan as the main agent (they then count against its limit).",
+      sideEvery: "How often the side agent reviews.",
+      sideForward: "What happens to the side agent's notes.",
+      bell: "A bell when a long turn finishes, so you can look away.",
+      terminalStatus: "Show the agent and whether it is running, waiting or done in your terminal's tab (Warp shows the agent's badge).",
+      notifications: "A desktop notification when an agent needs you while you are in another window.",
+      updateCheck: "Tell you when a new codemax is out; /update installs it.",
+      priceUpdates: "Refresh the public price list weekly, used to show what your subscription usage would cost on the API.",
+      summarizeOnSwitch: "Older histories (without codemax's step record) can be summarised before a switch. New work never needs it.",
+
+      awake: "Last one: keep this machine always on while codemax runs, so long tasks and handoffs keep going when you step away (\"lid\": even with the lid closed). Turn it off any time with /awake off.",
+    };
+    const order = Object.keys(why);
+    const steps = (): OnboardingStep[] => {
+      const side = this.config.sideAgent;
+      return this.settings()
+        .filter((x) => why[x.key] && x.choices.length)
+        .filter((x) => !["sideSamePlan", "sideEvery", "sideForward"].includes(x.key) || !!side?.agent)
+        .filter((x) => x.key !== "sideSamePlan" || side?.agent === this.config.order[0])
+        .filter((x) => x.key !== "verifyOnFail" || !!this.config.verify?.[this.cwd])
+        .filter((x) => x.key !== "verify" || x.choices.length > 1)
+        .filter((x) => x.key !== "agent" || x.choices.length > 1)
+        .map((x) => ({ key: x.key, label: x.key === "awake" ? "Always on (keep this machine awake)" : x.label, why: why[x.key]!, value: x.value, choices: x.key === "chain" ? [...x.choices, { value: x.value, label: `keep: ${x.value}` }] : x.choices }))
+        // In the order of `why`: what you need first, the fine print last.
+        .sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+    };
+    const apply = async (st: OnboardingStep, v: string) => {
+      const row = this.settings().find((x) => x.key === st.key);
+      if (!row) return;
+      try {
+        // The side agent's model is chosen later (/config); listing models starts the agent.
+        if (st.key === "chain") {
+          // The editor is its own picker: the setup card steps aside until it is done.
+          this.onboardingAside = true;
+          if (this.onboarding) this.onboarding.box.visible = false;
+          try {
+            await this.openChainEditor();
+          } finally {
+            this.onboardingAside = false;
+            if (this.onboarding) this.onboarding.box.visible = true;
+          }
+        } else if (st.key === "side") v === "off" ? this.saveSide({ ...(this.config.sideAgent ?? { forward: "ask" }), agent: null }) : this.saveSide({ ...(this.config.sideAgent ?? { forward: "ask" }), agent: v as AgentId, samePlan: v === this.config.order[0] });
+        else await row.apply(v);
+      } catch (e: any) {
+        this.transcript.error(`could not change ${st.label.toLowerCase()}: ${e?.message ?? e}`);
+      }
+      this.renderFooter();
+    };
+    return new Promise<void>((resolve) => {
+      this.closePalette();
+      this.onboarding = new Onboarding(this.renderer, {
+        steps,
+        apply,
+        onDone: (skipped) => {
+          this.onboarding?.destroy();
+          this.onboarding = null;
+          saveConfigKey("onboarded", true);
+          this.config.onboarded = true;
+          this.transcript.note(skipped ? "setup skipped: the rest keep their defaults · /setup or /config to change them" : `all set${this.config.sideAgent?.agent ? " · pick the side agent's model in /config" : ""} · /config changes any of it`, C.ok);
+          this.input.focus();
+          resolve();
+        },
+      });
+      this.dialogHost.add(this.onboarding.box);
+    });
+  }
+
+  /** Save the handoff order; its first agent is also the default agent. */
+  private saveChain(chain: { agent: AgentId; model?: string; modelName?: string }[]) {
+    this.config.handoffChain = chain;
+    saveConfigKey("handoffChain", chain);
+    const first = chain.map((e) => e.agent).filter((a, i, all) => all.indexOf(a) === i);
+    this.config.order = [...first, ...this.config.order.filter((a) => !first.includes(a))];
+    saveConfigKey("order", this.config.order);
+  }
+
+  /**
+   * /config → Handoff order: build the list with arrows and Enter. Each entry is an agent and
+   * the model to use there (from that agent's own list). Resolves when you are done (Esc).
+   */
+  private openChainEditor(): Promise<void> {
+    return new Promise<void>((done) => {
+      const list = () => [...(this.config.handoffChain?.length ? this.config.handoffChain : this.chain().filter((e) => this.detect.get(e.agent)?.installed && this.detect.get(e.agent)?.engine))];
+      const show = () => {
+        const chain = list();
+        this.closePalette();
+        this.paletteKind = "modes";
+        const items: PaletteItem[] = [
+          ...chain.map((e, i) => ({ label: `${i + 1}. ${this.entryLabel(e)}`, description: i === 0 ? "starts first" : "takes over at the limit of the one above", value: `e:${i}` })),
+          { label: "+ Add an agent", description: "then pick its model", value: "add" },
+          ...(this.config.handoffChain?.length ? [{ label: "Reset", description: "every installed agent, default models", value: "reset" }] : []),
+        ].map((it, i) => ({ ...it, weight: 100 - i }));
+        this.palette = new Palette(this.renderer, {
+          title: "Handoff order · when one agent hits its limit, the next takes over · Enter to change · Esc done",
+          items,
+          maxRows: 10,
+          onPick: (it) => {
+            if (it.value === "add") return pickAgent();
+            if (it.value === "reset") {
+              this.config.handoffChain = [];
+              saveConfigKey("handoffChain", []);
+              return show();
+            }
+            entry(Number(it.value.slice(2)));
+          },
+          onClose: () => {
+            this.closePalette();
+            if (this.config.handoffChain?.length) this.transcript.note(`handoff order: ${this.config.handoffChain.map((e) => this.entryLabel(e)).join(" → ")}`);
+            done();
+          },
+        }, this.paletteAnchor);
+        this.renderer.root.add(this.palette.box);
+      };
+      const entry = (i: number) => {
+        const chain = list();
+        const e = chain[i];
+        if (!e) return show();
+        this.closePalette();
+        this.paletteKind = "modes";
+        const items: PaletteItem[] = [
+          ...(i > 0 ? [{ label: "Move up", value: "up" }] : []),
+          ...(i < chain.length - 1 ? [{ label: "Move down", value: "down" }] : []),
+          { label: "Change model", description: `now ${e.model ? (e.modelName ?? displayModelName(e.model)) : "its default"}`, value: "model" },
+          { label: "Remove", value: "remove" },
+        ].map((it, k) => ({ ...it, weight: 100 - k }));
+        this.palette = new Palette(this.renderer, {
+          title: `${i + 1}. ${this.entryLabel(e)} · Esc back`,
+          items,
+          onPick: (it) => {
+            const next = [...chain];
+            if (it.value === "up" || it.value === "down") {
+              const j = it.value === "up" ? i - 1 : i + 1;
+              [next[i], next[j]] = [next[j]!, next[i]!];
+              this.saveChain(next);
+              return show();
+            }
+            if (it.value === "remove") {
+              next.splice(i, 1);
+              this.saveChain(next);
+              return show();
+            }
+            void pickModel(e.agent, (m) => {
+              next[i] = { agent: e.agent, ...m };
+              this.saveChain(next);
+              show();
+            });
+          },
+          onClose: () => show(),
+        }, this.paletteAnchor);
+        this.renderer.root.add(this.palette.box);
+      };
+      const pickAgent = () => {
+        this.closePalette();
+        this.paletteKind = "modes";
+        const agents = listAdapters(this.config.order).filter((a) => this.detect.get(a.id)?.installed && this.detect.get(a.id)?.engine);
+        this.palette = new Palette(this.renderer, {
+          title: "Add which agent? · Esc back",
+          items: agents.map((a, i) => ({ label: a.name, description: list().some((e) => e.agent === a.id) ? "already in the order (another model is fine)" : "", value: a.id, weight: 100 - i })),
+          onPick: (it) => void pickModel(it.value as AgentId, (m) => {
+            this.saveChain([...list(), { agent: it.value as AgentId, ...m }]);
+            show();
+          }),
+          onClose: () => show(),
+        }, this.paletteAnchor);
+        this.renderer.root.add(this.palette.box);
+      };
+      /** The agent's own model list (it is started briefly when it is not the one running). */
+      const pickModel = async (agent: AgentId, use: (m: { model?: string; modelName?: string }) => void) => {
+        this.closePalette();
+        const name = getAdapter(agent).name;
+        let models = this.active?.agent === agent ? (this.active.engine.info?.models ?? []) : [];
+        if (!models.length) {
+          this.setFlash(`asking ${name} for its models…`);
+          const engine = this.engineFactory(agent);
+          try {
+            models = (await engine.start({ cwd: this.cwd, questions: false })).models ?? [];
+          } catch (e: any) {
+            this.transcript.note(`${name} could not list its models (${String(e?.message ?? e).slice(0, 120)}); it will use its default`, C.warn);
+          } finally {
+            await engine.close().catch(() => {});
+          }
+        }
+        if (this.closed) return;
+        if (models.length < 2) return use({});
+        this.paletteKind = "modes";
+        this.palette = new Palette(this.renderer, {
+          title: `Model on ${name} · Esc for its default`,
+          items: [{ label: "Its default model", value: "", weight: 1000 }, ...sortModels(models).map((m, i) => ({ label: m.name, value: m.id, weight: 100 - i }))],
+          maxRows: 10,
+          onPick: (it) => {
+            this.closePalette();
+            if (agent === "cursor" && it.value) this.transcript.note("Cursor saves the model it is switched to as its default, so Cursor uses it outside codemax too", C.dim);
+            use(it.value ? { model: it.value, modelName: models.find((m) => m.id === it.value)?.name } : {});
+          },
+          onClose: () => {
+            this.closePalette();
+            use({});
+          },
+        }, this.paletteAnchor);
+        this.paletteFiltered = true;
+        this.renderer.root.add(this.palette.box);
+      };
+      show();
+    });
   }
 
   /** /config: every setting with its value; pick one to change it. */
@@ -2066,7 +2499,7 @@ export class ChatApp {
         void (async () => {
           try {
             await st.apply(it.value);
-            if (!["theme", "awake", "side", "sideModel"].includes(st.key)) this.transcript.note(`${st.label.toLowerCase()}: ${it.label}`);
+            if (!["theme", "awake", "side", "sideModel", "chain"].includes(st.key)) this.transcript.note(`${st.label.toLowerCase()}: ${it.label}`);
           } catch (e: any) {
             this.transcript.error(`could not change ${st.label.toLowerCase()}: ${e?.message ?? e}`);
           }
@@ -2253,11 +2686,31 @@ export class ChatApp {
     return mid ? displayModelName(mid, a.engine.info?.models) : "default model";
   }
 
+  private scheduleUpdateCheck(ms: number) {
+    if (this.updateTimer) clearTimeout(this.updateTimer);
+    this.updateTimer = setTimeout(() => {
+      this.updateTimer = null;
+      if (this.closed || this.config.updateCheck === false) return;
+      void this.updateChecker(VERSION, true)
+        .then((v) => v && this.announceUpdate(v))
+        .catch(() => {})
+        .finally(() => !this.closed && this.scheduleUpdateCheck(ms * 2));
+    }, ms);
+    (this.updateTimer as any).unref?.();
+  }
+
   private announceUpdate(version: string) {
-    if (this.closed) return;
+    if (this.closed || this.updateAvailable === version) return;
     this.updateAvailable = version;
     this.transcript.note(`codemax ${version} is available (you have ${VERSION}) · run /update to install it`, C.accent);
+    this.showUpdateBadge();
     this.renderFooter();
+  }
+
+  /** "↑ codemax 0.1.8 available · /update" on the prompt's top border, at the right, like Claude Code's update notice. */
+  private showUpdateBadge() {
+    this.inputWrap.titleAlignment = "right";
+    this.inputWrap.title = this.updateAvailable ? ` ↑ codemax ${this.updateAvailable} available · /update ` : "";
   }
 
   /** /update: update the way codemax was installed, with its output on the real terminal. */
@@ -2282,6 +2735,7 @@ export class ChatApp {
     if (ok) {
       const to = this.updateAvailable;
       this.updateAvailable = null;
+      this.showUpdateBadge();
       this.transcript.note(`updated${to ? ` to ${to}` : ""} · restarting codemax…`, C.ok);
       // Quit cleanly (sessions saved, keep-awake released), then runChat starts the new version.
       this.restartAfterQuit = { agent: this.active?.agent, version: to };
@@ -2403,7 +2857,9 @@ export class ChatApp {
     );
   }
 
-  private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean } = {}) {
+  private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean; model?: string } = {}) {
+    // Choosing an agent yourself means you fixed it (or want to try again).
+    if (!o.resumeTask) this.broken.delete(agent);
     if (!hasEngine(agent)) return this.transcript.note(`${agent} has no protocol engine; run codemax --tui for it`, C.warn);
     // Every switch path (menu, /switch, routing, handoff offers) ends here, so an agent that is not really installed is refused here.
     const d = this.detect.get(agent);
@@ -2436,12 +2892,13 @@ export class ChatApp {
     const lastTurn = this.ledger.turns().at(-1);
     const pending = lastTurn?.role === "user" ? "; finish the last user request" : "";
     const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota${pending ? " mid-task" : ""}${pending}` : overBudget ? `${from} hit its daily budget${pending}` : o.resumeTask ? `${from} stopped${pending}` : undefined;
-    await this.launch(agent, { fresh, from, reason });
+    await this.launch(agent, { fresh, from, reason, model: o.model });
     this.switching = false;
   }
 
   async quit() {
     this.closed = true;
+    if (this.updateTimer) clearTimeout(this.updateTimer);
     if (this.noteArmTimer) clearTimeout(this.noteArmTimer);
     this.term.close();
     this.subagents.destroy();
@@ -2521,14 +2978,14 @@ function ago(ts: number): string {
   return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
 }
 
-export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false, explicit = false) {
+export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false, explicit = false, pickThread = false, onboard = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
   const pref = config.theme ?? "auto";
   applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
   const app = new ChatApp(renderer, config, ledger, cwd);
   process.once("exit", () => app.awake.releaseSync());
   try {
-    await app.start(agent, fresh, { pick, explicit });
+    await app.start(agent, fresh, { pick, explicit, pickThread, onboard });
   } finally {
     renderer.destroy();
     try {
@@ -2539,9 +2996,9 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   }
   if (app.restartAfterQuit) {
     process.stdout.write("codemax: starting the new version…\n");
-    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version);
+    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version, app.threadId);
   }
-  process.stdout.write(`codemax: bye. ledger at ${ledger.dir}\n`);
+  process.stdout.write(app.threadUsed ? `codemax: to continue this thread, run: codemax --resume ${app.threadId}\n` : "codemax: bye\n");
 }
 
 /** Copy text: the OS clipboard tool when there is one, plus OSC 52 (works over SSH and in most terminals). */

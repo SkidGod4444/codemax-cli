@@ -20,7 +20,7 @@ export function spendToday(now = Date.now()): Map<BudgetKey, number> {
   const root = join(CODEMAX_HOME, "projects");
   if (!existsSync(root)) return out;
   for (const d of readdirSync(root)) {
-    for (const r of new Ledger("/", join(root, d)).usage()) addSpend(out, r, since);
+    for (const r of new Ledger("/", join(root, d), false).usage()) addSpend(out, r, since);
   }
   return out;
 }

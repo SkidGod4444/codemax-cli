@@ -91,6 +91,7 @@ export function updatePlan(install = installKind(), platform = process.platform)
 
 /** Env vars a restarted codemax reads once: the agent to resume and the version it was updated to. */
 export const RESTART_AGENT_ENV = "CODEMAX_RESTART_AGENT";
+export const RESTART_THREAD_ENV = "CODEMAX_RESTART_THREAD";
 export const UPDATED_TO_ENV = "CODEMAX_UPDATED_TO";
 
 /**
@@ -106,6 +107,11 @@ export function relaunchArgv(argv = process.argv, execPath = process.execPath, s
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a === "--fresh") continue;
+    // The thread to resume goes in RESTART_THREAD_ENV; `--resume` alone would open the picker.
+    if (a === "--resume" || a === "-r") {
+      if (rest[i + 1] && !rest[i + 1]!.startsWith("-")) i++;
+      continue;
+    }
     if (a === "--agent" || a === "-a") {
       i++;
       continue;
@@ -118,9 +124,10 @@ export function relaunchArgv(argv = process.argv, execPath = process.execPath, s
 }
 
 /** Run the updated codemax in this terminal, resuming `agent`, and exit with its code. */
-export async function relaunch(agent: string | undefined, version: string | null): Promise<never> {
+export async function relaunch(agent: string | undefined, version: string | null, thread?: string): Promise<never> {
   const argv = relaunchArgv();
   const env: Record<string, string | undefined> = { ...process.env, [UPDATED_TO_ENV]: version ?? "" };
+  if (thread) env[RESTART_THREAD_ENV] = thread;
   if (agent) env[RESTART_AGENT_ENV] = agent;
   else delete env[RESTART_AGENT_ENV];
   const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env });

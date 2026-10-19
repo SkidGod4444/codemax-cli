@@ -4,8 +4,10 @@ import { CODEMAX_HOME, ensureDir } from "./core/paths.ts";
 import type { AgentId } from "./adapters/types.ts";
 
 export interface Config {
-  /** Priority order used for "next agent" suggestions. */
+  /** Priority order used for "next agent" suggestions; the first is the default agent. */
   order: AgentId[];
+  /** The first-run setup was done (or skipped); /setup runs it again. */
+  onboarded?: boolean;
   /**
    * Hotkeys that open the codemax menu, as "ctrl+<key>". Each is matched in
    * every encoding terminals use (raw byte, CSI u, modifyOtherKeys).
@@ -14,6 +16,14 @@ export interface Config {
   hotkeys: string[];
   /** Offer a switch automatically when quota exhaustion is detected. */
   autoSwitch: boolean;
+  /** With autoSwitch: hand off to the next agent without asking first. */
+  autoHandoff?: boolean;
+  /**
+   * The handoff order at usage limits, first to last: an agent and, optionally, the model to
+   * use there (`modelName` is its display name, so the order can be shown without starting
+   * the agent). Empty: `order`, each agent on its own default model.
+   */
+  handoffChain?: { agent: AgentId; model?: string; modelName?: string }[];
   /** Per-agent extra CLI args appended to every launch. */
   agentArgs: Partial<Record<AgentId, string[]>>;
   /** Ask the outgoing agent for a project summary before a switch (skipped when it is out of quota). */

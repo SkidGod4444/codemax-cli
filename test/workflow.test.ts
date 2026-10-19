@@ -15,18 +15,21 @@ const { DEFAULT_CONFIG } = await import("../src/config.ts");
 const { verifyCandidates } = await import("../src/core/verify.ts");
 const { loadHistory } = await import("../src/core/history.ts");
 
-type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void> };
+type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void>; agent?: string };
+/** Models a fake agent reports, and the session/set_model calls it got. */
+type ModelOpts = { list: { modelId: string; name: string }[]; set: { agent: string; modelId: string }[] };
 type Handler = (text: string, ctx: Ctx) => Promise<void>;
 /** A fake that forks like the Claude adapter: `session/fork` at `_meta.jetbrains.air.fork.messageId`. */
 type ForkLog = { forks: { from: string; messageId?: string; to: string }[]; created: string[]; promptedIn: string[]; fail?: boolean };
 
-function fakeStream(handler: Handler, fork?: ForkLog) {
+function fakeStream(handler: Handler, fork?: ForkLog, models?: ModelOpts, agent = "claude") {
   const a2c = new TransformStream<Uint8Array, Uint8Array>();
   const c2a = new TransformStream<Uint8Array, Uint8Array>();
   let n = 0, msg = 0;
   new AgentSideConnection((conn): Agent => ({
     async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", title: "Fake", version: "1" }, agentCapabilities: { loadSession: true, ...(fork ? { sessionCapabilities: { fork: {} } } : {}) }, authMethods: [] } as any; },
-    async newSession() { const sessionId = `s-${++n}-${Math.random().toString(36).slice(2, 6)}`; fork?.created.push(sessionId); return { sessionId } as any; },
+    async newSession() { const sessionId = `s-${++n}-${Math.random().toString(36).slice(2, 6)}`; fork?.created.push(sessionId); return { sessionId, ...(models ? { models: { currentModelId: models.list[0]!.modelId, availableModels: models.list } } : {}) } as any; },
+    async extMethod(method: string, params: any) { if (method === "session/set_model") models?.set.push({ agent, modelId: params.modelId }); return {}; },
     async unstable_forkSession(p: any) { if (fork?.fail) throw new Error("fork unavailable"); const to = `f-${++n}`; fork?.forks.push({ from: p.sessionId, messageId: p._meta?.jetbrains?.air?.fork?.messageId, to }); return { sessionId: to } as any; },
     async loadSession() { return {} as any; },
     async authenticate() { return {}; },
@@ -49,14 +52,14 @@ function newRepo() {
   return repo;
 }
 
-async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog; resume?: boolean } = {}) {
+async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog; resume?: boolean; thread?: string; pickThread?: boolean; onboard?: boolean; models?: ModelOpts; prep?: (app: any) => void } = {}) {
   const setup = await createTestRenderer({ width: 110, height: o.height ?? 30 });
   const repo = o.repo ?? newRepo();
-  const ledger = new Ledger(repo);
+  const ledger = new Ledger(repo, undefined, o.thread);
   const app = new ChatApp(setup.renderer, { ...structuredClone(DEFAULT_CONFIG), order: ["claude"], summarizeOnSwitch: false, priceUpdates: false, ...(o.cfg ?? {}) }, ledger, repo);
   const prompts: string[] = [];
   app.checkBlockers = () => [];
-  app.engineFactory = (agent) => new AcpEngine({ agent, name: agent, cmd: [], forkAtMessage: !!o.fork, stream: fakeStream(async (text, ctx) => { prompts.push(text); return handler(text, ctx); }, o.fork) });
+  app.engineFactory = (agent) => new AcpEngine({ agent, name: agent, cmd: [], forkAtMessage: !!o.fork, stream: fakeStream(async (text, ctx) => { prompts.push(text); return handler(text, { ...ctx, agent }); }, o.fork, o.models, agent) });
   (app as any).refreshDetect = async () => void (app as any).detect.set("claude", { installed: true, version: "t", engine: true });
   const frame = async (pred: (f: string) => boolean, ms = 8000) => {
     const t0 = Date.now(); let f = "";
@@ -65,8 +68,9 @@ async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?:
   };
   const send = async (t: string) => { await setup.mockInput.typeText(t); setup.mockInput.pressEnter(); };
   const cleanup = async () => { await app.quit(); setup.renderer.destroy(); };
-  void app.start("claude", !o.resume);
-  await frame((f) => f.includes(o.resume ? "resumed" : "new session"));
+  o.prep?.(app);
+  void app.start("claude", !o.resume && !o.pickThread, { pickThread: o.pickThread, onboard: o.onboard });
+  await frame((f) => f.includes(o.onboard ? "Welcome to codemax" : o.pickThread ? "Resume which thread?" : o.resume ? "resumed" : "new session"));
   return { setup, app, repo, ledger, prompts, frame, send, cleanup };
 }
 
@@ -264,6 +268,46 @@ test("snapshots are byte-exact: no line-ending conversion from autocrlf or .gita
   expect(readFileSync(join(repo, "crlf.txt"), "utf8")).toBe("one\r\ntwo\r\n");
 });
 
+test("threads: --resume picks one of this folder's conversations; each keeps its own history, sessions and snapshots", async () => {
+  const repo = newRepo();
+  const say = async (text: string, ctx: Ctx) => { writeFileSync(join(repo, `${text.split(" ")[0]}.txt`), "x\n"); await ctx.say(`did ${text}`); };
+  let h = await harness(say, { repo });
+  let alpha = "";
+  try {
+    await h.send("alpha task");
+    await h.frame((f) => f.includes("did alpha task"));
+    alpha = h.app.threadId;
+  } finally { await h.cleanup(); }
+  h = await harness(say, { repo, thread: "new" });
+  let beta = "";
+  try {
+    await h.send("beta task");
+    await h.frame((f) => f.includes("did beta task"));
+    beta = h.app.threadId;
+    expect(beta).not.toBe(alpha);
+  } finally { await h.cleanup(); }
+  h = await harness(say, { repo, pickThread: true });
+  try {
+    let f = h.setup.captureCharFrame();
+    expect(f).toContain("alpha task");
+    expect(f).toContain("beta task");
+    expect(f).toContain(alpha);
+    await h.setup.mockInput.typeText("alpha");
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("resumed"));
+    expect(h.app.threadId).toBe(alpha);
+    expect((h.app as any).ledger.journal.steps().filter((x: any) => x.kind === "user").map((x: any) => x.text)).toEqual(["alpha task"]);
+    // Rewind offers this thread's messages only.
+    h.setup.mockInput.pressEscape();
+    await Bun.sleep(120);
+    h.setup.mockInput.pressEscape();
+    f = await h.frame((f) => f.includes("Rewind the files to before which message?"));
+    expect(f).toContain("alpha task");
+    expect(f).not.toContain("beta task");
+  } finally { await h.cleanup(); }
+}, 40000);
+
 test("/rewind falls back to telling the agent when its conversation cannot be forked", async () => {
   const log: ForkLog = { forks: [], created: [], promptedIn: [], fail: true };
   const h = await harness(async (text, ctx) => {
@@ -383,3 +427,173 @@ test("starting in a mode where the agent approves itself (your Claude settings' 
   expect(selfApprovingMode("on-request", [])).toBeNull();
   expect(selfApprovingMode(undefined, claude)).toBeNull();
 });
+
+test("first-run setup: every setting one by one with arrows and Enter; answers apply at once; Esc keeps the defaults", async () => {
+  const { CONFIG_PATH } = await import("../src/config.ts");
+  const h = await harness(async (_t, ctx) => ctx.say("hi"), { onboard: true, height: 34 });
+  const header = (f: string) => Number(f.match(/setup \d+ of (\d+)/)?.[1]);
+  try {
+    let f = h.setup.captureCharFrame();
+    expect(f).toContain("setup 1 of");
+    // Enter keeps each current answer; walk to the theme.
+    const step = (f: string) => Number(f.match(/setup (\d+) of/)?.[1]);
+    for (let i = 0; i < 10 && !f.includes("Auto reads your terminal's background"); i++) {
+      h.setup.mockInput.pressEnter();
+      const was = step(f);
+      f = await h.frame((g) => step(g) > was);
+    }
+    expect(f).toContain("Theme");
+    expect(f).toMatch(/❯ auto\s+\(now\)/);
+    const themeAt = step(f);
+    const total = header(f);
+    h.setup.mockInput.pressArrow("down"); // dark
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => step(f) === themeAt + 1);
+    expect((h.app as any).config.theme).toBe("dark");
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).theme).toBe("dark");
+    // ← goes back: the theme shows its new value.
+    h.setup.mockInput.pressArrow("left");
+    f = await h.frame((f) => step(f) === themeAt);
+    expect(f).toMatch(/dark\s+\(now\)/);
+    h.setup.mockInput.pressEnter();
+    // Walk to the side agent; choosing one adds its follow-up questions.
+    for (let i = 0; i < 20; i++) {
+      f = await h.frame(() => true);
+      if (/Side agent\s*$/m.test(f) || f.includes("A second agent that reads")) break;
+      h.setup.mockInput.pressEnter();
+      await Bun.sleep(40);
+    }
+    expect(f).toContain("A second agent that reads");
+    const before = header(f);
+    expect(before).toBe(total);
+    h.setup.mockInput.pressArrow("down"); // Claude Code
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => header(f) > before);
+    expect((h.app as any).config.sideAgent.agent).toBe("claude");
+    // Esc: the rest keep their defaults, setup is recorded, and the agent starts.
+    h.setup.mockInput.pressEscape();
+    f = await h.frame((f) => f.includes("setup skipped") && f.includes("new session"));
+    expect(f).not.toContain("Welcome to codemax");
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).onboarded).toBe(true);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("an existing user who updates sees setup once, then lands back in the thread they were in", async () => {
+  const repo = newRepo();
+  let h = await harness(async (_t, ctx) => ctx.say("noted"), { repo });
+  let thread = "";
+  try {
+    await h.send("keep working on the parser");
+    await h.frame((f) => f.includes("noted"));
+    thread = h.app.threadId;
+  } finally { await h.cleanup(); }
+  h = await harness(async (_t, ctx) => ctx.say("noted"), { repo, resume: true, onboard: true });
+  try {
+    h.setup.mockInput.pressEnter(); // keep the first answer
+    await h.frame((f) => f.includes("setup 2 of"));
+    h.setup.mockInput.pressEscape();
+    const f = await h.frame((f) => f.includes("resumed"));
+    expect(f).toContain("setup skipped");
+    expect(h.app.threadId).toBe(thread);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("handoff order: agents and models first to last; at a limit the next one takes over on its model, automatically if you like", async () => {
+  const models: ModelOpts = { list: [{ modelId: "big-5-5", name: "Big 5.5" }, { modelId: "small-4", name: "Small 4" }], set: [] };
+  const h = await harness(async (text, ctx) => {
+    if (ctx.agent === "claude" && text.startsWith("work")) throw new Error("You've hit your usage limit · resets 3pm");
+    await ctx.say(`${ctx.agent} did it`);
+  }, { models, height: 34 });
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  const pick = async (filter: string, until: string) => {
+    await h.setup.mockInput.typeText(filter);
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    return h.frame((f) => f.includes(until));
+  };
+  try {
+    await h.send("/config");
+    await h.frame((f) => f.includes("Handoff order"));
+    await pick("handoff order", "Edit the order");
+    h.setup.mockInput.pressEnter();
+    let f = await h.frame((f) => f.includes("Handoff order · when one agent hits its limit"));
+    expect(f).toContain("1. Claude Code");
+    // Add Codex on Small 4, from the agent's own model list.
+    await pick("add", "Add which agent?");
+    await pick("codex", "Model on Codex");
+    f = await pick("small", "2. Codex · Small 4");
+    // An entry can be moved: Codex up to first, then back down.
+    await pick("2.", "Move up");
+    await pick("move up", "1. Codex · Small 4");
+    await pick("1.", "Move down");
+    await pick("move down", "2. Codex · Small 4");
+    h.setup.mockInput.pressEscape(); // done: back in /config
+    await h.frame((f) => f.includes("handoff order: Claude Code → Codex · Small 4") && f.includes("Settings ·"));
+    await Bun.sleep(120);
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => !f.includes("Settings ·"));
+    expect((h.app as any).config.handoffChain).toEqual([{ agent: "claude" }, { agent: "codex", model: "small-4", modelName: "Small 4" }]);
+    // Automatic handoff.
+    await h.send("/config");
+    await pick("at a usage limit", "hand off automatically");
+    await pick("automatically", "Settings ·");
+    await Bun.sleep(120);
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => !f.includes("Settings ·"));
+    expect((h.app as any).config.autoHandoff).toBe(true);
+    await Bun.sleep(100);
+    // Claude hits its limit: Codex takes over the task on Small 4, without asking.
+    await h.send("work on the parser");
+    f = await h.frame((f) => f.includes("codex did it"), 15000);
+    expect(f).toContain("handing off to Codex · Small 4 (next in your handoff order)");
+    expect(f).toContain("using Small 4 (handoff order)");
+    expect(models.set).toContainEqual({ agent: "codex", modelId: "small-4" });
+    expect(h.prompts.at(-1)).toContain("work on the parser");
+  } finally { await h.cleanup(); }
+}, 40000);
+
+test("an agent that refuses every turn (its MCP server fails to start) is no answer: the task goes to the next agent", async () => {
+  const { agentSetupFailure } = await import("../src/engines/errors.ts");
+  const refusal = "The MCP server 'data-agent-kit' failed to initialize: [MCP Proxy] Socket connection error: connect ENOENT /tmp/datacloud-mcp-dataAgentKit-antigravityide.sock: connection closed: calling \"initialize\": client is closing: EOF. Fix the MCP server, or remove it from your configuration and start a new session, to continue.";
+  expect(agentSetupFailure(refusal)).toMatchObject({ mcpServer: "data-agent-kit" });
+  expect(agentSetupFailure("I fixed the MCP server config for you.")).toBeNull();
+  const h = await harness(async (_text, ctx) => (ctx.agent === "claude" ? ctx.say(refusal) : ctx.say(`${ctx.agent} did it`)), { cfg: { autoHandoff: true } });
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  (h.app as any).config.order = ["claude", "codex"];
+  try {
+    await h.send("build the parser");
+    const f = await h.frame((f) => f.includes("codex did it"), 15000);
+    expect(f).toContain('won\'t work until its MCP server "data-agent-kit" starts');
+    expect(f).toContain("handing off to Codex");
+    // The request reached Codex unanswered; the refusal was not saved as Claude's answer.
+    expect(h.prompts.at(-1)).toContain("build the parser");
+    expect(h.ledger.turns().some((t: any) => t.role === "assistant" && t.text.includes("failed to initialize"))).toBe(false);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("long sessions look for an update again (30 min, then 1 h, 2 h… doubling) and show it on the prompt's top border", async () => {
+  const calls: { at: number; force?: boolean }[] = [];
+  const t0 = Date.now();
+  const h = await harness(async (_t, ctx) => ctx.say("hi"), {
+    prep: (app) => {
+      app.updateRecheckMs = 60; // stands in for 30 minutes
+      app.updateChecker = async (_current: string, force?: boolean) => {
+        calls.push({ at: Date.now() - t0, force });
+        return calls.length >= 3 ? "9.9.9" : null;
+      };
+    },
+  });
+  try {
+    const f = await h.frame((f) => f.includes("↑ codemax 9.9.9 available · /update"), 5000);
+    // On the border line just above the prompt, at its right end.
+    const lines = f.split("\n");
+    const promptAt = lines.findIndex((l) => l.startsWith("❯ "));
+    expect(lines[promptAt - 1]).toMatch(/─ ↑ codemax 9\.9\.9 available · \/update ─*$/);
+    expect(f).toContain("codemax 9.9.9 is available");
+    // The startup check uses the cache; the re-checks ask the source directly, each twice as late.
+    expect(calls.map((c) => c.force)).toEqual([undefined, true, true]);
+    const gap1 = calls[1]!.at - calls[0]!.at, gap2 = calls[2]!.at - calls[1]!.at;
+    expect(gap1).toBeGreaterThanOrEqual(55);
+    expect(gap2).toBeGreaterThanOrEqual(110);
+  } finally { await h.cleanup(); }
+}, 20000);

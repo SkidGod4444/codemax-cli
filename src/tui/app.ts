@@ -382,5 +382,5 @@ export async function runApp(config: Config, ledger: Ledger, cwd: string, agent:
       /* output already gone */
     }
   }
-  process.stdout.write(`codemax: bye. ledger at ${ledger.dir}\n`);
+  process.stdout.write(`codemax: to continue this thread, run: codemax --resume ${ledger.threadId}\n`);
 }

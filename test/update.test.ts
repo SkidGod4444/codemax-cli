@@ -107,6 +107,9 @@ test("after /update codemax restarts with the same arguments, minus --fresh and 
   const yes = () => true;
   expect(relaunchArgv(["bun", "/x/src/cli.ts", "--agent", "codex", "--fresh", "--theme", "dark"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts", "--theme", "dark"]);
   expect(relaunchArgv(["bun", "/x/src/cli.ts", "-a", "claude"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts"]);
+  // The thread goes in the environment: `--resume` (with or without an id) is not repeated.
+  expect(relaunchArgv(["bun", "/x/src/cli.ts", "--resume", "ab12cd34", "--tui"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts", "--tui"]);
+  expect(relaunchArgv(["bun", "/x/src/cli.ts", "--resume", "--theme", "dark"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts", "--theme", "dark"]);
   // Bun or the script gone (replaced by the update): `codemax` from PATH.
   expect(relaunchArgv(["bun", "/x/src/cli.ts", "start"], "/gone/bun", "/x/src/cli.ts", (p) => p !== "/gone/bun", () => "/usr/local/bin/codemax")).toEqual(["/usr/local/bin/codemax", "start"]);
 });

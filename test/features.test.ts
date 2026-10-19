@@ -210,7 +210,7 @@ test("6. startup picker: lists agents, most recent first, with their last messag
     expect(f).toContain('"fix the flaky test"');
     expect(f).toContain('"add a parser"');
     expect(f.indexOf("Codex  ")).toBeLessThan(f.indexOf("Claude Code  ")); // most recent first
-    expect(f).toContain("Start fresh with Codex");
+    expect(f).toContain("New thread with Codex");
     h.setup.mockInput.pressArrow("down");
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("resumed"));
@@ -701,6 +701,8 @@ test("24. /config changes settings and saves them, and turns on the side agent w
     await h.frame((f) => f.includes("new session"));
     await h.send("/config");
     await h.frame((f) => f.includes("Theme") && f.includes("Keep awake") && f.includes("Side agent model"));
+    await h.setup.mockInput.typeText("theme");
+    await h.frame((f) => f.includes("Theme") && !f.includes("Keep awake"));
     h.setup.mockInput.pressEnter(); // Theme
     await h.frame((f) => f.includes("Theme · now"));
     await h.setup.mockInput.typeText("light");
@@ -801,7 +803,7 @@ test("27. startup shows the wordmark and asks which agent to continue with; an u
     expect(f).toContain("Codex");
     expect(f).toContain('resume · 1h ago · "fix the flaky test"');
     expect(f).toContain("new session");
-    expect(f).toContain("Start fresh with Codex");
+    expect(f).toContain("New thread with Codex");
     await h.frame((fr) => fr.includes("codemax 9.9.9 is available") && fr.includes("/update"));
     await h.setup.mockInput.typeText("claude");
     h.setup.mockInput.pressEnter();

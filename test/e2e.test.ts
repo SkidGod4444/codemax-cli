@@ -61,7 +61,7 @@ test.skipIf(process.platform === "win32")("passthrough → hotkey menu → close
   term.write("\x1b[47;5u"); // CSI-u encoding of Ctrl+/
   await waitFor(/codemax/);
   term.write("x");
-  await waitFor(/codemax: bye/);
+  await waitFor(/codemax: to continue this thread, run: codemax --resume [0-9a-f]{8}/);
   const code = await proc.exited;
   term.close();
   expect(code).toBe(0);

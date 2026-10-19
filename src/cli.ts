@@ -1,6 +1,6 @@
 import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
 import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
-import { checkForUpdate, installKind, RESTART_AGENT_ENV, updatePlan } from "./core/update.ts";
+import { checkForUpdate, installKind, RESTART_AGENT_ENV, RESTART_THREAD_ENV, updatePlan } from "./core/update.ts";
 import { platformArgv } from "./core/spawn.ts";
 import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
@@ -23,7 +23,10 @@ import { fmtDateTime12 } from "./core/time.ts";
 const HELP = `codemax — one terminal for all your coding agents
 
 usage:
-  codemax [start] [--agent <id>] [--fresh]   codemax chat UI driving the agent over its protocol (default)
+  codemax [start] [--agent <id>] [--fresh]   codemax chat UI driving the agent over its protocol (default);
+                                             continues this folder's latest thread, --fresh starts a new one
+  codemax --resume [<id>] [--agent <id>]     reopen a thread (no id: pick one); --agent continues it with another agent
+  codemax threads                            list this folder's threads
                  [--tui]                     show the agent's own TUI inside the codemax screen instead
                  [--raw]                     legacy passthrough mode without the codemax screen
   codemax agents                             show detected agents, saved sessions, quota
@@ -66,12 +69,25 @@ async function main(argv: string[]) {
         console.error("codemax start needs a TTY");
         process.exit(2);
       }
-      const ledger = new Ledger(cwd);
       const agentFlag = flag(args, "--agent") ?? flag(args, "-a");
-      // After /update, the new codemax resumes the agent that was in use, without the picker.
+      // After /update, the new codemax resumes the thread and agent that were in use, without the picker.
       const resumed = process.env[RESTART_AGENT_ENV];
+      const restartThread = process.env[RESTART_THREAD_ENV];
       delete process.env[RESTART_AGENT_ENV];
-      const agent = (agentFlag ?? resumed ?? config.order[0] ?? "claude") as AgentId;
+      delete process.env[RESTART_THREAD_ENV];
+      const ri = Math.max(args.indexOf("--resume"), args.indexOf("-r"));
+      const resumeId = restartThread ?? (ri >= 0 && args[ri + 1] && !args[ri + 1]!.startsWith("-") ? args[ri + 1] : undefined);
+      const pickThread = ri >= 0 && !resumeId;
+      let ledger: Ledger;
+      try {
+        ledger = new Ledger(cwd, undefined, resumeId ?? (args.includes("--fresh") ? "new" : undefined));
+      } catch (e: any) {
+        console.error(`codemax: ${e?.message ?? e}`);
+        process.exit(2);
+      }
+      // A resumed thread continues with the agent that last worked in it.
+      const threadAgent = resumeId ? Ledger.threads(ledger.dir).find((t) => t.id === ledger.threadId)?.agent : undefined;
+      const agent = (agentFlag ?? resumed ?? threadAgent ?? config.order[0] ?? "claude") as AgentId;
       getAdapter(agent); // validate
       if (args.includes("--raw")) {
         const orch = new Orchestrator(config, ledger, cwd);
@@ -79,9 +95,18 @@ async function main(argv: string[]) {
       } else if (args.includes("--tui") || !hasEngine(agent)) {
         await runApp(config, ledger, cwd, agent, args.includes("--fresh"), !!agentFlag);
       } else {
-        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag && !resumed, !!agentFlag);
+        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag && !resumed && !resumeId && !pickThread, !!agentFlag, pickThread, config.onboarded !== true);
       }
       process.exit(0);
+    }
+    case "threads": {
+      // Opening the ledger copies a pre-threads history into its first thread.
+      const dir = new Ledger(cwd).dir;
+      const threads = Ledger.threads(dir).filter((t) => t.title);
+      if (!threads.length) console.log("no threads in this folder yet");
+      for (const t of threads) console.log(`${t.id}  ${fmtDateTime12(t.updatedAt).padEnd(20)} ${(t.agent ?? "").padEnd(12)} ${t.title ?? "(empty)"}`);
+      if (threads.length) console.log(`\ncodemax --resume <id> reopens one (add --agent <id> to continue it with another agent)`);
+      return;
     }
     case "agents": {
       const ledger = new Ledger(cwd);
@@ -156,11 +181,11 @@ async function main(argv: string[]) {
         const { join } = await import("node:path");
         const { CODEMAX_HOME } = await import("./core/paths.ts");
         const root = join(CODEMAX_HOME, "projects");
-        const all = existsSync(root) ? readdirSync(root).flatMap((d) => new Ledger("/", join(root, d)).usage()) : [];
+        const all = existsSync(root) ? readdirSync(root).flatMap((d) => new Ledger("/", join(root, d), false).usage()) : [];
         for (const l of renderUsageTable(all, { title: "Usage across all projects" })) console.log(l);
         return;
       }
-      const u = new Ledger(cwd).usage();
+      const u = new Ledger(cwd, undefined, false).usage();
       for (const l of renderUsageTable(u, { title: `Usage for ${cwd}` })) console.log(l);
       console.log(`  total ${fmtUsd(sumCost(u))} · prices: ~/.codemax/prices.json overrides the built-in list`);
       return;

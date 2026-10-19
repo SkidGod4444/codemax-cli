@@ -70,12 +70,15 @@ export interface Checkpoint {
   ts: number;
   /** Where the agent's conversation stood (for /rewind after a restart), kept in the snapshot's message. */
   fork?: { agent?: string; sessionId: string; messageId: string | null };
+  /** The codemax thread it was taken in (/rewind lists only the current thread's). */
+  thread?: string;
 }
 
 const FORK_TRAILER = "Codemax-Rewind-Point: ";
+const THREAD_TRAILER = "Codemax-Thread: ";
 
 /** Snapshot the working tree. Returns null outside a git repo. */
-export async function createCheckpoint(cwd: string, label: string, fork?: Checkpoint["fork"]): Promise<Checkpoint | null> {
+export async function createCheckpoint(cwd: string, label: string, fork?: Checkpoint["fork"], thread?: string): Promise<Checkpoint | null> {
   const dir = await gitDir(cwd);
   if (!dir) return null;
   const index = join(dir, "codemax-checkpoint-index");
@@ -83,12 +86,12 @@ export async function createCheckpoint(cwd: string, label: string, fork?: Checkp
   if (!tree) return null;
   const head = await run(cwd, ["rev-parse", "--verify", "-q", "HEAD"]);
   const ident = { GIT_AUTHOR_NAME: "codemax", GIT_AUTHOR_EMAIL: "codemax@localhost", GIT_COMMITTER_NAME: "codemax", GIT_COMMITTER_EMAIL: "codemax@localhost" };
-  const c = await run(cwd, ["commit-tree", tree, ...(head.code === 0 ? ["-p", head.out] : []), "-m", label, ...(fork ? ["-m", FORK_TRAILER + JSON.stringify(fork)] : [])], ident);
+  const c = await run(cwd, ["commit-tree", tree, ...(head.code === 0 ? ["-p", head.out] : []), "-m", label, ...(fork || thread ? ["-m", [fork && FORK_TRAILER + JSON.stringify(fork), thread && THREAD_TRAILER + thread].filter(Boolean).join("\n")] : [])], ident);
   if (c.code !== 0) return null;
   const ts = Date.now();
   await run(cwd, ["update-ref", `refs/codemax/checkpoints/${ts}`, c.out]);
   await pruneCheckpoints(cwd);
-  return { sha: c.out, label, ts, ...(fork ? { fork } : {}) };
+  return { sha: c.out, label, ts, ...(fork ? { fork } : {}), ...(thread ? { thread } : {}) };
 }
 
 /** Keep the newest KEEP_CHECKPOINTS refs; delete the rest. */
@@ -131,7 +134,9 @@ export async function listCheckpoints(cwd: string, limit = 20): Promise<Checkpoi
   if (r.code !== 0 || !r.out) return [];
   return r.out.split("\x1e").map((rec) => rec.replace(/^\n/, "")).filter(Boolean).map((rec) => {
     const [sha, ts, label, body] = rec.split("\x1f");
-    const line = (body ?? "").split("\n").find((l) => l.startsWith(FORK_TRAILER));
+    const lines = (body ?? "").split("\n");
+    const line = lines.find((l) => l.startsWith(FORK_TRAILER));
+    const thread = lines.find((l) => l.startsWith(THREAD_TRAILER))?.slice(THREAD_TRAILER.length).trim();
     let fork: Checkpoint["fork"];
     try {
       const f = line ? JSON.parse(line.slice(FORK_TRAILER.length)) : undefined;
@@ -139,7 +144,7 @@ export async function listCheckpoints(cwd: string, limit = 20): Promise<Checkpoi
     } catch {
       /* not ours */
     }
-    return { sha: sha!, ts: Number(ts), label: label ?? "", ...(fork ? { fork } : {}) };
+    return { sha: sha!, ts: Number(ts), label: label ?? "", ...(fork ? { fork } : {}), ...(thread ? { thread } : {}) };
   });
 }
 

@@ -30,6 +30,16 @@ export function isLimitNotice(reply: string): boolean {
   return t.length > 0 && t.length < 400 && /^(you've|you have) (hit|reached) your (session|usage|weekly|daily|monthly)? ?limit|^claude ai usage limit reached|^(session|usage|weekly) limit (reached|hit)/i.test(t);
 }
 
+/**
+ * A reply that is only the agent saying it cannot work at all, such as Antigravity's
+ * "The MCP server 'x' failed to initialize: … to continue." It refuses every turn
+ * until its own setup is fixed, so it is no answer and the task should go elsewhere.
+ */
+export function agentSetupFailure(reply: string): { mcpServer: string; reason: string } | null {
+  const m = reply.trim().match(/^The MCP server '([^']+)' failed to initialize:\s*([\s\S]{0,600}?)(?:\.?\s*Fix the MCP server|$)/);
+  return m ? { mcpServer: m[1]!, reason: m[2]!.trim() } : null;
+}
+
 /** "resets 3pm", "resets 6:30 pm", "resets at 15:00" → next such time, as epoch ms. */
 export function parseResetTime(text: string, now = new Date()): number | undefined {
   const m = text.match(/resets?(?: at)? (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);

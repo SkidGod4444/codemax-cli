@@ -94,6 +94,7 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
+| `/setup` | Go through every setting one by one (shown once on first start) |
 | `/update` | Update codemax when a new version is out, then restart into it with the same agent and session (`codemax update` updates without starting) |
 | `/config` | Every setting in one panel: theme, keep awake, side agent and its model, handoffs, snapshots… |
 | Side agent | Turn it on in `/config` and pick its agent and model. It reviews the work in the background and speaks up only when something needs attention: its note waits above the prompt, where **1** expands it, **2** sends it to the main agent to discuss, **0** dismisses it. It never uses the main agent's plan unless you allow that in `/config` |
@@ -133,7 +134,9 @@ cd codemax-cli && bun install && bun link
 <summary><b>CLI commands</b></summary>
 
 ```
-codemax [--agent <id>] [--fresh]   start chatting
+codemax [--agent <id>] [--fresh]   start chatting: continues this folder's latest thread (--fresh: a new one)
+codemax --resume [<id>]            reopen a thread (no id: pick one); add --agent <id> to continue it with another agent
+codemax threads                    this folder's threads, newest first
 codemax doctor [--fix]             check nothing bills an API key
 codemax agents                     installed agents and their quota
 codemax usage [--all]              usage for this project or all projects

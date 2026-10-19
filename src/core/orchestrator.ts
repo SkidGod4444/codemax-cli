@@ -340,7 +340,7 @@ export class Orchestrator {
       this.ledger.addEvent({ kind: "exit", agent: run.adapter.id, detail: "codemax quit", diffStat: await diffStat(this.cwd) });
     }
     this.teardownHost();
-    out(`codemax: bye. ledger at ${this.ledger.dir}\n`);
+    out(`codemax: to continue this thread, run: codemax --resume ${this.ledger.threadId}\n`);
     this.resolveDone();
   }
 }
