@@ -249,6 +249,21 @@ test("/rewind after a restart still cuts the conversation: snapshots keep where 
   } finally { await h.cleanup(); }
 }, 30000);
 
+test("snapshots are byte-exact: no line-ending conversion from autocrlf or .gitattributes (Windows)", async () => {
+  const { createCheckpoint, restoreCheckpoint } = await import("../src/core/checkpoint.ts");
+  const repo = newRepo();
+  Bun.spawnSync(["git", "config", "core.autocrlf", "true"], { cwd: repo });
+  writeFileSync(join(repo, ".gitattributes"), "* text eol=crlf\n");
+  writeFileSync(join(repo, "lf.txt"), "one\ntwo\n");
+  writeFileSync(join(repo, "crlf.txt"), "one\r\ntwo\r\n");
+  const cp = (await createCheckpoint(repo, "before test: eol"))!;
+  writeFileSync(join(repo, "lf.txt"), "changed\n");
+  writeFileSync(join(repo, "crlf.txt"), "changed\r\n");
+  await restoreCheckpoint(repo, cp.sha);
+  expect(readFileSync(join(repo, "lf.txt"), "utf8")).toBe("one\ntwo\n");
+  expect(readFileSync(join(repo, "crlf.txt"), "utf8")).toBe("one\r\ntwo\r\n");
+});
+
 test("/rewind falls back to telling the agent when its conversation cannot be forked", async () => {
   const log: ForkLog = { forks: [], created: [], promptedIn: [], fail: true };
   const h = await harness(async (text, ctx) => {
@@ -304,7 +319,8 @@ test("prompt history survives a restart: ↑ recalls it and Ctrl+R searches it",
 
 test("checks after edits: a failure goes back to the agent (fix mode), it fixes it, the checks pass", async () => {
   const repo = newRepo();
-  const cmd = "test -f ok.txt || { echo CHECK-FAILED-MARK; exit 3; }";
+  // Runs the same under sh and cmd.exe (Windows).
+  const cmd = `bun -e "if (!require('fs').existsSync('ok.txt')) { console.log('CHECK-FAILED-MARK'); process.exit(3) }"`;
   const h = await harness(async (text, ctx) => {
     if (text.startsWith("[codemax checks]")) writeFileSync(join(repo, "ok.txt"), "fixed\n");
     else if (text.startsWith("edit")) writeFileSync(join(repo, "work.txt"), "work\n");
@@ -330,7 +346,7 @@ test("checks after edits: show mode attaches the failure to your next message; f
   const h = await harness(async (_text, ctx) => {
     writeFileSync(join(repo, `w-${Math.random()}.txt`), "x");
     await ctx.say("turn done");
-  }, { repo, cfg: { verify: { [repo]: "echo NOPE-MARK; exit 1" }, verifyOnFail: "show" } });
+  }, { repo, cfg: { verify: { [repo]: "echo NOPE-MARK && exit 1" }, verifyOnFail: "show" } });
   try {
     await h.send("edit once");
     await h.frame((f) => f.includes("failed (exit 1)") && f.includes("goes with your next message"));

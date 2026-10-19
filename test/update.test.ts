@@ -28,7 +28,7 @@ test("install kind is read from where the code lives", () => {
 
 test("each install updates its own way", () => {
   expect(updatePlan({ kind: "npm", root: "/x" }).cmd).toEqual([["npm", "install", "-g", "codemax-cli@latest"]]);
-  expect(updatePlan({ kind: "script", root: "/h/.codemax/cli" }, "darwin")).toMatchObject({ cmd: [["bash", "/h/.codemax/cli/install.sh"]], env: { CODEMAX_DIR: "/h/.codemax/cli" } });
+  expect(updatePlan({ kind: "script", root: "/h/.codemax/cli" }, "darwin")).toMatchObject({ cmd: [["bash", join("/h/.codemax/cli", "install.sh")]], env: { CODEMAX_DIR: "/h/.codemax/cli" } });
   expect(updatePlan({ kind: "script", root: "C:\\h\\.codemax\\cli" }, "win32").cmd[0]).toContain("-File");
   expect(updatePlan({ kind: "source", root: "/repo" }).cmd[0]).toEqual(["git", "-C", "/repo", "pull", "--ff-only"]);
   expect(updatePlan({ kind: "binary", root: "/$bunfs/root" }).manual).toContain("releases");

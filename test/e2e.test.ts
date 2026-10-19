@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { stripAnsi } from "../src/core/terminal.ts";
 
 /** Drive codemax's legacy --raw passthrough inside a PTY with the fake (sh) agent. */
-test("passthrough → hotkey menu → close → switch (brief typed) → quit", async () => {
+// --raw runs the agent in a PTY, which is Unix-only.
+test.skipIf(process.platform === "win32")("passthrough → hotkey menu → close → switch (brief typed) → quit", async () => {
   const home = mkdtempSync(join(tmpdir(), "codemax-home-"));
   const repo = mkdtempSync(join(tmpdir(), "codemax-repo-"));
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });

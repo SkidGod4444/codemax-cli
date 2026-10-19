@@ -8,8 +8,25 @@ import { dirname } from "node:path";
  * respected) into a commit stored under refs/codemax/checkpoints/.
  */
 
+/**
+ * Snapshots are byte-exact: no line-ending conversion when a file goes in or comes back out.
+ * Otherwise `core.autocrlf` (on by default with Git for Windows) or a `.gitattributes`
+ * `text` rule would turn a restored LF file into CRLF. Attributes are read from the empty
+ * tree (`--attr-source`, git 2.40+); an older git gets autocrlf off only.
+ */
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+let exactFlags: Promise<string[]> | null = null;
+function rawGit(): Promise<string[]> {
+  exactFlags ??= (async () => {
+    const base = ["-c", "core.autocrlf=false", "-c", "core.safecrlf=false"];
+    const p = Bun.spawn(["git", `--attr-source=${EMPTY_TREE}`, "version"], { stdout: "ignore", stderr: "ignore" });
+    return (await p.exited) === 0 ? [`--attr-source=${EMPTY_TREE}`, ...base] : base;
+  })();
+  return exactFlags;
+}
+
 async function run(cwd: string, args: string[], env: Record<string, string> = {}): Promise<{ code: number; out: string; err: string }> {
-  const p = Bun.spawn(["git", ...args], { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
+  const p = Bun.spawn(["git", ...(await rawGit()), ...args], { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   return { code: await p.exited, out: out.trimEnd(), err: err.trimEnd() };
 }
