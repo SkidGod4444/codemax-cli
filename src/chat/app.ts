@@ -20,7 +20,7 @@ import { Transcript, type AgentBlock } from "./transcript.ts";
 import { PermissionDialog } from "./permission.ts";
 import { QuestionDialog } from "./question.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
-import { C, DONE_VERBS, G, TIPS, VERBS, applyTheme, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
+import { C, DONE_VERBS, G, VERBS, applyTheme, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
 import { refreshLivePricesIfStale } from "../core/prices-live.ts";
@@ -36,6 +36,7 @@ import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "..
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
+import { critiquePrompt, debateCost, finalPlan, judgePrompt, parseSettled, proposalPrompt, roundsLabel, settledPrompt, UNTIL_SETTLED_MAX, type DebateRounds } from "../core/debate.ts";
 import { logoLines } from "./logo.ts";
 import { checkForUpdate, relaunch, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { displayModelName, sortModels } from "./models.ts";
@@ -43,6 +44,7 @@ import { fmtDateTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
 import { NotePanel, splitNote } from "./notes.ts";
 import { Onboarding, type OnboardingStep } from "./onboarding.ts";
+import { nextTip, TIPS } from "./tips.ts";
 import { SubagentPanel } from "./subagents.ts";
 import { antigravityInstallPlan, installAntigravityServer, type InstallPlan } from "../engines/antigravity.ts";
 
@@ -344,6 +346,22 @@ export class ChatApp {
 
   private onKey = (key: KeyEvent) => this.safely("key handling", () => this.handleKey(key));
 
+  /** The empty prompt's text: the welcome line, then a different feature tip after each message (tips.ts). */
+  private placeholderText = 'Try "fix the failing test" · / for commands';
+  private tipIndex = Math.floor(Math.random() * TIPS.length);
+
+  private rotateTip() {
+    if (this.config.tips === false) {
+      this.placeholderText = "/ for commands";
+    } else {
+      const agents = listAdapters(this.config.order).filter((a) => this.detect.get(a.id)?.installed && this.detect.get(a.id)?.engine).length;
+      const t = nextTip(this.tipIndex, { agents, checks: !!this.config.verify?.[this.cwd] || verifyCandidates(this.cwd).length > 0, hotkey: this.config.hotkeys[this.config.hotkeys.length - 1] ?? "ctrl+^" }, TIPS, Math.max(20, this.renderer.width - 4));
+      this.tipIndex = t.index;
+      this.placeholderText = t.text;
+    }
+    this.input.placeholder = this.placeholderText;
+  }
+
   /** Files and images dropped into the prompt (or pasted as paths), by their number. */
   private dropped: { n: number; path: string; name: string; mimeType?: string }[] = [];
   private dropSeq = 0;
@@ -401,6 +419,9 @@ export class ChatApp {
 
   private handleKey(key: KeyEvent) {
     if (key.eventType === "release") return;
+    // The prompt always has the keyboard (a click elsewhere, like selecting text in the
+    // transcript, must not leave typing going nowhere); dialogs take their keys below.
+    if (!this.input.focused && !this.closed) this.input.focus();
     if (this.onboarding && !this.onboardingAside) {
       key.stopPropagation();
       this.onboarding.handleKey(key);
@@ -437,6 +458,13 @@ export class ChatApp {
       this.input.clear();
       this.renderQueue();
       this.renderFooter();
+      return;
+    }
+    if (key.name === "escape" && this.debate && !this.permission) {
+      key.stopPropagation();
+      this.debate.stopped = true;
+      for (const a of this.debate.actives) void a.engine.cancel().catch(() => {});
+      this.setFlash("stopping the debate…");
       return;
     }
     if (key.name === "escape" && this.shellRun && !this.active?.turn) {
@@ -624,7 +652,8 @@ export class ChatApp {
     this.closePalette();
     this.input.clear();
     this.pushHistory(text);
-    const busy = !!this.active?.turn || !!this.verifying;
+    this.rotateTip();
+    const busy = !!this.active?.turn || !!this.verifying || !!this.debate;
     const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
     if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
       this.enqueue(text);
@@ -638,7 +667,7 @@ export class ChatApp {
     }
     const route = this.routeFor(text);
     if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
-    if (this.active.turn || this.verifying) {
+    if (this.active.turn || this.verifying || this.debate) {
       this.enqueue(text);
       return;
     }
@@ -881,6 +910,185 @@ export class ChatApp {
       await engine.close().catch(() => {});
       if (this.active) this.transcript.divider(`back to ${this.active.name}`);
     }
+  }
+
+  /** A running /debate: its sessions, and whether you stopped it (Esc). */
+  private debate: { actives: Active[]; stopped: boolean } | null = null;
+
+  /**
+   * /debate <goal>: choose 2-3 debaters, each an agent and the model it debates on (the
+   * same agent twice on different models is fine), then start.
+   */
+  private openDebate(goal: string) {
+    goal = goal.trim();
+    if (!goal) return this.transcript.note("usage: /debate <goal> · 2-3 agents each propose a plan, argue it out, and a judge merges the best", C.warn);
+    if (this.debate) return this.transcript.note("a debate is already running · Esc stops it", C.warn);
+    const ok = (a: AgentId) => !!this.detect.get(a)?.installed && !!this.detect.get(a)?.engine;
+    const usable = listAdapters(this.config.order).filter((a) => ok(a.id));
+    if (!usable.length) return this.transcript.note("no agent is installed", C.warn);
+    // To start with: your agent, then the next ones in your handoff order, with their models.
+    const entries: { agent: AgentId; model?: string; modelName?: string }[] = [];
+    const add = (e: { agent: AgentId; model?: string; modelName?: string }) => {
+      if (entries.length < 2 && ok(e.agent) && !entries.some((x) => x.agent === e.agent && x.model === e.model)) entries.push(e);
+    };
+    if (this.active) add(this.chainEntry(this.active.agent) ?? { agent: this.active.agent });
+    for (const e of this.chain()) add(e);
+    // This debate's rounds (Enter cycles them); /config sets where it starts.
+    const ROUNDS: DebateRounds[] = [1, 2, 3, 5, "auto"];
+    let rounds: DebateRounds = this.config.debateRounds ?? 1;
+    const show = () => {
+      this.closePalette();
+      this.paletteKind = "modes";
+      const items: PaletteItem[] = [
+        ...entries.map((e, i) => ({ label: `${i + 1}. ${this.entryLabel(e)}`, description: "Enter removes it", value: `e:${i}` })),
+        ...(entries.length < 3 ? [{ label: "+ Add a debater", description: "an agent, then its model", value: "add" }] : []),
+        { label: `Rounds: ${roundsLabel(rounds)}`, description: "Enter changes it: 1, 2, 3, 5, or until the judge is satisfied", value: "rounds" },
+        { label: `Start the debate (${entries.length})`, description: entries.length < 2 ? "add at least two" : debateCost(entries.length, rounds), value: "start", disabled: entries.length < 2 },
+      ].map((it, i) => ({ ...it, weight: 100 - i }));
+      this.palette = new Palette(this.renderer, {
+        title: "Debate: who argues? · 2 or 3 agents, each on a model you choose · Esc cancels",
+        items,
+        onPick: (it) => {
+          if (it.value === "start") {
+            this.closePalette();
+            return void this.runDebate([...entries], goal, rounds);
+          }
+          if (it.value === "rounds") {
+            rounds = ROUNDS[(ROUNDS.indexOf(rounds) + 1) % ROUNDS.length]!;
+            return show();
+          }
+          if (it.value.startsWith("e:")) {
+            entries.splice(Number(it.value.slice(2)), 1);
+            return show();
+          }
+          this.closePalette();
+          this.paletteKind = "modes";
+          this.palette = new Palette(this.renderer, {
+            title: "Which agent? · Esc back",
+            items: usable.map((a, i) => ({ label: a.name, value: a.id, weight: 100 - i })),
+            onPick: (pick) =>
+              void this.pickModelFor(pick.value as AgentId, (m) => {
+                const e = { agent: pick.value as AgentId, ...m };
+                if (!entries.some((x) => x.agent === e.agent && x.model === e.model)) entries.push(e);
+                show();
+              }),
+            onClose: () => show(),
+          }, this.paletteAnchor);
+          this.renderer.root.add(this.palette.box);
+        },
+        onClose: () => this.closePalette(),
+      }, this.paletteAnchor);
+      this.renderer.root.add(this.palette.box);
+    };
+    show();
+  }
+
+  /**
+   * Run a debate (see core/debate.ts). Each debater has its own session, in plan mode where
+   * the agent has one; every permission it asks for is refused. Proposals and critiques run
+   * side by side; the judge is your current agent when it debates, else the first one.
+   */
+  private async runDebate(entries: { agent: AgentId; model?: string; modelName?: string }[], goal: string, rounds: DebateRounds = this.config.debateRounds ?? 1) {
+    if (this.debate || entries.length < 2) return;
+    const actives: Active[] = [];
+    this.debate = { actives, stopped: false };
+    // "Claude Code · Opus 5.5": the same agent on two models stays two debaters.
+    const names = entries.map((e) => this.entryLabel(e));
+    this.transcript.divider(`debate · ${names.join(" vs ")}`);
+    this.transcript.note(`${debateCost(entries.length, rounds)} · they read the code but change nothing · Esc stops`, C.dim);
+    this.renderFooter();
+    try {
+      const models = new Map<Active, string | undefined>();
+      for (const [i, entry] of entries.entries()) {
+        const { agent } = entry;
+        const blocked = this.checkBlockers(agent);
+        if (blocked.length) {
+          this.transcript.error(`${getAdapter(agent).name} not started: ${blocked[0]!.message}`);
+          continue;
+        }
+        const engine = this.engineFactory(agent);
+        const a: Active = { agent, name: names[i]!, engine, turn: null, replay: null, unsubscribe: () => {}, commands: [] };
+        models.set(a, entry.model);
+        this.side.add(a);
+        a.unsubscribe = engine.onEvent((e) => this.onEngineEvent(a, safeDeep(e)));
+        actives.push(a);
+      }
+      await Promise.all(actives.map(async (a) => {
+        await a.engine.start({ cwd: this.cwd, questions: false });
+        const model = models.get(a);
+        if (model && a.engine.setModel && a.engine.info?.currentModel !== model) await a.engine.setModel(model).catch((e: any) => this.transcript.note(`${a.name}: could not switch model (${String(e?.message ?? e).slice(0, 100)})`, C.warn));
+        if (a.engine.setMode && a.engine.info?.modes.some((m) => m.id === "plan")) await a.engine.setMode("plan").catch(() => {});
+      }));
+      if (actives.length < 2) throw new Error("fewer than two agents could start");
+      const ask = (a: Active, prompt: string) => new Promise<string>((done) => {
+        let reply = "";
+        void this.runTurn(a, prompt, { record: false, journal: false, onReply: (r) => (reply = r) }).finally(() => done(reply));
+      });
+      const me = (a: Active) => ({ name: a.name });
+      const others = (a: Active) => actives.filter((x) => x !== a).map(me);
+      this.transcript.divider("round 1 · each proposes a plan");
+      let plans = await Promise.all(actives.map(async (a) => ({ name: a.name, plan: await ask(a, proposalPrompt(goal, me(a), others(a))) })));
+      const judge = actives.find((a) => a.agent === this.active?.agent) ?? actives[0]!;
+      // "Until the judge is satisfied": after each round the judge says SETTLED, or what is
+      // still open (the next round argues that first). UNTIL_SETTLED_MAX rounds at most.
+      const last = rounds === "auto" ? UNTIL_SETTLED_MAX : rounds;
+      let focus: string | undefined;
+      for (let r = 1; r <= last && !this.debate.stopped; r++) {
+        this.transcript.divider(`round ${r + 1} · each attacks the others' plans and defends its own`);
+        const current = plans;
+        plans = await Promise.all(actives.map(async (a) => ({ name: a.name, plan: (await ask(a, critiquePrompt(goal, me(a), current, r, rounds, focus))) || current.find((p) => p.name === a.name)!.plan })));
+        if (rounds !== "auto" || this.debate.stopped) continue;
+        if (r === last) {
+          this.transcript.note(`${UNTIL_SETTLED_MAX} argument rounds: that is the most a debate goes on · the judge decides now`, C.dim);
+          break;
+        }
+        const call = parseSettled(await ask(judge, settledPrompt(goal, plans, r)));
+        if (call.settled) {
+          this.transcript.note(`${judge.name}: settled after ${r} argument round${r === 1 ? "" : "s"}`, C.ok);
+          break;
+        }
+        focus = call.focus;
+        this.transcript.note(`${judge.name}: not settled yet${focus ? ` · next: ${focus.slice(0, 160)}` : ""}`, C.dim);
+      }
+      if (this.debate.stopped) return this.transcript.note("debate stopped", C.warn);
+      this.transcript.divider(`verdict · ${judge.name} merges the strongest parts`);
+      const verdict = await ask(judge, judgePrompt(goal, plans));
+      if (this.debate.stopped || !verdict) return this.transcript.note("debate stopped before a verdict", C.warn);
+      this.offerDebatePlan(goal, finalPlan(verdict), names);
+    } catch (e: any) {
+      this.transcript.error(`debate: ${e?.message ?? e}`);
+    } finally {
+      for (const a of actives) {
+        a.unsubscribe();
+        this.side.delete(a);
+        void a.engine.close().catch(() => {});
+      }
+      this.debate = null;
+      if (this.active) this.transcript.divider(`back to ${this.active.name}`);
+      this.renderFooter();
+      if (this.active) void this.drainQueue(this.active);
+    }
+  }
+
+  /** After a verdict: build the agreed plan with your agent, or keep it for later. */
+  private offerDebatePlan(goal: string, plan: string, names: string[]) {
+    const a = this.active;
+    if (!a) return;
+    this.closePalette();
+    this.paletteKind = "handoff";
+    this.palette = new Palette(this.renderer, {
+      title: `The debate agreed on a plan · Enter to build it with ${a.name}`,
+      items: [
+        { label: `Build it with ${a.name}`, description: "sends the goal and the agreed plan as your next message", value: "build", weight: 2 },
+        { label: "Not now", description: "the plan stays in the transcript", value: "no", weight: 1 },
+      ],
+      onPick: (it) => {
+        this.closePalette();
+        if (it.value === "build" && this.active === a) void this.send(a, `${goal}\n\nCarry out this plan, agreed in a debate between ${names.join(", ")}:\n\n${plan}`, { shown: `build the debated plan: ${goal}` });
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
   }
 
   private showBudget() {
@@ -1321,6 +1529,7 @@ export class ChatApp {
       { name: "/verify", description: "Run this project's checks now · /verify <command> sets them · /verify off", run: (a) => void this.verifyCommand(a) },
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
+      { name: "/debate", description: "2-3 agents each propose a plan, argue it out, and a judge merges the best: /debate <goal>", run: (a) => this.openDebate(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
       { name: "/update", description: "Update codemax to the latest version", run: () => void this.runUpdate() },
       { name: "/config", description: "Settings: theme, keep awake, side agent and model, handoffs, checkpoints…", run: () => this.openConfig() },
@@ -1353,7 +1562,7 @@ export class ChatApp {
     const v = arg.trim().toLowerCase();
     if (v !== "on" && v !== "lid" && v !== "off") {
       const s = this.awake.status;
-      this.transcript.note(`awake: ${s.mode}${s.lid ? " (lid closed included)" : ""} · /awake on keeps the machine from sleeping · /awake lid also keeps working with the lid closed · /awake off`);
+      this.transcript.note(`awake: ${s.mode}${s.lid ? " (lid closed included)" : ""} · /awake on keeps the machine and screen awake (no screen saver) · /awake lid also keeps working with the lid closed · /awake off`);
       return;
     }
     const st = await this.awake.set(v);
@@ -1873,7 +2082,7 @@ export class ChatApp {
     }
   }
 
-  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean; images?: PromptImage[] } = {}): Promise<{ stop: StopReason; edited: boolean } | undefined> {
+  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean; images?: PromptImage[]; onReply?: (reply: string) => void } = {}): Promise<{ stop: StopReason; edited: boolean } | undefined> {
     if (this.closed) return;
     const block = this.transcript.agent();
     const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
@@ -1901,6 +2110,7 @@ export class ChatApp {
       const who = `${active.name} · ${this.modelName(active, turn.model)}`;
       block.footer(stop === "cancelled" ? `Interrupted after ${dur} · ${who}` : `${pick(DONE_VERBS, turn.startedAt)} for ${dur} · done ${fmtTime(Date.now())} · ${who}`);
       const reply = block.text().trim();
+      o.onReply?.(reply);
       const broken = agentSetupFailure(reply);
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
       else if (broken) turn.rec?.markError(`${active.name} could not start its MCP server "${broken.mcpServer}"`);
@@ -1979,6 +2189,13 @@ export class ChatApp {
         target().toolUpdate(e.id, e.status, e.title, e.detail);
         break;
       case "permission_request":
+        // A debate only plans: whatever a debater asks to do is refused.
+        if (this.debate?.actives.includes(active)) {
+          const reject = e.request.options.find((o) => o.kind.startsWith("reject"))?.id ?? e.request.options.at(-1)!.id;
+          active.engine.answerPermission(e.request.id, reject);
+          this.transcript.note(`${active.name} asked to ${e.request.title.slice(0, 80)}: refused (a debate only plans)`, C.dim);
+          break;
+        }
         this.permissionQueue.push({ request: e.request, engine: active.engine });
         this.showNextPermission();
         break;
@@ -1989,6 +2206,10 @@ export class ChatApp {
         }
         break;
       case "question_request":
+        if (this.debate?.actives.includes(active)) {
+          active.engine.answerQuestion?.(e.request.id, { action: "decline" });
+          break;
+        }
         this.permissionQueue.push({ question: e.request, engine: active.engine });
         this.showNextPermission();
         break;
@@ -2059,7 +2280,7 @@ export class ChatApp {
       if (!allowed) this.transcript.note(`declined: ${request.title.length > 70 ? request.title.slice(0, 67) + "…" : request.title}`, C.warn);
       if (choice.tellAgent) {
         this.input.placeholder = `Tell ${name} what to do differently…`;
-        setTimeout(() => (this.input.placeholder = 'Try "fix the failing test" · / for commands'), 15000);
+        setTimeout(() => (this.input.placeholder = this.placeholderText), 15000);
       }
       this.input.focus();
       this.showNextPermission();
@@ -2261,7 +2482,7 @@ export class ChatApp {
         },
       },
       { key: "theme", label: "Theme", value: c.theme ?? "auto", choices: [{ value: "auto", description: "follow the terminal's background" }, { value: "dark" }, { value: "light" }], apply: (v) => this.setThemePref(v) },
-      { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
+      { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep, screen saver or lock while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
       { key: "side", label: "Side agent", value: side.agent ?? "off", choices: [{ value: "off" }, ...agents.map((a) => ({ value: a.id, label: a.name, description: a.id === this.active?.agent ? "same plan as the main agent: reviews count against its limit · pick its model next" : "its own subscription · pick its model next" }))], apply: (v) => (v === "off" ? this.disableSide() : this.enableSide(v as AgentId, { forward: side.forward, pickModel: true, samePlan: v === this.active?.agent })) },
       { key: "sideSamePlan", label: "Side agent on the main agent's plan", value: side.samePlan ? "allowed" : "never", choices: [{ value: "never", description: "reviews pause while the side agent's tool is also the main agent" }, { value: "allowed", description: "reviews count against the main agent's usage limit" }], apply: (v) => this.saveSide({ ...side, samePlan: v === "allowed" }) },
       { key: "sideModel", label: "Side agent model", value: side.agent ? (side.model ?? "default") : "(no side agent)", choices: side.agent ? [{ value: "pick", label: "Choose from its models", description: "starts the side agent to list them" }] : [], apply: async () => { if (side.agent) await this.enableSide(side.agent, { forward: side.forward, pickModel: true }); } },
@@ -2308,6 +2529,19 @@ export class ChatApp {
         apply: (v) => this.setVerify(v === "off" ? null : v),
       },
       { key: "verifyOnFail", label: "When checks fail", value: c.verifyOnFail === "fix" ? "send to the agent" : "show", choices: [{ value: "show", description: "show the failure; it goes with your next message" }, { value: "fix", label: "send to the agent", description: `the agent fixes it right away (at most ${VERIFY_FIX_CAP} times per task)` }], apply: (v) => { c.verifyOnFail = v === "fix" ? "fix" : "show"; saveConfigKey("verifyOnFail", c.verifyOnFail); } },
+      {
+        key: "debateRounds",
+        label: "Debate rounds",
+        value: roundsLabel(c.debateRounds ?? 1),
+        choices: [
+          ...[1, 2, 3, 5].map((n) => ({ value: String(n), label: roundsLabel(n), description: `${debateCost(2, n)} with two debaters` })),
+          { value: "auto", label: roundsLabel("auto"), description: `the judge checks after each round and stops when one plan is clearly better (${UNTIL_SETTLED_MAX} rounds at most)` },
+        ],
+        apply: (v) => {
+          c.debateRounds = v === "auto" ? "auto" : Number(v);
+          saveConfigKey("debateRounds", c.debateRounds);
+        },
+      },
       { key: "checkpoints", label: "Snapshots for /undo", value: onOff(c.checkpoints), choices: [{ value: "on" }, { value: "off", description: "also turns off code diffs in handoffs" }], apply: bool("checkpoints") },
       {
         key: "bell",
@@ -2322,6 +2556,7 @@ export class ChatApp {
       { key: "questions", label: "Agent questions", value: c.questions ?? "ask", choices: [{ value: "ask", description: "show the agent's question and wait for your answer" }, { value: "timeout", label: "ask, skip after 5 min", description: "for unattended runs (keep awake): an unanswered question is skipped and the agent carries on" }, { value: "off", description: "agents never ask; they decide themselves (new sessions)" }], apply: (v) => { c.questions = v as Config["questions"]; saveConfigKey("questions", c.questions); } },
       { key: "terminalStatus", label: "Terminal tab status", value: c.terminalStatus === false ? "off" : "on", choices: [{ value: "on", description: "Warp shows the agent's badge and running / waiting / done; other terminals get OSC 7501 status" }, { value: "off" }], apply: (v) => { c.terminalStatus = v === "on"; saveConfigKey("terminalStatus", c.terminalStatus); } },
       { key: "notifications", label: "Desktop notifications", value: c.notifications === false ? "off" : "on", choices: [{ value: "on", description: "when an agent waits for you or a long turn ends, while you are in another window" }, { value: "off" }], apply: (v) => { c.notifications = v === "on"; saveConfigKey("notifications", c.notifications); } },
+      { key: "tips", label: "Tips in the prompt", value: c.tips === false ? "off" : "on", choices: [{ value: "on", description: "a different feature (and when it helps) in the empty prompt after each message" }, { value: "off" }], apply: (v) => { c.tips = v === "on"; saveConfigKey("tips", c.tips); this.rotateTip(); } },
       { key: "updateCheck", label: "Check for codemax updates", value: c.updateCheck === false ? "off" : "on", choices: [{ value: "on", description: "asks npm at most every 12 hours" }, { value: "off" }], apply: (v) => { c.updateCheck = v === "on"; saveConfigKey("updateCheck", c.updateCheck); } },
       { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
     ];
@@ -2346,6 +2581,7 @@ export class ChatApp {
       checkpoints: "A snapshot of your files before each message, so /undo and Esc Esc (rewind) can put them back. It never touches your git branches or index.",
       verify: "Your own test or typecheck command, run after every turn that changes files, so a broken build shows up right away.",
       verifyOnFail: "What happens when those checks fail.",
+      debateRounds: "/debate <goal> lets 2-3 agents (each on a model you pick) propose plans, argue them out and merge the best. More rounds argue longer and use more of each plan.",
       side: "A second agent that reads the main agent's work after a turn and points out problems in one short note.",
       sideSamePlan: "Whether reviews may run on the same plan as the main agent (they then count against its limit).",
       sideEvery: "How often the side agent reviews.",
@@ -2353,6 +2589,7 @@ export class ChatApp {
       bell: "A bell when a long turn finishes, so you can look away.",
       terminalStatus: "Show the agent and whether it is running, waiting or done in your terminal's tab (Warp shows the agent's badge).",
       notifications: "A desktop notification when an agent needs you while you are in another window.",
+      tips: "Show a different codemax feature in the empty prompt after each message you send (like /debate, rewind, dropping screenshots), with when it helps.",
       updateCheck: "Tell you when a new codemax is out; /update installs it.",
       priceUpdates: "Refresh the public price list weekly, used to show what your subscription usage would cost on the API.",
       summarizeOnSwitch: "Older histories (without codemax's step record) can be summarised before a switch. New work never needs it.",
@@ -2513,48 +2750,50 @@ export class ChatApp {
         }, this.paletteAnchor);
         this.renderer.root.add(this.palette.box);
       };
-      /** The agent's own model list (it is started briefly when it is not the one running). */
-      const pickModel = async (agent: AgentId, use: (m: { model?: string; modelName?: string }) => void) => {
-        this.closePalette();
-        const name = getAdapter(agent).name;
-        let models = this.active?.agent === agent ? (this.active.engine.info?.models ?? []) : [];
-        if (!models.length) {
-          this.setFlash(`asking ${name} for its models…`);
-          const engine = this.engineFactory(agent);
-          this.tempEngines.add(engine);
-          try {
-            // An agent that never answers must not hold the editor: 30 s.
-            const info = await Promise.race([engine.start({ cwd: this.cwd, questions: false }), Bun.sleep(30_000).then(() => Promise.reject(new Error("no answer in 30 s")))]);
-            models = info.models ?? [];
-          } catch (e: any) {
-            this.transcript.note(`${name} could not list its models (${String(e?.message ?? e).slice(0, 120)}); it will use its default`, C.warn);
-          } finally {
-            this.tempEngines.delete(engine);
-            await engine.close().catch(() => {});
-          }
-        }
-        if (this.closed) return;
-        if (models.length < 2) return use({});
-        this.paletteKind = "modes";
-        this.palette = new Palette(this.renderer, {
-          title: `Model on ${name} · Esc for its default`,
-          items: [{ label: "Its default model", value: "", weight: 1000 }, ...sortModels(models).map((m, i) => ({ label: m.name, value: m.id, weight: 100 - i }))],
-          maxRows: 10,
-          onPick: (it) => {
-            this.closePalette();
-            if (agent === "cursor" && it.value) this.transcript.note("Cursor saves the model it is switched to as its default, so Cursor uses it outside codemax too", C.dim);
-            use(it.value ? { model: it.value, modelName: models.find((m) => m.id === it.value)?.name } : {});
-          },
-          onClose: () => {
-            this.closePalette();
-            use({});
-          },
-        }, this.paletteAnchor);
-        this.paletteFiltered = true;
-        this.renderer.root.add(this.palette.box);
-      };
+      const pickModel = (agent: AgentId, use: (m: { model?: string; modelName?: string }) => void) => this.pickModelFor(agent, use);
       show();
     });
+  }
+
+  /** Pick a model from the agent's own list (it is started briefly when it is not the one running). */
+  private async pickModelFor(agent: AgentId, use: (m: { model?: string; modelName?: string }) => void) {
+    this.closePalette();
+    const name = getAdapter(agent).name;
+    let models = this.active?.agent === agent ? (this.active.engine.info?.models ?? []) : [];
+    if (!models.length) {
+      this.setFlash(`asking ${name} for its models…`);
+      const engine = this.engineFactory(agent);
+      this.tempEngines.add(engine);
+      try {
+        // An agent that never answers must not hold the editor: 30 s.
+        const info = await Promise.race([engine.start({ cwd: this.cwd, questions: false }), Bun.sleep(30_000).then(() => Promise.reject(new Error("no answer in 30 s")))]);
+        models = info.models ?? [];
+      } catch (e: any) {
+        this.transcript.note(`${name} could not list its models (${String(e?.message ?? e).slice(0, 120)}); it will use its default`, C.warn);
+      } finally {
+        this.tempEngines.delete(engine);
+        await engine.close().catch(() => {});
+      }
+    }
+    if (this.closed) return;
+    if (models.length < 2) return use({});
+    this.paletteKind = "modes";
+    this.palette = new Palette(this.renderer, {
+      title: `Model on ${name} · Esc for its default`,
+      items: [{ label: "Its default model", value: "", weight: 1000 }, ...sortModels(models).map((m, i) => ({ label: m.name, value: m.id, weight: 100 - i }))],
+      maxRows: 10,
+      onPick: (it) => {
+        this.closePalette();
+        if (agent === "cursor" && it.value) this.transcript.note("Cursor saves the model it is switched to as its default, so Cursor uses it outside codemax too", C.dim);
+        use(it.value ? { model: it.value, modelName: models.find((m) => m.id === it.value)?.name } : {});
+      },
+      onClose: () => {
+        this.closePalette();
+        use({});
+      },
+    }, this.paletteAnchor);
+    this.paletteFiltered = true;
+    this.renderer.root.add(this.palette.box);
   }
 
   /** /config: every setting with its value; pick one to change it. */
@@ -2848,7 +3087,7 @@ export class ChatApp {
       if (this.permission) this.setWorking(this.permission instanceof QuestionDialog ? `${glyph} Waiting for your answer (${secs}) · esc to skip` : `${glyph} Waiting for your approval (${secs}) · esc to say no`);
       else {
         const elapsed = Date.now() - t.startedAt;
-        const tip = elapsed > 8000 ? `  ⎿  tip: ${pick(TIPS, Math.floor(t.startedAt / 1000))}` : "";
+        const tip = elapsed > 8000 ? `  ⎿  ${pick(TIPS, Math.floor(t.startedAt / 1000)).text.replace("{hotkey}", this.config.hotkeys.at(-1) ?? "ctrl+^").replace(/^Tip:/, "tip:")}` : "";
         this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)} · esc to interrupt${tip}`);
       }
     }, 120);

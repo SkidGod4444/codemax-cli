@@ -6,6 +6,10 @@ import type { AgentId } from "./adapters/types.ts";
 export interface Config {
   /** Priority order used for "next agent" suggestions; the first is the default agent. */
   order: AgentId[];
+  /** /debate: argument rounds between the proposals and the verdict (default 1), or "auto": until the judge finds the better plan. */
+  debateRounds?: number | "auto";
+  /** Feature tips in the empty prompt, a new one after each message (default on). */
+  tips?: boolean;
   /** The first-run setup was done (or skipped); /setup runs it again. */
   onboarded?: boolean;
   /**

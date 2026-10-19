@@ -9,13 +9,14 @@ import { CODEMAX_HOME, ensureDir } from "./paths.ts";
  *   lid  the same, and keep working with the laptop lid closed
  *
  * How, per platform:
- *   macOS    `caffeinate -ims -w <pid>`; lid: `pmset -a disablesleep 1` (admin
+ *   macOS    `caffeinate -dims -w <pid>` (the display too: no screen saver or
+ *            lock while agents work); lid: `pmset -a disablesleep 1` (admin
  *            password once). A root watchdog started with the same password sets
  *            it and puts it back within seconds of codemax exiting for any reason
  *            (quit, crash, kill -9, closed terminal). macOS cannot block shutdown.
  *   Linux    `systemd-inhibit --mode=block` on idle, sleep and shutdown, plus
  *            handle-lid-switch for lid mode. No admin needed on a desktop session.
- *   Windows  SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED) from a
+ *   Windows  SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED) from a
  *            PowerShell helper; lid: lid action set to "do nothing" on the current
  *            power plan, restored afterwards. Windows cannot block shutdown.
  *
@@ -79,9 +80,10 @@ export function defaultAwakeDeps(): AwakeDeps {
 }
 
 const WHY = "A coding agent is working (codemax /awake)";
-// ES_CONTINUOUS | ES_SYSTEM_REQUIRED (0x80000001), written so PowerShell keeps it unsigned:
-// a bare 0x80000001 is read as a negative Int32 and the call fails.
-const ES_CONTINUOUS_SYSTEM_REQUIRED = "[uint32]2147483649";
+// ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED (0x80000003): the screen stays on
+// too. Written so PowerShell keeps it unsigned: a bare 0x80000003 is read as a negative
+// Int32 and the call fails.
+const ES_CONTINUOUS_SYSTEM_REQUIRED = "[uint32]2147483651";
 
 export class Awake {
   mode: AwakeMode = "off";
@@ -186,8 +188,9 @@ export class Awake {
     const pid = String(this.d.pid);
     switch (this.d.platform) {
       case "darwin":
-        // -i idle sleep, -m disk sleep, -s system sleep (on AC). The display may still sleep.
-        return this.d.which("caffeinate") ? ["caffeinate", "-ims", "-w", pid] : null;
+        // -d display sleep (so no screen saver or lock: it looked asleep without it), -i idle
+        // sleep, -m disk sleep, -s system sleep (on AC).
+        return this.d.which("caffeinate") ? ["caffeinate", "-dims", "-w", pid] : null;
       case "linux": {
         if (!this.d.which("systemd-inhibit")) return null;
         return this.linuxCommand(["idle", "sleep", "shutdown", ...(lid ? ["handle-lid-switch"] : [])]);

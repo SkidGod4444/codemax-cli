@@ -95,6 +95,7 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
+| `/debate <goal>` | 2-3 agents, on models you pick, each propose a plan, argue it out, and a judge merges the best; then build it with your agent |
 | `/setup` | Go through every setting one by one (shown once on first start) |
 | `/update` | Update codemax when a new version is out, then restart into it with the same agent and session (`codemax update` updates without starting) |
 | `/config` | Every setting in one panel: theme, keep awake, side agent and its model, handoffs, snapshots… |

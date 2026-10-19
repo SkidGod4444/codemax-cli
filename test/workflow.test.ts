@@ -710,3 +710,130 @@ test("automatic handoff never hands the task to an agent that edits without aski
     await h.frame((f) => f.includes("cursor did it"), 15000);
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("/debate: agents on models you choose each propose, argue, and a judge's merged plan goes to your agent", async () => {
+  const models: ModelOpts = { list: [{ modelId: "big-5-5", name: "Big 5.5" }, { modelId: "small-4", name: "Small 4" }], set: [] };
+  const seen: { agent?: string; text: string }[] = [];
+  const h = await harness(async (text, ctx) => {
+    seen.push({ agent: ctx.agent, text });
+    if (text.includes("You are now the judge")) return ctx.say("1. Agree on tests.\n2. Cache: Codex wins.\n3. THE PLAN\n1. add a cache\n2. test it\n4. Risks: none");
+    if (text.includes("## Your answer") && text.includes("Critique")) return ctx.say(`${ctx.agent} critiques and revises: REVISED-${ctx.agent}`);
+    if (text.includes("[codemax debate]")) {
+      // A debater that tries to change something is refused.
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: `w-${ctx.agent}`, title: "Write cache.ts", kind: "edit" }, options: [{ optionId: "ok", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Deny", kind: "reject_once" }] } as any);
+      return ctx.say(`PLAN-${ctx.agent} (write was ${r.outcome.optionId})`);
+    }
+    await ctx.say(`main got: ${text.slice(0, 60)}`);
+  }, { models, height: 40 });
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  const pick = async (filter: string, until: string) => {
+    await h.setup.mockInput.typeText(filter);
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    return h.frame((f) => f.includes(until), 10000);
+  };
+  try {
+    await h.send("/debate add caching to the API");
+    let f = await h.frame((f) => f.includes("Debate: who argues?"));
+    expect(f).toContain("1. Claude Code");
+    await pick("add", "Which agent?");
+    await pick("codex", "Model on Codex");
+    f = await pick("small", "2. Codex · Small 4");
+    await pick("start", "verdict · Claude Code merges");
+    f = await h.frame((f) => f.includes("The debate agreed on a plan"), 20000);
+    // Round 1: both proposed; the write each tried was refused.
+    const proposals = seen.filter((x) => x.text.includes("plan as numbered steps"));
+    expect(proposals.map((x) => x.agent).sort()).toEqual(["claude", "codex"]);
+    expect(f).toContain("refused (a debate only plans)");
+    // Round 2: each saw the other's plan, not its own.
+    const claudeCritique = seen.find((x) => x.agent === "claude" && x.text.includes("Critique"))!;
+    expect(claudeCritique.text).toContain("PLAN-codex (write was no)");
+    expect(claudeCritique.text).not.toContain("## Claude Code's plan");
+    // Codex debated on the model you chose.
+    expect(models.set).toContainEqual({ agent: "codex", modelId: "small-4" });
+    // The verdict's plan goes to your agent.
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("main got:"), 10000);
+    expect(h.prompts.at(-1)).toContain("Carry out this plan, agreed in a debate between Claude Code, Codex · Small 4");
+    expect(h.prompts.at(-1)).toContain("1. add a cache\n2. test it");
+  } finally { await h.cleanup(); }
+}, 40000);
+
+test("/debate until the judge is satisfied: rounds go on while the judge says what is still open, and stop at SETTLED", async () => {
+  const { parseSettled } = await import("../src/core/debate.ts");
+  expect(parseSettled("SETTLED\nCodex's cache wins.")).toEqual({ settled: true });
+  expect(parseSettled("**CONTINUE:** where the cache lives")).toEqual({ settled: false, focus: "where the cache lives" });
+  expect(parseSettled("I think it is mostly fine")).toEqual({ settled: true }); // unclear: never loops
+  let checks = 0;
+  const seen: { agent?: string; text: string }[] = [];
+  const h = await harness(async (text, ctx) => {
+    seen.push({ agent: ctx.agent, text });
+    if (text.includes("decide whether it is settled")) return ctx.say(++checks === 1 ? "CONTINUE: where the cache lives" : "SETTLED\nthe in-memory cache wins");
+    if (text.includes("You are now the judge")) return ctx.say("3. THE PLAN\n1. in-memory cache\n4. Risks: none");
+    if (text.includes("Critique")) return ctx.say(`REVISED-${ctx.agent}`);
+    if (text.includes("[codemax debate]")) return ctx.say(`PLAN-${ctx.agent}`);
+    await ctx.say("main got it");
+  }, { height: 40 });
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  const pick = async (filter: string, until: string) => {
+    await h.setup.mockInput.typeText(filter);
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    return h.frame((f) => f.includes(until), 10000);
+  };
+  try {
+    await h.send("/debate cache the API");
+    await h.frame((f) => f.includes("Debate: who argues?"));
+    await pick("add", "Which agent?");
+    await pick("codex", "2. Codex");
+    // Rounds: 1 → 2 → 3 → 5 → until the judge is satisfied.
+    for (const want of ["2 argument rounds", "3 argument rounds", "5 argument rounds", "until the judge is satisfied"]) await pick("rounds", `Rounds: ${want}`);
+    const f = await h.frame((f) => f.includes("up to"));
+    expect(f).toMatch(/until the judge finds the better plan: \d+ turns or more, up to \d+/);
+    await pick("start", "settled after 2 argument rounds");
+    await h.frame((f) => f.includes("The debate agreed on a plan"), 20000);
+    expect(checks).toBe(2);
+    // Round 3 argued what the judge said was open.
+    const round3 = seen.filter((x) => x.text.includes("Critique") && x.text.includes("Round 3"));
+    expect(round3.length).toBe(2);
+    expect(round3[0]!.text).toContain("still open; argue them first: where the cache lives");
+  } finally { await h.cleanup(); }
+}, 40000);
+
+test("the empty prompt shows a different feature tip after each message, skipping ones this setup can't use", async () => {
+  const { TIPS, nextTip } = await import("../src/chat/tips.ts");
+  const one = { agents: 1, checks: false, hotkey: "ctrl+^" };
+  const seen = new Set<string>();
+  let i = 0;
+  for (let k = 0; k < TIPS.length; k++) {
+    const t = nextTip(i, one);
+    i = t.index;
+    seen.add(t.text);
+  }
+  expect([...seen].some((t) => t.includes("/debate"))).toBe(false); // needs two agents
+  expect([...seen].some((t) => t.includes("/verify"))).toBe(false); // needs a check command
+  expect(nextTip(TIPS.findIndex((t) => t.text.includes("/debate")) - 1, { agents: 2, checks: true, hotkey: "ctrl+^" }).text).toBe("Tip: /debate <goal> · 2-3 agents argue out a plan before anything is built · / for commands");
+  const h = await harness(async (_t, ctx) => ctx.say("ok"));
+  try {
+    expect(h.setup.captureCharFrame()).toContain('❯ Try "fix the failing test"');
+    await h.send("first");
+    await h.frame((f) => /❯ Tip: /.test(f));
+    const tipA = (h.app as any).input.placeholder;
+    await h.frame((f) => f.includes("ok"));
+    await h.send("second");
+    await h.frame(() => (h.app as any).input.placeholder !== tipA);
+    expect((h.app as any).input.placeholder).toMatch(/^Tip: .* · \/ for commands$/);
+  } finally { await h.cleanup(); }
+}, 20000);
+
+test("the prompt keeps the keyboard: after it loses focus (a click elsewhere), the next keys still type into it", async () => {
+  const h = await harness(async (_t, ctx) => ctx.say("ok"));
+  try {
+    const input = (h.app as any).input;
+    input.blur();
+    expect(input.focused).toBe(false);
+    await h.setup.mockInput.typeText("hello");
+    await h.frame(() => input.plainText === "hello");
+    expect(input.focused).toBe(true);
+  } finally { await h.cleanup(); }
+}, 20000);

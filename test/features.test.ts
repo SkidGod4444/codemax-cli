@@ -600,10 +600,10 @@ test("21. side agent: reviews each working turn, notes wait above the prompt (1 
     expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(1);
     expect((h.app as any).notePanel.count).toBe(1);
     for (let i = 0; i < "2 more tests please".length; i++) h.setup.mockInput.pressBackspace();
-    await h.frame((f) => f.includes('❯ Try "fix the failing test"'));
+    await h.frame((f) => /❯ (Try "fix the failing test"|Tip: )/.test(f));
     // A lone digit, then a pause: it acts on the note and leaves the prompt.
     await h.setup.mockInput.typeText("1");
-    f = await h.frame((f) => f.includes("Thin evidence") && f.includes("1 collapse") && f.includes('❯ Try "fix the failing test"'));
+    f = await h.frame((f) => f.includes("Thin evidence") && f.includes("1 collapse") && /❯ (Try "fix the failing test"|Tip: )/.test(f));
     expect(f).toContain("Consider running it twice");
     expect(h.prompts.filter((p) => p.agent === "claude")).toHaveLength(1); // nothing was sent
     await h.setup.mockInput.typeText("2");
@@ -1006,9 +1006,9 @@ test("34. the prompt grows as you type past one line, keeps the start in view, a
     expect(end - top).toBeGreaterThanOrEqual(1);
     expect(rows[end + 1]).toMatch(/^─+$/); // the box border sits right below the last line
     h.setup.mockInput.pressEnter();
-    await h.frame((f) => f.includes("got it") && f.includes('❯ Try "fix the failing test"'));
+    await h.frame((f) => f.includes("got it") && /❯ (Try "fix the failing test"|Tip: )/.test(f));
     const after = (await h.frame((f) => f.includes("got it"))).split("\n");
-    const p = after.findIndex((r) => r.startsWith('❯ Try "fix the failing test"'));
+    const p = after.findIndex((r) => /^❯ (Try "fix the failing test"|Tip: )/.test(r));
     expect(after[p + 1]).toMatch(/^─+$/); // back to one line
   } finally { await h.cleanup(); }
 }, 30000);

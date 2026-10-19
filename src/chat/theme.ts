@@ -110,16 +110,6 @@ export function applyTheme(mode: ThemeName) {
 
 export const VERBS = ["Thinking", "Pondering", "Brewing", "Weaving", "Crunching", "Sketching", "Tinkering", "Composing", "Mulling", "Noodling", "Percolating", "Assembling"];
 export const DONE_VERBS = ["Worked", "Cooked", "Crunched", "Pondered", "Tinkered", "Composed"];
-export const TIPS = [
-  "Ctrl+^ switches agent and hands over the conversation",
-  "Ctrl+O expands tool output and thinking",
-  "/ask codex <msg> asks another agent without switching",
-  "/undo reverts the files the last turn changed",
-  "@file attaches a file's contents to your message",
-  "!cmd runs a shell command and attaches its output",
-  "/usage shows what each plan has covered today",
-];
-
 export function pick<T>(arr: readonly T[], seed = Date.now()): T {
   return arr[seed % arr.length]!;
 }

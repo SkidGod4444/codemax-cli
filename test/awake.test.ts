@@ -36,7 +36,7 @@ test("macOS: on holds caffeinate tied to codemax's pid; off stops it", async () 
   const a = new Awake(sys.deps);
   const st = await a.set("on");
   expect(st.mode).toBe("on");
-  expect(sys.spawned[0]!.cmd).toBe("caffeinate -ims -w 4242");
+  expect(sys.spawned[0]!.cmd).toBe("caffeinate -dims -w 4242"); // the display too: no screen saver
   expect(sys.ran).toEqual([]); // no setting touched
   expect(st.notes.join(" ")).toContain("block a shutdown");
   await a.set("off");
@@ -169,7 +169,7 @@ test("Windows: SetThreadExecutionState helper; lid action set to do-nothing and 
   const sys = fakeSystem("win32", (c) => (c.startsWith("powercfg /q") ? { out: q } : {}));
   const a = new Awake(sys.deps);
   const st = await a.set("lid");
-  expect(sys.spawned[0]!.cmd).toContain("SetThreadExecutionState([uint32]2147483649)");
+  expect(sys.spawned[0]!.cmd).toContain("SetThreadExecutionState([uint32]2147483651)");
   expect(sys.spawned[0]!.cmd).toContain("Get-Process -Id 4242");
   expect(sys.ran).toContain("powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0");
   expect(sys.ran).toContain("powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0");
