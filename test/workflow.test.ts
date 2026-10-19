@@ -675,8 +675,9 @@ test("drag and drop into the prompt: an image goes to the agent as an image, a f
   try {
     writeFileSync(join(h.repo, "app.ts"), "code");
     await h.setup.mockInput.typeText("compare ");
-    // What Terminal.app pastes when three files are dropped at once.
-    await h.setup.mockInput.pasteBracketedText(`${png.replace(/ /g, "\\ ")} ${join(drops, "spec.txt")} ${join(h.repo, "app.ts")}`);
+    // What Terminal.app pastes when three files are dropped at once (Windows Terminal quotes them).
+    const shot = process.platform === "win32" ? `"${png}"` : png.replace(/ /g, "\\ ");
+    await h.setup.mockInput.pasteBracketedText(`${shot} ${join(drops, "spec.txt")} ${join(h.repo, "app.ts")}`);
     let f = await h.frame((f) => f.includes("[Image #1]"));
     expect((h.app as any).input.plainText).toBe("compare [Image #1] [File #2: spec.txt] @app.ts ");
     h.setup.mockInput.pressEnter();

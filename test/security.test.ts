@@ -95,28 +95,32 @@ test("Antigravity: a registry version that is not a plain version string is refu
 
 test("places that hold secrets are recognised (an agent reading one outside the project is asked about)", async () => {
   const { secretPlace } = await import("../src/core/paths.ts");
-  const home = "/Users/someone";
-  expect(secretPlace(`${home}/.ssh/id_ed25519`, home)).toBe("SSH keys");
-  expect(secretPlace(`${home}/.aws/credentials`, home)).toBe("AWS credentials");
-  expect(secretPlace(`${home}/.codex/auth.json`, home)).toBe("Codex login");
-  expect(secretPlace(`${home}/Library/Application Support/Google/Chrome/Default/Cookies`, home)).toBe("Chrome profiles");
-  expect(secretPlace(`/srv/app/.env.production`, home)).toBe("an environment file (.env)");
-  expect(secretPlace(`/tmp/server.pem`, home)).toBe("a private key");
+  // Native paths, so this holds on Windows too.
+  const home = join(tmpdir(), "someone");
+  const at = (...p: string[]) => join(home, ...p);
+  expect(secretPlace(at(".ssh", "id_ed25519"), home)).toBe("SSH keys");
+  expect(secretPlace(at(".aws", "credentials"), home)).toBe("AWS credentials");
+  expect(secretPlace(at(".codex", "auth.json"), home)).toBe("Codex login");
+  expect(secretPlace(at("Library", "Application Support", "Google", "Chrome", "Default", "Cookies"), home)).toBe("Chrome profiles");
+  expect(secretPlace(join(tmpdir(), "srv", ".env.production"), home)).toBe("an environment file (.env)");
+  expect(secretPlace(join(tmpdir(), "server.pem"), home)).toBe("a private key");
   // Ordinary reads outside the project go through.
-  expect(secretPlace(`${home}/code/other-repo/src/index.ts`, home)).toBeNull();
-  expect(secretPlace(`/usr/local/lib/node_modules/typescript/lib/tsc.js`, home)).toBeNull();
-  expect(secretPlace(`${home}/.sshconfig-notes.md`, home)).toBeNull(); // a prefix is not the folder
+  expect(secretPlace(at("code", "other-repo", "src", "index.ts"), home)).toBeNull();
+  expect(secretPlace(join(tmpdir(), "lib", "node_modules", "typescript", "tsc.js"), home)).toBeNull();
+  expect(secretPlace(at(".sshconfig-notes.md"), home)).toBeNull(); // a prefix is not the folder
 });
 
 test("drag and drop: what terminals paste for a dropped file is read as its path", async () => {
   const { splitDropped, droppedFiles, imageType } = await import("../src/chat/drop.ts");
-  expect(splitDropped("/Users/me/My\\ Shot.png")).toEqual(["/Users/me/My Shot.png"]); // Terminal.app, iTerm2, Ghostty
+  // Backslash escapes are macOS / Linux terminals' (on Windows a backslash is a path separator).
+  if (unix) expect(splitDropped("/Users/me/My\\ Shot.png")).toEqual(["/Users/me/My Shot.png"]); // Terminal.app, iTerm2, Ghostty
   expect(splitDropped("'/Users/me/My Shot.png' '/tmp/b.pdf'")).toEqual(["/Users/me/My Shot.png", "/tmp/b.pdf"]); // VS Code, Warp
   expect(splitDropped('"/tmp/a b.jpg"')).toEqual(["/tmp/a b.jpg"]);
-  expect(splitDropped("file:///Users/me/My%20Shot.png")).toEqual(["/Users/me/My Shot.png"]);
+  expect(splitDropped(unix ? "file:///Users/me/My%20Shot.png" : "file:///C:/Users/me/My%20Shot.png")).toEqual([unix ? "/Users/me/My Shot.png" : "C:/Users/me/My Shot.png"]);
   expect(splitDropped("/tmp/a.png\n/tmp/b.png")).toEqual(["/tmp/a.png", "/tmp/b.png"]);
   const exists = (p: string) => ["/tmp/a.png", "/tmp/b.png", "/Users/me/My Shot.png"].includes(p);
-  expect(droppedFiles("/Users/me/My\\ Shot.png ", exists)).toEqual(["/Users/me/My Shot.png"]);
+  if (unix) expect(droppedFiles("/Users/me/My\\ Shot.png ", exists)).toEqual(["/Users/me/My Shot.png"]);
+  expect(droppedFiles(`"/Users/me/My Shot.png"`, exists)).toEqual(["/Users/me/My Shot.png"]);
   expect(droppedFiles("/tmp/a.png /tmp/b.png", exists)).toEqual(["/tmp/a.png", "/tmp/b.png"]);
   // Ordinary text, a missing file or a relative path stays a normal paste.
   expect(droppedFiles("look at /tmp/a.png please", exists)).toBeNull();

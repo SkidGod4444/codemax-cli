@@ -404,8 +404,10 @@ test("codex: images dropped into the prompt go as localImage input", async () =>
 test("edit diffs: Antigravity's client_edit_file (recorded from agy_acp_server 1.4.1); no trailing blank line; unchanged files say so", async () => {
   const { contentDiff, simpleDiff } = await import("../src/engines/acp.ts");
   // The permission request's content, as Antigravity sends it.
-  const content = [{ path: "/repo/notes.txt", oldText: "line one\noriginal\nline three\n", newText: "line one\nedited\nline three\n", _meta: { kind: "modify" }, type: "diff" }];
-  expect(contentDiff(content, "/repo")).toBe("--- notes.txt\n+++ notes.txt\n@@ line 1 @@\n line one\n-original\n+edited\n line three");
+  const { resolve, join } = await import("node:path");
+  const repo = resolve("/repo"); // C:\repo on Windows
+  const content = [{ path: join(repo, "notes.txt"), oldText: "line one\noriginal\nline three\n", newText: "line one\nedited\nline three\n", _meta: { kind: "modify" }, type: "diff" }];
+  expect(contentDiff(content, repo)).toBe("--- notes.txt\n+++ notes.txt\n@@ line 1 @@\n line one\n-original\n+edited\n line three");
   expect(simpleDiff("a.txt", "same\n", "same\n")).toContain("(no change");
   expect(simpleDiff("new.txt", null, "x\ny\n")).toBe("--- /dev/null\n+++ new.txt\n+x\n+y");
 });
