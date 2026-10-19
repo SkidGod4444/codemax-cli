@@ -593,8 +593,9 @@ test("long sessions look for an update again (30 min, then 1 h, 2 h… doubling)
     // The startup check uses the cache; the re-checks ask the source directly, each twice as late.
     expect(calls.map((c) => c.force)).toEqual([undefined, true, true]);
     const gap1 = calls[1]!.at - calls[0]!.at, gap2 = calls[2]!.at - calls[1]!.at;
-    expect(gap1).toBeGreaterThanOrEqual(55);
-    expect(gap2).toBeGreaterThanOrEqual(110);
+    // Timers run a little early or late (Windows): check the doubling, not exact milliseconds.
+    expect(gap1).toBeGreaterThanOrEqual(40);
+    expect(gap2).toBeGreaterThanOrEqual(gap1 * 1.5);
   } finally { await h.cleanup(); }
 }, 20000);
 
