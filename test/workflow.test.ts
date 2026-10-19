@@ -693,3 +693,18 @@ test("drag and drop into the prompt: an image goes to the agent as an image, a f
     await h.frame(() => (h.app as any).input.plainText === "just some words");
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("automatic handoff never hands the task to an agent that edits without asking (Cursor) without your Enter", async () => {
+  const h = await harness(async (text, ctx) => {
+    if (ctx.agent === "claude" && text.startsWith("work")) throw new Error("You've hit your usage limit · resets 3pm");
+    await ctx.say(`${ctx.agent} did it`);
+  }, { cfg: { autoHandoff: true, order: ["claude", "cursor"] } });
+  (h.app as any).detect.set("cursor", { installed: true, version: "t", engine: true });
+  try {
+    await h.send("work on it");
+    const f = await h.frame((f) => f.includes("waits for your Enter") && f.includes("Continue in Cursor"), 15000);
+    expect(f).not.toContain("handing off to");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("cursor did it"), 15000);
+  } finally { await h.cleanup(); }
+}, 30000);

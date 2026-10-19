@@ -963,8 +963,12 @@ export class ChatApp {
       this.transcript.note(allAgents ? "every agent shares that budget · raise it in ~/.codemax/config.json to continue" : "no other agent is available · /switch to pick one anyway", C.warn);
       return;
     }
-    // "Hand off automatically": the next agent in your order takes over without asking.
-    if (this.config.autoHandoff) {
+    // "Hand off automatically": the next agent in your order takes over without asking. Not an
+    // agent that edits files without asking (Cursor): nobody would approve its edits, so you
+    // confirm that one with Enter.
+    const unasked = EDITS_WITHOUT_ASKING.has(next.agent);
+    if (this.config.autoHandoff && unasked) this.transcript.note(`${getAdapter(next.agent).name} edits files without asking, so this handoff waits for your Enter`, C.warn);
+    if (this.config.autoHandoff && !unasked) {
       this.transcript.note(`handing off to ${this.entryLabel(next)} (next in your handoff order) · /switch to pick another`, C.accent);
       void this.switchTo(next.agent, false, { resumeTask: true, model: next.model });
       return;
