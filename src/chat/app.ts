@@ -119,6 +119,7 @@ export class ChatApp {
   /** `fork`: where the agent's conversation stood at this snapshot, for /rewind (agents that can fork). */
   private checkpoints: (Checkpoint & { agent: AgentId; message?: string; fork?: RewindPoint })[] = [];
   private projectFiles: string[] | null = null;
+  private projectFilesLoading: Promise<string[]> | null = null;
   private side = new Set<Active>();
   private sessionTokens = 0;
   private historyIdx = -1;
@@ -1208,7 +1209,15 @@ export class ChatApp {
   }
 
   private async openFilePalette(filter: string) {
-    if (!this.projectFiles) this.projectFiles = await listProjectFiles(this.cwd).catch(() => []);
+    if (!this.projectFiles) {
+      // One listing for every keystroke after "@", and a listing that finishes late (slow git
+      // on Windows) must not reopen the picker after a file was already picked.
+      this.projectFilesLoading ??= listProjectFiles(this.cwd).catch(() => []);
+      this.projectFiles = await this.projectFilesLoading;
+      const now = this.input.plainText.match(MENTION_RE)?.[2];
+      if (now === undefined) return;
+      filter = now;
+    }
     if (this.paletteKind === "files" && this.palette) return this.palette.setFilter(filter);
     this.closePalette(false);
     this.paletteKind = "files";

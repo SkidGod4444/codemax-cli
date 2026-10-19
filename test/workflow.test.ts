@@ -822,7 +822,7 @@ test("the empty prompt shows a different feature tip after each message, skippin
     await h.frame((f) => f.includes("ok"));
     await h.send("second");
     await h.frame(() => (h.app as any).input.placeholder !== tipA);
-    expect((h.app as any).input.placeholder).toMatch(/^Tip: .* · \/ for commands$/);
+    expect((h.app as any).input.placeholder).toMatch(/^Tip: /); // long tips drop "· / for commands" to fit
   } finally { await h.cleanup(); }
 }, 20000);
 
