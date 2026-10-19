@@ -69,6 +69,8 @@ export interface PermissionRequest {
   kind?: string;
   title: string;
   detail?: string;
+  /** The change an edit would make, as a unified-style diff (uncut; the dialog decides how much to show). */
+  diff?: string;
   options: PermissionOption[];
 }
 
@@ -176,7 +178,21 @@ export interface Engine {
   setModel?(modelId: string): Promise<void>;
   /** Change one of `info.options` (e.g. reasoning effort). */
   setOption?(optionId: string, value: string): Promise<void>;
+  /**
+   * Where the conversation stands now, for a later /rewind to come back to.
+   * Only agents that can cut their own conversation at a message (Claude) have it;
+   * null when this point cannot be returned to.
+   */
+  rewindPoint?(): RewindPoint | null;
+  /** Continue in a copy of the conversation that ends at `point`: the later turns are gone from the agent's memory. */
+  rewindConversation?(point: RewindPoint): Promise<void>;
   close(): Promise<void>;
+}
+
+/** A place in an agent's conversation: after message `messageId`, or before anything (null). */
+export interface RewindPoint {
+  sessionId: string;
+  messageId: string | null;
 }
 
 export interface EngineFactory {

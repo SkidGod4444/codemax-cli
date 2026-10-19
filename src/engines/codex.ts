@@ -33,6 +33,8 @@ export class CodexEngine implements Engine {
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
   private pendingApprovals = new Map<string, { rpcId: number | string; method: string }>();
   private permSeq = 0;
+  /** fileChange items by id: their approval request carries only the item id. */
+  private fileChanges = new Map<string, any[]>();
   private turn: { resolve: (r: StopReason) => void; id?: string } | null = null;
   private threadId: string | null = null;
   private cwd = "";
@@ -173,13 +175,16 @@ export class CodexEngine implements Engine {
       this.pendingApprovals.set(id, { rpcId: m.id, method });
       const p = m.params ?? {};
       const what = method.includes("commandExecution") ? "Run command" : method.includes("fileChange") ? "Edit files" : method.replace(/^item\//, "").replace(/\/requestApproval$/, "");
-      const detail = p.command ? (Array.isArray(p.command) ? p.command.join(" ") : String(p.command)) : p.reason ?? (p.changes ? JSON.stringify(p.changes).slice(0, 1500) : undefined);
+      const changes: any[] | undefined = Array.isArray(p.changes) ? p.changes : p.changes && typeof p.changes === "object" ? Object.entries(p.changes).map(([path, c]: [string, any]) => ({ path, ...c })) : this.fileChanges.get(p.itemId);
+      const diff = method.includes("fileChange") && changes?.length ? changes.map(changeDiff).join("\n") : undefined;
+      const detail = p.command ? (Array.isArray(p.command) ? p.command.join(" ") : String(p.command)) : p.reason ?? (changes?.length ? changes.map((c) => c.path).filter(Boolean).join(", ") : undefined);
       const request: PermissionRequest = {
         id,
         toolCallId: p.itemId,
         kind: method.includes("commandExecution") ? "execute" : method.includes("fileChange") ? "edit" : "other",
         title: what,
         detail,
+        diff,
         options: [
           { id: "accept", label: "Allow once", kind: "allow_once" },
           { id: "acceptForSession", label: "Allow for this session", kind: "allow_always" },
@@ -267,6 +272,10 @@ export class CodexEngine implements Engine {
         if (it.type === "subAgentActivity") {
           if (it.agentThreadId) this.emit({ type: "subagent", id: it.agentThreadId, name: agentName(it.agentPath), status: it.kind === "completed" ? "done" : it.kind === "failed" ? "failed" : "running" });
           break;
+        }
+        if (it.type === "fileChange" && it.id) {
+          if (method === "item/completed") this.fileChanges.delete(it.id);
+          else if (Array.isArray(it.changes)) this.fileChanges.set(it.id, it.changes);
         }
         const status: ToolStatus = method === "item/started" ? "in_progress" : it.status === "failed" || it.status === "declined" ? "failed" : method === "item/completed" ? "completed" : "in_progress";
         const title = it.type === "commandExecution" ? `$ ${Array.isArray(it.command) ? it.command.join(" ") : it.command ?? ""}` : it.type === "fileChange" ? `edit ${(it.changes ?? []).map((c: any) => c.path).join(", ")}` : it.type === "mcpToolCall" ? `${it.server}/${it.tool}` : it.type ?? "tool";
@@ -417,4 +426,14 @@ function classify(msg: string) {
 /** "/root/explorer" → "explorer". */
 function agentName(path: unknown): string | undefined {
   return typeof path === "string" && path ? path.split("/").filter(Boolean).pop() : undefined;
+}
+
+/** One Codex file change as a unified-style diff. Codex sends a unified diff for updates and the file's text for adds. */
+export function changeDiff(c: any): string {
+  const path = String(c?.path ?? "file");
+  const body = String(c?.diff ?? c?.unified_diff ?? c?.content ?? "");
+  const kind = typeof c?.kind === "string" ? c.kind : c?.kind?.type;
+  if (/^(---|\+\+\+|@@|diff --git)/m.test(body) && kind !== "add") return /^(---|diff --git)/.test(body) ? body : `--- ${path}\n+++ ${path}\n${body}`;
+  if (kind === "delete") return [`--- ${path}`, `+++ /dev/null`, ...body.split("\n").filter((l, i, a) => l || i < a.length - 1).map((l) => `-${l}`)].join("\n");
+  return [`--- /dev/null`, `+++ ${path}`, ...body.split("\n").filter((l, i, a) => l || i < a.length - 1).map((l) => `+${l}`)].join("\n");
 }

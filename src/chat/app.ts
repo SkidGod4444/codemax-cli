@@ -10,7 +10,7 @@ import { diffStat } from "../core/git.ts";
 import { isExhausted, quotaLabel } from "../core/quota.ts";
 import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
 import { createEngine, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
-import type { Engine, EngineEvent, PermissionRequest, QuestionRequest } from "../engines/types.ts";
+import type { Engine, EngineEvent, PermissionRequest, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
 import { strippedKeys } from "../engines/env.ts";
 import { blockers } from "../core/doctor.ts";
 import { Transcript, type AgentBlock } from "./transcript.ts";
@@ -22,7 +22,9 @@ import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usag
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
 import { refreshLivePricesIfStale } from "../core/prices-live.ts";
 import { addSpend, budgetLevel, spendToday, type BudgetKey } from "../core/budget.ts";
-import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, type Checkpoint } from "../core/checkpoint.ts";
+import { createCheckpoint, listCheckpoints, restoreCheckpoint, checkpointDiffStat, checkpointChangeCounts, type Checkpoint } from "../core/checkpoint.ts";
+import { appendHistory, loadHistory } from "../core/history.ts";
+import { VERIFY_FIX_CAP, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
 import { platformArgv, shellArgv } from "../core/spawn.ts";
@@ -54,7 +56,7 @@ interface Active {
   name: string;
   engine: Engine;
   /** `model`: the model the agent reported for this turn (usage), when it does. */
-  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string } | null;
+  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string; edited?: boolean } | null;
   replay: AgentBlock | null;
   unsubscribe: () => void;
   mode?: string;
@@ -100,7 +102,9 @@ export class ChatApp {
   private sessionCost = 0;
   private today = new Map<BudgetKey, number>();
   private budgetNotified = new Map<BudgetKey, "warn" | "over">();
-  private checkpoints: (Checkpoint & { agent: AgentId })[] = [];
+  /** Snapshots taken this session, oldest first; `message` is what you typed (for /rewind). */
+  /** `fork`: where the agent's conversation stood at this snapshot, for /rewind (agents that can fork). */
+  private checkpoints: (Checkpoint & { agent: AgentId; message?: string; fork?: RewindPoint })[] = [];
   private projectFiles: string[] | null = null;
   private side = new Set<Active>();
   private sessionTokens = 0;
@@ -110,6 +114,11 @@ export class ChatApp {
   private draft = "";
   private queue: string[] = [];
   private lastCtrlC = 0;
+  private lastEsc = 0;
+  /** The checks running after a turn (Esc stops them); messages sent meanwhile are queued. */
+  private verifying: { cmd: string; stop: () => void } | null = null;
+  /** Failures sent back to the agent for the current task ("fix" mode), capped by VERIFY_FIX_CAP. */
+  private verifyFixes = 0;
   private switching = false;
   /** Set by quit(); async work that resumes afterwards (a handoff being built) stops. */
   private closed = false;
@@ -150,6 +159,7 @@ export class ChatApp {
   ) {
     this.done = new Promise((r) => (this.resolveDone = r));
     this.hotkeys = parseHotkeys(config.hotkeys);
+    this.history = loadHistory(cwd, 200);
     for (const [id, q] of Object.entries(ledger.quota())) this.quota.set(id as AgentId, q);
 
     const root = new BoxRenderable(renderer, { id: "chat-root", width: "100%", height: "100%", flexDirection: "column" });
@@ -199,6 +209,7 @@ export class ChatApp {
       "! to run a shell command  /model to pick a model                    /compact for a handoff summary",
       "@ to attach a file        /undo reverts the last turn's edits        /ask <agent> <msg> for a one-off",
       "ctrl + o expands output   ctrl + ^ switches agent                    /theme dark | light | auto",
+      "ctrl + r searches history esc twice rewinds to an earlier message    /verify runs your checks",
     ])
       this.shortcuts.add(new TextRenderable(renderer, { content: l, fg: C.dim, wrapMode: "none", truncate: true }));
     root.add(this.shortcuts);
@@ -224,6 +235,7 @@ export class ChatApp {
     renderer.on("resize", () => this.safely("resize", () => {
       this.fitInput();
       this.palette?.render();
+      if (this.permission instanceof PermissionDialog) this.permission.relayout();
       this.renderFooter();
     }));
     this.input.focus();
@@ -322,6 +334,12 @@ export class ChatApp {
       this.renderFooter();
       return;
     }
+    if (key.name === "escape" && this.verifying && !this.active?.turn) {
+      key.stopPropagation();
+      this.verifying.stop();
+      this.setFlash("stopping the checks…");
+      return;
+    }
     if (key.name === "escape") {
       if (this.active?.turn) {
         key.stopPropagation();
@@ -330,7 +348,22 @@ export class ChatApp {
       } else if (this.input.plainText) {
         key.stopPropagation();
         this.input.clear();
+      } else {
+        // Esc twice on an empty prompt: pick an earlier message to rewind to (Claude Code's idiom).
+        const now = Date.now();
+        if (now - this.lastEsc < 600) {
+          key.stopPropagation();
+          this.lastEsc = 0;
+          void this.openRewind();
+          return;
+        }
+        this.lastEsc = now;
       }
+      return;
+    }
+    if (key.name === "r" && key.ctrl) {
+      key.stopPropagation();
+      this.openHistorySearch();
       return;
     }
     if (key.name === "o" && key.ctrl) {
@@ -480,7 +513,7 @@ export class ChatApp {
     this.closePalette();
     this.input.clear();
     this.pushHistory(text);
-    const busy = !!this.active?.turn;
+    const busy = !!this.active?.turn || !!this.verifying;
     const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
     if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
       this.enqueue(text);
@@ -494,7 +527,7 @@ export class ChatApp {
     }
     const route = this.routeFor(text);
     if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
-    if (this.active.turn) {
+    if (this.active.turn || this.verifying) {
       this.enqueue(text);
       return;
     }
@@ -515,15 +548,154 @@ export class ChatApp {
     return text;
   }
 
-  private async checkpoint(active: Active, text: string): Promise<Checkpoint | null> {
+  private async checkpoint(active: Active, text: string, message?: string): Promise<Checkpoint | null> {
     if (!this.config.checkpoints) return null;
-    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${text.slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
-    if (cp) this.checkpoints.push({ ...cp, agent: active.agent });
+    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
+    if (cp) this.checkpoints.push({ ...cp, agent: active.agent, message, fork: active.engine.rewindPoint?.() ?? undefined });
     return cp;
+  }
+
+  /**
+   * /rewind (or Esc twice): pick one of your earlier messages and put the files
+   * back the way they were before it, then edit and resend it if you like. The
+   * current state is snapshotted first, so /undo reverses a rewind (the files).
+   * Claude's conversation is cut back too (a fork at its reply before that
+   * message); other agents keep theirs and are told what was rewound.
+   */
+  private async openRewind() {
+    if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
+    if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /rewind", C.warn);
+    if (!this.config.checkpoints) return this.transcript.note("rewind needs snapshots: /config → Snapshots for /undo → on", C.warn);
+    const mine = [...this.checkpoints].reverse().filter((c) => c.message !== undefined && !c.label.startsWith("before rewind: "));
+    const older = (await listCheckpoints(this.cwd, 30)).filter((c) => !this.checkpoints.some((m) => m.sha === c.sha) && /^before \w+: /.test(c.label) && !/^before (rewind: |\w+: handoff to )/.test(c.label));
+    const all = [...mine.map((c) => ({ ...c, text: c.message! })), ...older.map((c) => ({ ...c, agent: c.label.match(/^before (\w+):/)![1] as AgentId, text: c.label.replace(/^before \w+: /, "") }))];
+    if (!all.length) return this.transcript.note("nothing to rewind to yet (snapshots need a git repo)", C.warn);
+    const counts = await checkpointChangeCounts(this.cwd, all.map((c) => c.sha)).catch(() => new Map<string, number>());
+    this.closePalette();
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: "Rewind the files to before which message? · Enter to pick · Esc to cancel",
+      items: all.map((c, i) => {
+        const n = counts.get(c.sha);
+        return {
+          label: c.text.replace(/\s+/g, " ").trim() || "(empty)",
+          description: `${fmtDateTime12(c.ts)} · ${listAdapters(this.config.order).find((a) => a.id === c.agent)?.name ?? c.agent}`,
+          hint: n === undefined ? undefined : n === 0 ? "no changes since" : `${n} file${n === 1 ? "" : "s"} changed since`,
+          value: String(i),
+          weight: all.length - i,
+        };
+      }),
+      maxRows: 10,
+      onPick: (it) => {
+        const c = all[Number(it.value)]!;
+        this.closePalette();
+        this.openRewindChoice(c);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** The current agent can cut its conversation back to this snapshot (same agent, same session). */
+  private conversationRewind(c: { agent: AgentId; fork?: RewindPoint }): Active | null {
+    const a = this.active;
+    if (!a || !c.fork || a.agent !== c.agent || a.engine.session?.id !== c.fork.sessionId || !a.engine.rewindConversation) return null;
+    return a;
+  }
+
+  private openRewindChoice(c: Checkpoint & { agent: AgentId; text: string; fork?: RewindPoint }) {
+    this.paletteKind = "picker";
+    const short = c.text.replace(/\s+/g, " ").slice(0, 50);
+    const convo = this.conversationRewind(c);
+    this.palette = new Palette(this.renderer, {
+      title: convo
+        ? `Rewind to before "${short}" · files and ${convo.name}'s conversation · /undo brings the files back`
+        : `Rewind to before "${short}" · code only: the agent keeps its conversation and is told · /undo reverses it`,
+      items: [
+        { label: "Restore files and edit the message", description: "puts the message back in the prompt", value: "edit", weight: 2 },
+        { label: "Restore files only", value: "files", weight: 1 },
+      ],
+      onPick: (it) => {
+        this.closePalette();
+        void this.rewindTo(c, it.value === "edit");
+      },
+      onClose: () => void this.openRewind(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  private async rewindTo(c: Checkpoint & { agent: AgentId; text: string; fork?: RewindPoint }, edit: boolean) {
+    if (this.active?.turn || this.verifying) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
+    const short = c.text.replace(/\s+/g, " ").slice(0, 60);
+    // The conversation first: when it cannot be cut, the agent is told instead.
+    const convo = this.conversationRewind(c);
+    let cut = false;
+    if (convo) {
+      try {
+        const old = c.fork!.sessionId;
+        await convo.engine.rewindConversation!(c.fork!);
+        cut = true;
+        // The copy keeps the earlier messages (and their ids), so earlier snapshots can still rewind it.
+        const now = convo.engine.session?.id;
+        if (now) for (const m of this.checkpoints) if (m.fork?.sessionId === old) m.fork = { ...m.fork, sessionId: now };
+        this.transcript.note(`${convo.name}'s conversation is back to before "${short}": it no longer remembers the later turns`, C.warn);
+      } catch (e: any) {
+        this.transcript.note(`could not rewind ${convo.name}'s conversation (${String(e?.message ?? e).slice(0, 120)}); it is told about the rewind instead`, C.warn);
+      }
+    }
+    const stat = await checkpointDiffStat(this.cwd, c.sha).catch(() => "");
+    // Snapshots after the rewind point describe undone work.
+    const at = this.checkpoints.findIndex((m) => m.sha === c.sha);
+    if ((stat.trim() || cut) && at >= 0) this.checkpoints.splice(at);
+    if (stat.trim()) {
+      // Snapshot what is there now, so /undo can bring it back.
+      const back = await createCheckpoint(this.cwd, `before rewind: ${c.text.slice(0, 50).replace(/\s+/g, " ")}`).catch(() => null);
+      const r = await restoreCheckpoint(this.cwd, c.sha);
+      if (back) this.checkpoints.push({ ...back, agent: this.active?.agent ?? c.agent });
+      this.transcript.note(`rewound the files to before "${short}" (${fmtDateTime12(c.ts)}) · /undo brings them back`, C.warn);
+      for (const l of stat.split("\n")) this.transcript.note(l);
+      if (r.removed.length) this.transcript.note(`removed ${r.removed.length} new file(s): ${r.removed.slice(0, 5).join(", ")}${r.removed.length > 5 ? "…" : ""}`);
+      if (!cut) this.pendingShell.push(`[codemax] The user rewound the working tree to how it was before their message "${c.text.slice(0, 200)}" (sent ${fmtDateTime12(c.ts)}). Every file change made after that point is undone; treat that later work as not done.`);
+    } else this.transcript.note(`no file changes since "${short}"`);
+    // Handoffs and catch-ups must not present the undone turns as done.
+    if (stat.trim() || cut) this.ledger.journal.rewind(this.active?.agent ?? c.agent, c.sha, c.text);
+    if (edit) {
+      this.input.setText(c.text);
+      this.input.gotoBufferEnd?.();
+    }
+    this.input.focus();
+  }
+
+  /** Ctrl+R: search this project's earlier messages (kept across restarts); Enter puts one in the prompt. */
+  private openHistorySearch() {
+    if (this.permission) return;
+    const entries = [...this.history].reverse();
+    if (!entries.length) return this.setFlash("no earlier messages in this project yet");
+    const draft = this.input.plainText;
+    this.closePalette();
+    this.input.clear();
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: "Search your messages · type to filter · Enter to use · Esc to cancel",
+      items: entries.map((t, i) => ({ label: t.replace(/\s*\n\s*/g, " ⏎ "), value: String(i), weight: entries.length - i })),
+      maxRows: 10,
+      onPick: (it) => {
+        this.closePalette();
+        this.input.setText(entries[Number(it.value)]!);
+        this.input.gotoBufferEnd?.();
+      },
+      onClose: () => {
+        this.closePalette();
+        if (draft) this.input.setText(draft);
+      },
+    }, this.paletteAnchor);
+    this.paletteFiltered = true;
+    this.renderer.root.add(this.palette.box);
   }
 
   private async undo() {
     if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /undo", C.warn);
+    if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /undo", C.warn);
     const cp = this.checkpoints.pop() ?? (await listCheckpoints(this.cwd, 1))[0];
     if (!cp) return this.transcript.note("no checkpoint to restore (checkpoints need a git repo)", C.warn);
     const stat = await checkpointDiffStat(this.cwd, cp.sha);
@@ -535,7 +707,11 @@ export class ChatApp {
     this.transcript.note(`reverted to the snapshot ${cp.label}`, C.warn);
     for (const l of stat.split("\n")) this.transcript.note(l);
     if (r.removed.length) this.transcript.note(`removed ${r.removed.length} new file(s): ${r.removed.slice(0, 5).join(", ")}${r.removed.length > 5 ? "…" : ""}`);
-    this.pendingShell.push("[codemax] The user reverted the file changes from the last turn with /undo. The working tree is back to the state before that turn.");
+    this.pendingShell.push(
+      cp.label.startsWith("before rewind: ")
+        ? "[codemax] The user undid a rewind with /undo: the files are back as they were before it, including changes from turns that may no longer be in your conversation. Check the working tree before relying on what you remember."
+        : "[codemax] The user reverted the file changes from the last turn with /undo. The working tree is back to the state before that turn.",
+    );
   }
 
   private async showCheckpoints() {
@@ -811,21 +987,118 @@ export class ChatApp {
     this.renderFooter();
   }
 
-  private async send(active: Active, text: string) {
+  private async send(active: Active, text: string, o: { shown?: string; verifyFix?: boolean } = {}): Promise<void> {
     if (this.closed) return;
     if (!this.side.has(active)) this.notePanel.setPaused(false);
-    this.transcript.user(text);
+    // A new request from you starts a new task for the automatic check fixes.
+    if (!o.verifyFix && !isForwardedNote(text)) this.verifyFixes = 0;
+    const typed = o.shown ?? text;
+    this.transcript.user(typed);
     text = this.withAttachments(text);
-    const cp = await this.checkpoint(active, text);
+    const cp = await this.checkpoint(active, text, typed);
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
     const rec = new TurnRecorder(this.ledger.journal, active.agent);
     rec.user(text, cp?.sha);
-    await this.runTurn(active, text, { rec });
+    const r = await this.runTurn(active, text, { rec });
+    const fix = r ? await this.verifyAfterTurn(active, r, cp) : null;
+    if (fix) return this.send(active, fix.text, { shown: fix.shown, verifyFix: true });
     await this.drainQueue(active);
   }
 
+  /**
+   * Checks after edits: when this project has a check command and the turn
+   * changed files, run it. A failure is shown and goes with your next message,
+   * or ("fix" mode) is sent straight back to the agent, at most VERIFY_FIX_CAP
+   * times per task so a check the agent cannot fix never loops.
+   */
+  private async verifyAfterTurn(active: Active, r: { stop: StopReason; edited: boolean }, cp: Checkpoint | null): Promise<{ text: string; shown: string } | null> {
+    const cmd = this.config.verify?.[this.cwd];
+    if (!cmd || this.closed || this.active !== active || r.stop === "cancelled" || r.stop === "error") return null;
+    const changed = cp ? !!(await checkpointDiffStat(this.cwd, cp.sha).catch(() => "")).trim() : r.edited;
+    if (!changed) return null;
+    const res = await this.runChecks(cmd, active.agent);
+    if (!res || res.code === 0 || res.stopped || this.closed) return null;
+    const why = res.timedOut ? "timed out" : `exit ${res.code}`;
+    const body = `[codemax checks] \`${cmd}\` failed after your changes (${why}). Output (end):\n${tail(res.output, 120).slice(-6000)}`;
+    if (this.config.verifyOnFail === "fix" && this.verifyFixes < VERIFY_FIX_CAP && this.active === active) {
+      this.verifyFixes++;
+      this.transcript.note(`sending the failure to ${active.name} to fix (${this.verifyFixes}/${VERIFY_FIX_CAP} for this task)`, C.dim);
+      return { text: `${body}\n\nFix the cause, then stop; codemax runs the checks again.`, shown: `fix the failing checks (\`${cmd}\`, ${why})` };
+    }
+    this.pendingShell.push(body);
+    this.transcript.note(
+      this.config.verifyOnFail === "fix" ? `not sent automatically again (${VERIFY_FIX_CAP} tries for this task) · the output goes with your next message` : "the output goes with your next message · /config → When checks fail → send to the agent",
+      C.dimmer,
+    );
+    return null;
+  }
+
+  /** Run the project's checks with a live line under the transcript; Esc stops them. */
+  private async runChecks(cmd: string, agent?: AgentId) {
+    if (this.verifying) {
+      this.transcript.note("the checks are already running", C.dim);
+      return null;
+    }
+    const run = runVerify(cmd, this.cwd);
+    this.verifying = { cmd, stop: run.stop };
+    const t0 = Date.now();
+    const tick = setInterval(() => this.safely("checks", () => this.setWorking(`${pick(G.spinner, Math.floor((Date.now() - t0) / 100))} Running checks · ${cmd} · ${fmtDuration(Date.now() - t0)} · esc to stop`)), 100);
+    this.setWorking(`${pick(G.spinner, 0)} Running checks · ${cmd} · esc to stop`);
+    this.renderFooter();
+    try {
+      const res = await run.done;
+      if (this.closed) return res;
+      const ok = res.code === 0 && !res.stopped;
+      const block = this.transcript.agent();
+      const status = res.stopped ? `stopped after ${fmtDuration(res.ms)}` : res.timedOut ? `timed out after ${fmtDuration(res.ms)}` : ok ? `passed in ${fmtDuration(res.ms)}` : `failed (exit ${res.code}) after ${fmtDuration(res.ms)}`;
+      block.tool(`checks-${t0}`, `Checks · $ ${cmd} · ${status}`, ok ? "completed" : "failed", ok ? undefined : tail(res.output, 15) || "(no output)");
+      // The next agent's resume packet shows whether the work passed its checks.
+      const rec = new TurnRecorder(this.ledger.journal, agent ?? this.active?.agent ?? "claude");
+      rec.tool(`checks-${t0}`, { title: `checks: $ ${cmd}`, kind: "execute", status: ok ? "completed" : "failed", output: tail(res.output, 60) });
+      rec.end("end_turn");
+      return res;
+    } finally {
+      clearInterval(tick);
+      this.verifying = null;
+      this.setWorking(null);
+      this.renderFooter();
+    }
+  }
+
+  /** /verify: run the checks now · /verify <command> sets them for this project · /verify off. */
+  private async verifyCommand(arg: string) {
+    const a = arg.trim();
+    const cur = this.config.verify?.[this.cwd];
+    if (a === "off") {
+      this.setVerify(null);
+      return this.transcript.note("checks after edits: off for this project");
+    }
+    if (a) {
+      this.setVerify(a);
+      return this.transcript.note(`checks after edits: \`${a}\` runs after each turn that changes files · /verify off to stop`);
+    }
+    if (!cur) {
+      const found = verifyCandidates(this.cwd);
+      return this.transcript.note(found.length ? `no checks set for this project · /config → Checks after edits, or /verify <command> (found: ${found.join(" · ")})` : "no checks set for this project · /verify <command>, e.g. /verify npm test", C.warn);
+    }
+    if (this.active?.turn) return this.transcript.note("the agent is working; the checks run when it finishes a turn that changes files", C.warn);
+    const res = await this.runChecks(cur);
+    if (res && res.code !== 0 && !res.stopped) this.pendingShell.push(`[codemax checks] \`${cur}\` failed (exit ${res.code}). Output (end):\n${tail(res.output, 120).slice(-6000)}`);
+  }
+
+  private setVerify(cmd: string | null) {
+    const map = { ...(this.config.verify ?? {}) };
+    if (cmd) map[this.cwd] = cmd;
+    else delete map[this.cwd];
+    this.config.verify = map;
+    saveConfigKey("verify", map);
+  }
+
   private pushHistory(text: string) {
-    if (this.history.at(-1) !== text) this.history.push(text);
+    if (this.history.at(-1) !== text) {
+      this.history.push(text);
+      appendHistory(this.cwd, text);
+    }
     if (this.history.length > 200) this.history.shift();
     this.historyIdx = -1;
     this.draft = "";
@@ -848,6 +1121,8 @@ export class ChatApp {
       { name: "/help", description: "Keyboard shortcuts and commands", run: () => void (this.shortcuts.visible = true) },
       { name: "/new", description: "Start a fresh session with the current agent", run: () => void (this.active && this.switchTo(this.active.agent, true)) },
       { name: "/undo", description: "Revert the files changed by the last agent turn", run: () => void this.undo() },
+      { name: "/rewind", description: "Put the files back to before an earlier message (Esc twice)", run: () => void this.openRewind() },
+      { name: "/verify", description: "Run this project's checks now · /verify <command> sets them · /verify off", run: (a) => void this.verifyCommand(a) },
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
@@ -1374,7 +1649,7 @@ export class ChatApp {
     }
   }
 
-  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean } = {}) {
+  private async runTurn(active: Active, text: string, o: { record?: boolean; rec?: TurnRecorder; journal?: boolean } = {}): Promise<{ stop: StopReason; edited: boolean } | undefined> {
     if (this.closed) return;
     const block = this.transcript.agent();
     const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
@@ -1428,6 +1703,7 @@ export class ChatApp {
       this.pendingOffer = null;
       this.offerHandoff(offer.from, offer.reason, offer.allAgents);
     }
+    return { stop, edited: !!turn?.edited };
   }
 
   private onEngineEvent(active: Active, e: EngineEvent) {
@@ -1457,6 +1733,7 @@ export class ChatApp {
         break;
       case "tool_call":
         active.turn?.tools.add(e.title.split(/[\s(]/)[0] ?? e.title);
+        if (active.turn && (/^(edit|delete|move|fileChange)$/.test(e.kind ?? "") || e.files?.length && e.kind !== "read" && e.kind !== "search")) active.turn.edited = true;
         active.turn?.rec?.tool(e.id, { title: e.title, kind: e.kind, status: e.status, input: e.input, output: e.output, files: e.files });
         target().tool(e.id, e.title, e.status, e.detail);
         if (e.status === "completed" && this.active === active) this.term.toolDone(e.title);
@@ -1717,6 +1994,17 @@ export class ChatApp {
       { key: "sideForward", label: "Side agent notes", value: side.forward, choices: [{ value: "ask", description: "show them above the prompt: 1 expand · 2 discuss · 0 dismiss" }, { value: "auto", description: "send each note to the main agent" }], apply: (v) => this.saveSide({ ...side, forward: v === "auto" ? "auto" : "ask" }) },
       { key: "autoSwitch", label: "Offer a handoff at limits", value: onOff(c.autoSwitch), choices: [{ value: "on" }, { value: "off" }], apply: bool("autoSwitch") },
       { key: "summarizeOnSwitch", label: "Summary before switching", value: onOff(c.summarizeOnSwitch), choices: [{ value: "on", description: "only for history without a step journal" }, { value: "off" }], apply: bool("summarizeOnSwitch") },
+      {
+        key: "verify",
+        label: "Checks after edits",
+        value: c.verify?.[this.cwd] ?? "off",
+        choices: [
+          { value: "off", description: "or type /verify <command> for any other command" },
+          ...[...new Set([...(c.verify?.[this.cwd] ? [c.verify[this.cwd]!] : []), ...verifyCandidates(this.cwd)])].map((cmd) => ({ value: cmd, description: "runs after each turn that changes files (this project)" })),
+        ],
+        apply: (v) => this.setVerify(v === "off" ? null : v),
+      },
+      { key: "verifyOnFail", label: "When checks fail", value: c.verifyOnFail === "fix" ? "send to the agent" : "show", choices: [{ value: "show", description: "show the failure; it goes with your next message" }, { value: "fix", label: "send to the agent", description: `the agent fixes it right away (at most ${VERIFY_FIX_CAP} times per task)` }], apply: (v) => { c.verifyOnFail = v === "fix" ? "fix" : "show"; saveConfigKey("verifyOnFail", c.verifyOnFail); } },
       { key: "checkpoints", label: "Snapshots for /undo", value: onOff(c.checkpoints), choices: [{ value: "on" }, { value: "off", description: "also turns off code diffs in handoffs" }], apply: bool("checkpoints") },
       {
         key: "bell",
@@ -1940,7 +2228,7 @@ export class ChatApp {
     if (!n) return this.transcript.note("no side-agent notes yet");
     if (!a) return this.transcript.note("no main agent to forward to", C.warn);
     const msg = forwardMessage(n.text, n.name);
-    if (a.turn || this.switching) {
+    if (a.turn || this.switching || this.verifying) {
       this.enqueue(msg);
       return;
     }

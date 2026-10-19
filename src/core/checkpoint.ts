@@ -122,6 +122,20 @@ export async function checkpointDiffStat(cwd: string, sha: string): Promise<stri
   return (await run(cwd, ["diff", "--stat", sha, now])).out;
 }
 
+/** How many files differ between each checkpoint and the working tree now (one snapshot of the tree for all). */
+export async function checkpointChangeCounts(cwd: string, shas: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const dir = await gitDir(cwd);
+  if (!dir || !shas.length) return out;
+  const now = await treeOfWorkingDir(cwd, join(dir, "codemax-restore-index"));
+  if (!now) return out;
+  for (const sha of shas) {
+    const r = await run(cwd, ["diff", "--name-only", "--no-renames", sha, now]);
+    if (r.code === 0) out.set(sha, r.out ? r.out.split("\n").length : 0);
+  }
+  return out;
+}
+
 /**
  * The full code change between a checkpoint and the working tree now, new files
  * included (the snapshot uses a private index, so the user's staging is untouched).

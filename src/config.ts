@@ -52,6 +52,10 @@ export interface Config {
   terminalStatus?: boolean;
   /** Desktop notification when an agent waits for you, or a turn longer than bellAfterSeconds ends, while the terminal is not focused. */
   notifications?: boolean;
+  /** Checks run after each main-agent turn that changed files, per project directory: { "/path/to/repo": "bun run test" }. */
+  verify: Record<string, string>;
+  /** When the checks fail: "show" the output (it goes with your next message) or "fix": send it to the agent (at most VERIFY_FIX_CAP times per task). */
+  verifyOnFail: "show" | "fix";
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
   /**
@@ -79,6 +83,8 @@ export const DEFAULT_CONFIG: Config = {
   terminalStatus: true,
   notifications: true,
   sideAgent: { agent: null, forward: "ask" },
+  verify: {},
+  verifyOnFail: "show",
   brief: { turns: 10, maxChars: 8000, turnChars: 1200, resumeChars: 24000 },
 };
 
@@ -101,6 +107,7 @@ export function loadConfig(): Config {
       brief: { ...DEFAULT_CONFIG.brief, ...(raw.brief ?? {}) },
       agentArgs: { ...(raw.agentArgs ?? {}) },
       budgets: { ...(raw.budgets ?? {}) },
+      verify: raw.verify && typeof raw.verify === "object" ? { ...raw.verify } : {},
       sideAgent: { ...DEFAULT_CONFIG.sideAgent, ...(raw.sideAgent ?? {}) },
       routes: Array.isArray(raw.routes) ? raw.routes : [],
     };

@@ -12,6 +12,10 @@ import type { AgentId } from "../adapters/types.ts";
  * Steps are appended as they happen (a turn cut off by a limit still leaves
  * its trail). A step that changes (a tool finishing) is appended again with
  * the same id; readers keep the last copy.
+ *
+ * A rewind step (/rewind) takes back everything from the user message it
+ * names: readers never see the undone steps, only the rewind itself, so a
+ * handoff never presents undone work as done.
  */
 
 export type Outcome = "done" | "cancelled" | "limit" | "error";
@@ -33,6 +37,7 @@ export type Step = Base &
     | { kind: "plan"; entries: { content: string; status: string }[] }
     | { kind: "end"; outcome: Outcome; detail?: string; inFlight?: string[] }
     | { kind: "handoff"; from?: AgentId; reason?: string; mode: "packet" | "catchup"; chars: number; checkpoint?: string }
+    | { kind: "rewind"; to?: string; text: string }
   );
 
 export type StepOf<K extends Step["kind"]> = Extract<Step, { kind: K }>;
@@ -56,7 +61,7 @@ export class Journal {
     appendFileSync(this.path, JSON.stringify(step) + "\n");
   }
 
-  /** All steps in order, each at its latest version. */
+  /** All steps in order, each at its latest version, without the ones a rewind took back. */
   steps(): Step[] {
     if (!existsSync(this.path)) return [];
     const byId = new Map<string, Step>();
@@ -71,7 +76,23 @@ export class Journal {
         /* skip a torn line */
       }
     }
-    return order.map((id) => byId.get(id)!);
+    const out: Step[] = [];
+    for (const id of order) {
+      const s = byId.get(id)!;
+      if (s.kind === "rewind" && s.to) {
+        const at = out.findIndex((x) => x.id === s.to);
+        if (at >= 0) out.splice(at);
+      }
+      out.push(s);
+    }
+    return out;
+  }
+
+  /** Record a rewind to before the user message that took snapshot `checkpoint`. */
+  rewind(agent: AgentId, checkpoint: string, text: string) {
+    const target = this.steps().find((s) => s.kind === "user" && s.checkpoint === checkpoint);
+    const ts = Date.now();
+    this.append({ id: `rewind:${ts}`, ts, agent, turn: `rewind:${ts}`, kind: "rewind", to: target?.id, text: clip(text, 400)! });
   }
 
   /**
@@ -100,7 +121,7 @@ export class Journal {
   lastSeen(agent: AgentId, steps = this.steps()): number | undefined {
     for (let i = steps.length - 1; i >= 0; i--) {
       const s = steps[i]!;
-      if (s.agent === agent && s.kind !== "handoff" && s.kind !== "user") return s.ts;
+      if (s.agent === agent && s.kind !== "handoff" && s.kind !== "user" && s.kind !== "rewind") return s.ts;
     }
     return undefined;
   }

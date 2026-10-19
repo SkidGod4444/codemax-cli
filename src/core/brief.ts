@@ -40,7 +40,9 @@ export async function buildResumePacket(input: BriefInput, steps: Step[]): Promi
   const plan = [...task.steps].reverse().find((s): s is StepOf<"plan"> => s.kind === "plan");
   const unfinishedPlan = plan?.entries.some((e) => e.status !== "completed");
   const stoppedAgent = lastEnd?.agent ?? from;
-  const inProgress = !lastEnd || lastEnd.outcome !== "done" || !!unfinishedPlan;
+  // A rewind after the last turn undid work: whatever that turn finished is not done any more.
+  const rewound = task.steps.at(-1)?.kind === "rewind";
+  const inProgress = !lastEnd || lastEnd.outcome !== "done" || !!unfinishedPlan || rewound;
   const context = input.purpose === "context";
 
   const head: string[] = [BRIEF_MARKER];
@@ -126,7 +128,8 @@ export async function buildCatchup(input: BriefInput): Promise<string | null> {
   const since = ledger.journal.lastSeen(to, steps);
   if (since === undefined) return null;
   const after = steps.filter((s) => s.ts > since && s.kind !== "handoff");
-  const others = after.filter((s) => s.agent !== to && s.kind !== "user");
+  // A rewind matters to every agent: one that resumes its own session still remembers the undone work.
+  const others = after.filter((s) => (s.agent !== to && s.kind !== "user") || s.kind === "rewind");
   if (!others.length) return null;
   const users = after.filter((s): s is StepOf<"user"> => s.kind === "user");
   const plan = [...after].reverse().find((s): s is StepOf<"plan"> => s.kind === "plan");
@@ -148,7 +151,7 @@ export async function buildCatchup(input: BriefInput): Promise<string | null> {
     for (const e of plan.entries) out.push(`${e.status === "completed" ? "[x]" : e.status === "in_progress" ? "[~]" : "[ ]"} ${e.content}`);
   }
   const budget = Math.floor(config.brief.resumeChars * 0.6);
-  const lines = after.filter((s) => s.agent !== to || s.kind === "user").map((s) => formatStep(s)).filter((l): l is string => !!l);
+  const lines = after.filter((s) => s.agent !== to || s.kind === "user" || s.kind === "rewind").map((s) => formatStep(s)).filter((l): l is string => !!l);
   out.push("", "## What happened (oldest first)", ...lastLines(lines, Math.floor(budget * 0.5)));
   // Diff from the first snapshot taken after this agent stopped: before a user message or a
   // handoff turn (an agent that took over and edited files snapshots first).
@@ -202,6 +205,8 @@ export function formatStep(s: Step): string | null {
       return s.outcome === "done" ? null : `- [${s.agent}] turn ended: ${s.outcome}${s.detail ? ` (${oneLine(s.detail, 160)})` : ""}`;
     case "handoff":
       return `- handed over to ${s.agent}${s.reason ? ` (${s.reason})` : ""}`;
+    case "rewind":
+      return `- USER rewound the files to before their message "${oneLine(s.text, 200)}": every change made after it is undone; treat that work as not done`;
     case "thought":
       return null;
   }

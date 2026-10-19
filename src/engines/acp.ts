@@ -1,6 +1,8 @@
+import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { ClientSideConnection, ndJsonStream, type Client, type Stream } from "@agentclientprotocol/sdk";
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, QuestionAnswer, StopReason } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, QuestionAnswer, RewindPoint, StopReason } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
 import { IS_WINDOWS, platformArgv } from "../core/spawn.ts";
@@ -33,6 +35,11 @@ export interface AcpEngineOptions {
    * subscription login only, never an API-key method). A browser may open the first time.
    */
   signIn?: string[];
+  /**
+   * The agent forks a session at one of its messages (`session/fork` with the
+   * `jetbrains.air.fork` point, the Claude adapter), so /rewind can cut the conversation too.
+   */
+  forkAtMessage?: boolean;
   /** False when the agent is known to auto-approve tools over ACP (surfaced to the user). */
   permissionPrompts?: boolean;
   /**
@@ -58,6 +65,9 @@ export class AcpEngine implements Engine {
   /** cancel() was called during the current turn. */
   private cancelled = false;
   private permSeq = 0;
+  /** Diffs a tool call carried before its permission request (Claude sends the tool call first). */
+  private toolDiffs = new Map<string, string>();
+  private cwd = "";
   private turnActive = false;
   private tail: { read(): UsageSample[] } | null = null;
   private lastAgentCost = 0;
@@ -65,6 +75,17 @@ export class AcpEngine implements Engine {
   private configIds: { model?: string; mode?: string } = {};
   /** Context fill from the latest usage_update this turn; a token fallback for agents with no usage. */
   private turnContext = 0;
+  /** /rewind can fork this agent's session at a message. */
+  private canFork = false;
+  /**
+   * The latest agent message id in this session, and whether the last prompt produced one
+   * and ended cleanly (a turn cut off mid-tool can end on a tool call with no result,
+   * which is no place to resume a conversation from).
+   */
+  private lastMessageId: string | null = null;
+  private idStale = false;
+  /** A new session with nothing in it yet (rewinding to "before anything" is then a new session). */
+  private fresh = false;
 
   constructor(private opts: AcpEngineOptions) {
     this.agent = opts.agent;
@@ -141,6 +162,9 @@ export class AcpEngine implements Engine {
     if (!modes && modeOpt) {
       modes = { currentModeId: modeOpt.currentValue, availableModes: (modeOpt.options ?? []).map((x: any) => ({ id: x.value, name: x.name ?? x.value, description: x.description })) };
     }
+    this.cwd = o.cwd;
+    this.canFork = !!this.opts.forkAtMessage && !!(init as any).agentCapabilities?.sessionCapabilities?.fork;
+    this.fresh = !o.resume || sessionId !== o.resume.id;
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.tail = this.opts.usageTail?.(this.session) ?? null;
     if (o.resume && this.tail) this.tail.read(); // skip history already accounted for
@@ -208,6 +232,7 @@ export class AcpEngine implements Engine {
       kind: p.toolCall?.kind,
       title: p.toolCall?.title ?? p.toolCall?.toolCallId ?? "tool",
       detail: formatInput(p.toolCall?.rawInput),
+      diff: contentDiff(p.toolCall?.content, this.cwd) ?? this.toolDiffs.get(p.toolCall?.toolCallId) ?? inputDiff(p.toolCall?.rawInput, this.cwd),
       options: (p.options ?? []).map((o: any) => ({ id: o.optionId, label: o.name ?? o.optionId, kind: o.kind })),
     };
     const choice = await new Promise<string | null>((resolve) => {
@@ -221,16 +246,20 @@ export class AcpEngine implements Engine {
   private onUpdate(u: any) {
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
+        this.noteMessageId(u.messageId);
         if (u.content?.type === "text") this.emit({ type: "text_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "agent_thought_chunk":
+        this.noteMessageId(u.messageId);
         if (u.content?.type === "text") this.emit({ type: "thought_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "tool_call":
+        this.rememberDiff(u);
         this.trackSubagent(u, true);
         this.emit({ type: "tool_call", id: u.toolCallId, title: u.title ?? u.toolCallId, kind: u.kind, status: mapStatus(u.status), detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
       case "tool_call_update":
+        this.rememberDiff(u);
         this.trackSubagent(u, false);
         this.emit({ type: "tool_update", id: u.toolCallId, status: u.status ? mapStatus(u.status) : undefined, title: u.title, detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
@@ -259,9 +288,48 @@ export class AcpEngine implements Engine {
     }
   }
 
+  private noteMessageId(id: unknown) {
+    if (typeof id !== "string" || !id) return;
+    this.lastMessageId = id;
+    this.idStale = false;
+  }
+
+  rewindPoint(): RewindPoint | null {
+    if (!this.canFork || !this.session || this.turnActive || this.idStale) return null;
+    // Before anything was said, "back to here" is an empty conversation; a resumed one has no known start.
+    if (!this.lastMessageId && !this.fresh) return null;
+    return { sessionId: this.session.id, messageId: this.lastMessageId };
+  }
+
+  async rewindConversation(point: RewindPoint) {
+    if (!this.conn || !this.session || !this.canFork) throw new Error(`${this.opts.name} cannot rewind its conversation`);
+    if (point.sessionId !== this.session.id) throw new Error("that message is in an earlier session");
+    const old = this.session.id;
+    const { currentModel, currentMode } = this.info ?? {};
+    const r: any = point.messageId
+      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: [], _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
+      : await this.conn.newSession({ cwd: this.cwd, mcpServers: [] });
+    this.session = { agent: this.agent, id: r.sessionId, cwd: this.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
+    this.lastMessageId = point.messageId;
+    this.idStale = false;
+    this.fresh = !point.messageId;
+    // The copy's usage was counted in the original session.
+    this.tail = this.opts.usageTail?.(this.session) ?? null;
+    this.tail?.read();
+    this.emit({ type: "session", ref: this.session });
+    await this.conn.closeSession?.({ sessionId: old }).catch(() => {});
+    // A fork keeps the transcript's model and mode; a new session starts on the defaults.
+    const nowModel = r.models?.currentModelId;
+    const nowMode = r.modes?.currentModeId;
+    if (currentModel && nowModel && nowModel !== currentModel) await this.setModel(currentModel).catch(() => {});
+    if (currentMode && nowMode && nowMode !== currentMode) await this.setMode(currentMode).catch(() => {});
+  }
+
   async prompt(text: string): Promise<StopReason> {
     if (!this.conn || !this.session) throw new Error("engine not started");
     this.turnActive = true;
+    this.idStale = true;
+    this.fresh = false;
     this.cancelled = false;
     this.turnContext = 0;
     try {
@@ -271,6 +339,7 @@ export class AcpEngine implements Engine {
       this.emitTurnUsage(res?.usage);
       // Some agents (Antigravity) end an interrupted turn with "end_turn": it was still cancelled.
       const reason = this.cancelled ? "cancelled" : mapStop(res.stopReason);
+      if (reason !== "end_turn") this.idStale = true;
       this.emit({ type: "turn_end", stopReason: reason });
       return reason;
     } catch (e: any) {
@@ -278,6 +347,7 @@ export class AcpEngine implements Engine {
       const data = JSON.stringify(e?.data ?? "");
       const kind = classifyError(`${message} ${data}`);
       this.emit({ type: "error", kind, message: `${message} ${data}`.trim() });
+      this.idStale = true;
       this.emit({ type: "turn_end", stopReason: "error" });
       return "error";
     } finally {
@@ -294,6 +364,13 @@ export class AcpEngine implements Engine {
   }
 
   /** Launch tool call id → whether it runs in the background (its "completed" only means launched). */
+  private rememberDiff(u: any) {
+    const d = contentDiff(u.content, this.cwd);
+    if (!d || !u.toolCallId) return;
+    this.toolDiffs.set(u.toolCallId, d);
+    if (this.toolDiffs.size > 200) this.toolDiffs.delete(this.toolDiffs.keys().next().value!);
+  }
+
   private subagentLaunches = new Map<string, { background: boolean }>();
 
   /**
@@ -512,6 +589,56 @@ export function simpleDiff(path: string, oldText: string | null | undefined, new
   for (let i = s; i <= eb; i++) lines.push(`+${b[i]}`);
   for (let i = ea + 1; i <= Math.min(a.length - 1, ea + ctx); i++) lines.push(` ${a[i]}`);
   return lines.join("\n");
+}
+
+/** The diff entries of ACP tool-call content, as one unified-style diff; undefined when there are none. */
+export function contentDiff(content: unknown, cwd = ""): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const parts = content.filter((c: any) => c?.type === "diff" && c.path).map((c: any) => simpleDiff(shownPath(c.path, cwd), c.oldText, c.newText ?? ""));
+  return parts.length ? parts.join("\n") : undefined;
+}
+
+/**
+ * A diff rebuilt from an edit tool's raw input, for agents whose permission
+ * request carries no diff: Claude-style Edit / MultiEdit / Write and
+ * OpenCode-style edit / write (camelCase keys). Undefined for anything else.
+ */
+export function inputDiff(raw: any, cwd = ""): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const path: unknown = raw.file_path ?? raw.filePath ?? raw.path;
+  if (typeof path !== "string" || !path) return undefined;
+  const abs = isAbsolute(path) || !cwd ? path : join(cwd, path);
+  const current = (() => {
+    try {
+      return existsSync(abs) ? readFileSync(abs, "utf8") : null;
+    } catch {
+      return null;
+    }
+  })();
+  const shown = shownPath(abs, cwd);
+  const edits: { old: string; new: string }[] = Array.isArray(raw.edits)
+    ? raw.edits.map((e: any) => ({ old: String(e.old_string ?? e.oldString ?? ""), new: String(e.new_string ?? e.newString ?? "") }))
+    : typeof (raw.old_string ?? raw.oldString) === "string"
+      ? [{ old: String(raw.old_string ?? raw.oldString), new: String(raw.new_string ?? raw.newString ?? "") }]
+      : [];
+  if (edits.length) {
+    const out = [`--- ${shown}`, `+++ ${shown}`];
+    for (const e of edits) {
+      const at = current && e.old ? current.indexOf(e.old) : -1;
+      out.push(at >= 0 ? `@@ line ${current!.slice(0, at).split("\n").length} @@` : "@@");
+      if (e.old) out.push(...e.old.split("\n").map((l) => `-${l}`));
+      if (e.new) out.push(...e.new.split("\n").map((l) => `+${l}`));
+    }
+    return out.join("\n");
+  }
+  const content = raw.content ?? raw.contents;
+  if (typeof content === "string") return simpleDiff(shown, current, content);
+  return undefined;
+}
+
+/** A path inside the project as a relative one, for diff headers. */
+function shownPath(path: string, cwd: string): string {
+  return cwd && isAbsolute(path) && path.startsWith(cwd + sep) ? relative(cwd, path) : path;
 }
 
 function summarize(u: any): string | undefined {

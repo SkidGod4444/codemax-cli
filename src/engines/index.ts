@@ -81,6 +81,7 @@ const factories: EngineFactory[] = [
         name: "Claude Code",
         cmd: claudeAdapterCmd()!,
         env: { CLAUDE_CODE_EXECUTABLE: Bun.which("claude")! },
+        forkAtMessage: true,
         usageTail: (s) => new ClaudeUsageTail(s.cwd, s.id),
       }),
   },
