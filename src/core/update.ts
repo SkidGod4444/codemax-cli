@@ -88,3 +88,44 @@ export function updatePlan(install = installKind(), platform = process.platform)
       return { cmd: [], manual: "This is a standalone build; download the new release from https://github.com/SkidGod4444/codemax-cli/releases or switch to `npm install -g codemax-cli`.", label: "manual download" };
   }
 }
+
+/** Env vars a restarted codemax reads once: the agent to resume and the version it was updated to. */
+export const RESTART_AGENT_ENV = "CODEMAX_RESTART_AGENT";
+export const UPDATED_TO_ENV = "CODEMAX_UPDATED_TO";
+
+/**
+ * The command that starts this codemax again with the same arguments, minus the
+ * ones a restart must not repeat (`--fresh` would drop the session, `--agent` may
+ * be stale: the agent to resume goes in RESTART_AGENT_ENV). Bun and src/cli.ts
+ * are run directly when they are still there (an update replaces files in place),
+ * otherwise `codemax` from PATH.
+ */
+export function relaunchArgv(argv = process.argv, execPath = process.execPath, script = resolve(import.meta.dir, "..", "cli.ts"), exists = existsSync, which = (b: string) => Bun.which(b)): string[] {
+  const args: string[] = [];
+  const rest = argv.slice(2);
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--fresh") continue;
+    if (a === "--agent" || a === "-a") {
+      i++;
+      continue;
+    }
+    if (a.startsWith("--agent=")) continue;
+    args.push(a);
+  }
+  if (exists(execPath) && exists(script)) return [execPath, script, ...args];
+  return [which("codemax") ?? "codemax", ...args];
+}
+
+/** Run the updated codemax in this terminal, resuming `agent`, and exit with its code. */
+export async function relaunch(agent: string | undefined, version: string | null): Promise<never> {
+  const argv = relaunchArgv();
+  const env: Record<string, string | undefined> = { ...process.env, [UPDATED_TO_ENV]: version ?? "" };
+  if (agent) env[RESTART_AGENT_ENV] = agent;
+  else delete env[RESTART_AGENT_ENV];
+  const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env });
+  // The new codemax owns the terminal now: Ctrl+C is its key, and signals sent to this one are passed on.
+  process.on("SIGINT", () => {});
+  for (const sig of ["SIGTERM", "SIGHUP"] as const) process.on(sig, () => child.kill(sig));
+  process.exit(await child.exited);
+}

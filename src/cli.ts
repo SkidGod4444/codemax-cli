@@ -1,6 +1,6 @@
 import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
 import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
-import { checkForUpdate, installKind, updatePlan } from "./core/update.ts";
+import { checkForUpdate, installKind, RESTART_AGENT_ENV, updatePlan } from "./core/update.ts";
 import { platformArgv } from "./core/spawn.ts";
 import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
@@ -68,7 +68,10 @@ async function main(argv: string[]) {
       }
       const ledger = new Ledger(cwd);
       const agentFlag = flag(args, "--agent") ?? flag(args, "-a");
-      const agent = (agentFlag ?? config.order[0] ?? "claude") as AgentId;
+      // After /update, the new codemax resumes the agent that was in use, without the picker.
+      const resumed = process.env[RESTART_AGENT_ENV];
+      delete process.env[RESTART_AGENT_ENV];
+      const agent = (agentFlag ?? resumed ?? config.order[0] ?? "claude") as AgentId;
       getAdapter(agent); // validate
       if (args.includes("--raw")) {
         const orch = new Orchestrator(config, ledger, cwd);
@@ -76,7 +79,7 @@ async function main(argv: string[]) {
       } else if (args.includes("--tui") || !hasEngine(agent)) {
         await runApp(config, ledger, cwd, agent, args.includes("--fresh"), !!agentFlag);
       } else {
-        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag, !!agentFlag);
+        await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag && !resumed, !!agentFlag);
       }
       process.exit(0);
     }

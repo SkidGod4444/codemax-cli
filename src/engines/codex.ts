@@ -1,5 +1,6 @@
 import type { AgentId } from "../adapters/types.ts";
-import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, StopReason, ToolStatus } from "./types.ts";
+import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, QuestionAnswer, QuestionRequest, RewindPoint, StopReason, ToolStatus } from "./types.ts";
+import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
 import { platformArgv } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
@@ -37,10 +38,25 @@ export class CodexEngine implements Engine {
   private fileChanges = new Map<string, any[]>();
   private turn: { resolve: (r: StopReason) => void; id?: string } | null = null;
   private threadId: string | null = null;
+  /** Questions waiting for an answer: Codex's request_user_input, or an MCP server's form. */
+  private pendingQuestions = new Map<string, { rpcId: number | string; kind: "input" | "mcp"; questions?: any[] }>();
+  /**
+   * Let Codex ask questions in its default mode: the `default_mode_request_user_input`
+   * feature, which Codex marks under development. Only with /config → Agent questions on;
+   * a Codex that rejects the setting gets a session without it.
+   */
+  private questions = false;
+  /** The latest turn on this thread (a /rewind point), and whether the thread is still empty. */
+  private lastTurnId: string | null = null;
+  private fresh = false;
+  /** A rewind is replacing the thread: its new thread's events are not a spawned agent's. */
+  private replacing = false;
   private cwd = "";
   private model: string | undefined;
   /** Cumulative token totals per thread (the main one and each spawned agent's), to emit deltas. */
   private lastTotals = new Map<string, { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number }>();
+  /** Threads (rewind forks) whose totals are not ours to diff against yet. */
+  private newTotals = new Set<string>();
 
   constructor(private opts: CodexEngineOptions = {}) {}
 
@@ -60,16 +76,19 @@ export class CodexEngine implements Engine {
     const init = await this.request("initialize", { clientInfo: { name: "codemax", version: pkg.version }, capabilities: {} });
     this.notify("initialized", {});
 
+    this.questions = o.questions !== false;
     let thread: any;
     if (o.resume) {
       try {
-        thread = (await this.request("thread/resume", { threadId: o.resume.id, cwd: o.cwd, approvalPolicy: "on-request" })).thread;
+        thread = (await this.threadRequest("thread/resume", { threadId: o.resume.id, cwd: o.cwd, approvalPolicy: "on-request" })).thread;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new thread` });
       }
     }
-    if (!thread) thread = (await this.request("thread/start", { cwd: o.cwd, approvalPolicy: "on-request" })).thread;
+    this.fresh = !thread;
+    if (!thread) thread = (await this.threadRequest("thread/start", { cwd: o.cwd, approvalPolicy: "on-request" })).thread;
     this.threadId = thread.id;
+    this.lastTurnId = Array.isArray(thread.turns) && thread.turns.length ? (thread.turns.at(-1)?.id ?? null) : null;
     this.model = thread.model ?? undefined;
     this.session = { agent: "codex", id: thread.id, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     const account: any = await this.request("account/read", {}).catch(() => null);
@@ -137,6 +156,23 @@ export class CodexEngine implements Engine {
     };
   }
 
+  /** Thread settings codemax adds: the question feature when questions are on. */
+  private threadConfig(): { config?: Record<string, unknown> } {
+    return this.questions ? { config: { "features.default_mode_request_user_input": true, suppress_unstable_features_warning: true } } : {};
+  }
+
+  /** thread/start, /resume or /fork with codemax's settings; without the question feature if Codex rejects it. */
+  private async threadRequest(method: string, params: Record<string, unknown>): Promise<any> {
+    try {
+      return await this.request(method, { ...params, ...this.threadConfig() });
+    } catch (e: any) {
+      if (!this.questions || !/feature|config|default_mode_request_user_input/i.test(`${e?.message ?? ""} ${JSON.stringify(e?.data ?? "")}`)) throw e;
+      this.questions = false;
+      this.emit({ type: "log", level: "warn", message: `Codex refused its question feature (${e?.message ?? e}); it will not ask questions in this session` });
+      return this.request(method, params);
+    }
+  }
+
   private request(method: string, params: unknown): Promise<any> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
@@ -170,6 +206,8 @@ export class CodexEngine implements Engine {
 
   private onServerRequest(m: any) {
     const method: string = m.method;
+    if (method === "item/tool/requestUserInput") return this.onUserInput(m);
+    if (method === "mcpServer/elicitation/request") return this.onMcpForm(m);
     if (/requestApproval|Approval/.test(method)) {
       const id = `perm-${++this.permSeq}`;
       this.pendingApprovals.set(id, { rpcId: m.id, method });
@@ -198,6 +236,65 @@ export class CodexEngine implements Engine {
     this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `codemax does not handle ${method}` } }));
   }
 
+  /** Codex's request_user_input: one dialog field per question (pick an option, or type with "Other"). */
+  private onUserInput(m: any) {
+    const p = m.params ?? {};
+    const questions: any[] = Array.isArray(p.questions) ? p.questions : [];
+    if (!this.questions || !questions.length) return this.respond(m.id, { answers: {} });
+    const id = `ask-${++this.permSeq}`;
+    this.pendingQuestions.set(id, { rpcId: m.id, kind: "input", questions });
+    const request: QuestionRequest = {
+      id,
+      message: questions.length === 1 ? "" : "Codex has a few questions",
+      toolCallId: p.itemId,
+      fields: questions.map((q) => {
+        const options = (Array.isArray(q.options) ? q.options : []).map((o: any) => ({ value: String(o.label), label: String(o.label), description: o.description || undefined }));
+        return {
+          key: String(q.id),
+          title: q.header && q.header !== q.question ? String(q.header) : undefined,
+          question: String(q.question ?? q.header ?? q.id),
+          kind: options.length ? "single" : "text",
+          options,
+          otherKey: options.length && q.isOther ? `${q.id}__other` : undefined,
+          required: false,
+        } as QuestionRequest["fields"][number];
+      }),
+    };
+    this.emit({ type: "question_request", request });
+  }
+
+  /** An MCP server's form (Codex relays it); URL forms are declined, as over ACP. */
+  private onMcpForm(m: any) {
+    const p = m.params ?? {};
+    if (!this.questions || p.mode !== "form") return this.respond(m.id, { action: "decline" });
+    const id = `ask-${++this.permSeq}`;
+    const request = parseElicitation(id, p);
+    if (!request.fields.length) return this.respond(m.id, { action: "decline" });
+    this.pendingQuestions.set(id, { rpcId: m.id, kind: "mcp" });
+    this.emit({ type: "question_request", request });
+  }
+
+  answerQuestion(requestId: string, answer: QuestionAnswer) {
+    const q = this.pendingQuestions.get(requestId);
+    if (!q) return;
+    this.pendingQuestions.delete(requestId);
+    if (q.kind === "mcp") return this.respond(q.rpcId, elicitationResponse(answer));
+    // Skipped: no answers, and Codex carries on.
+    const answers: Record<string, { answers: string[] }> = {};
+    if (answer.action === "accept")
+      for (const question of q.questions ?? []) {
+        const other = answer.content[`${question.id}__other`];
+        const v = typeof other === "string" && other.trim() ? other : answer.content[String(question.id)];
+        const list = Array.isArray(v) ? v.map(String) : v === undefined || v === "" ? [] : [String(v)];
+        if (list.length) answers[String(question.id)] = { answers: list };
+      }
+    this.respond(q.rpcId, { answers });
+  }
+
+  private respond(rpcId: number | string, result: unknown) {
+    this.transport?.send(JSON.stringify({ jsonrpc: "2.0", id: rpcId, result }));
+  }
+
   /**
    * Token usage of one thread. Totals are cumulative per thread; the delta is emitted. A spawned
    * agent's thread counts too: it runs on the same Codex plan, so /usage and budgets include it.
@@ -212,7 +309,12 @@ export class CodexEngine implements Engine {
       if (typeof used === "number") this.emit({ type: "usage", usedPercent: used });
       return;
     }
-    const last = this.lastTotals.get(thread) ?? { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
+    const zero = { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
+    let last = this.lastTotals.get(thread) ?? zero;
+    if (this.newTotals.delete(thread)) {
+      const own = p.tokenUsage?.last ?? {};
+      last = { inputTokens: (t.inputTokens ?? 0) - (own.inputTokens ?? 0), cachedInputTokens: (t.cachedInputTokens ?? 0) - (own.cachedInputTokens ?? 0), cacheWriteInputTokens: (t.cacheWriteInputTokens ?? 0) - (own.cacheWriteInputTokens ?? 0), outputTokens: (t.outputTokens ?? 0) - (own.outputTokens ?? 0) };
+    }
     const d = {
       inputTokens: Math.max(0, (t.inputTokens ?? 0) - last.inputTokens),
       cachedInputTokens: Math.max(0, (t.cachedInputTokens ?? 0) - last.cachedInputTokens),
@@ -254,6 +356,8 @@ export class CodexEngine implements Engine {
     // A spawned agent runs on its own thread over this connection: its messages, tools and
     // turn end must never land in (or end) the main turn. They become subagent activity.
     const thread = p?.threadId ?? p?.turn?.threadId ?? (method === "thread/started" ? p?.thread?.id : undefined);
+    // During a rewind no turn runs, so another thread's events are the new copy's, never a spawned agent's.
+    if (this.replacing && thread && thread !== this.threadId) return;
     if (thread && this.threadId && thread !== this.threadId) return this.onChildThread(method, p, thread);
     switch (method) {
       case "item/agentMessage/delta":
@@ -315,8 +419,12 @@ export class CodexEngine implements Engine {
       }
       case "serverRequest/resolved": {
         for (const [id, a] of this.pendingApprovals) if (String(a.rpcId) === String(p.requestId)) this.pendingApprovals.delete(id);
+        for (const [id, q] of this.pendingQuestions) if (String(q.rpcId) === String(p.requestId)) this.pendingQuestions.delete(id);
         break;
       }
+      case "turn/started":
+        if (p.turn?.id) this.lastTurnId = p.turn.id;
+        break;
       default:
         break;
     }
@@ -337,6 +445,8 @@ export class CodexEngine implements Engine {
       const approvalPolicy = this.info?.currentMode === "never" ? "never" : "on-request";
       const res = await this.request("turn/start", { threadId: this.threadId, cwd: this.cwd, input: [{ type: "text", text }], model: this.model, approvalPolicy, ...(this.effort ? { effort: this.effort } : {}) });
       if (this.turn) this.turn.id = res?.turn?.id;
+      if (res?.turn?.id) this.lastTurnId = res.turn.id;
+      this.fresh = false;
     } catch (e: any) {
       const msg = `${e?.message ?? e} ${JSON.stringify(e?.data ?? "")}`.trim();
       this.emit({ type: "error", kind: classify(msg), message: msg });
@@ -352,9 +462,44 @@ export class CodexEngine implements Engine {
     this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id: a.rpcId, result: { decision: optionId } }));
   }
 
+  /** Where this thread stands: after its latest turn (Codex forks a thread through a turn), or empty. */
+  rewindPoint(): RewindPoint | null {
+    if (!this.threadId || this.turn) return null;
+    if (!this.lastTurnId && !this.fresh) return null;
+    return { sessionId: this.threadId, messageId: this.lastTurnId };
+  }
+
+  /** Continue in a fork of the thread through the turn at `point`, or a new thread before the first turn. */
+  async rewindConversation(point: RewindPoint) {
+    if (!this.transport || !this.threadId) throw new Error("Codex is not running");
+    if (point.sessionId !== this.threadId) throw new Error("that message is in an earlier thread");
+    const old = this.threadId;
+    const base = { cwd: this.cwd, approvalPolicy: this.info?.currentMode === "never" ? "never" : "on-request" };
+    this.replacing = true;
+    let thread: any;
+    try {
+      thread = point.messageId
+        ? (await this.threadRequest("thread/fork", { threadId: old, lastTurnId: point.messageId, excludeTurns: true, ...base })).thread
+        : (await this.threadRequest("thread/start", base)).thread;
+    } finally {
+      this.replacing = false;
+    }
+    if (!thread?.id) throw new Error("Codex returned no thread");
+    // A fork's running totals start from some share of the original's: its first update counts
+    // only its own usage (`last`), and later ones continue from the totals it reports.
+    this.newTotals.add(thread.id);
+    this.threadId = thread.id;
+    this.lastTurnId = point.messageId;
+    this.fresh = !point.messageId;
+    this.session = { agent: "codex", id: thread.id, cwd: this.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
+    this.emit({ type: "session", ref: this.session });
+    await this.request("thread/unsubscribe", { threadId: old }).catch(() => {});
+  }
+
   async cancel() {
     if (!this.transport || !this.threadId || !this.turn) return;
     for (const [id] of this.pendingApprovals) this.answerPermission(id, "cancel");
+    for (const [id] of this.pendingQuestions) this.answerQuestion(id, { action: "cancel" });
     await this.request("turn/interrupt", { threadId: this.threadId, turnId: this.turn.id }).catch(() => {});
   }
 
@@ -414,6 +559,7 @@ export class CodexEngine implements Engine {
     const t = this.transport;
     this.transport = null;
     for (const [id] of this.pendingApprovals) this.answerPermission(id, "cancel");
+    for (const [id] of this.pendingQuestions) this.answerQuestion(id, { action: "cancel" });
     if (this.turn) this.finishTurn("cancelled");
     await t?.close();
   }

@@ -7,7 +7,7 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 // Diffs in permission prompts, /rewind, saved prompt history with Ctrl+R, and checks after edits.
 process.env.CODEMAX_HOME = mkdtempSync(join(tmpdir(), "codemax-workflow-home-"));
-const { ChatApp } = await import("../src/chat/app.ts");
+const { ChatApp, selfApprovingMode } = await import("../src/chat/app.ts");
 const { AcpEngine, inputDiff } = await import("../src/engines/acp.ts");
 const { changeDiff } = await import("../src/engines/codex.ts");
 const { Ledger } = await import("../src/core/ledger.ts");
@@ -49,7 +49,7 @@ function newRepo() {
   return repo;
 }
 
-async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog } = {}) {
+async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog; resume?: boolean } = {}) {
   const setup = await createTestRenderer({ width: 110, height: o.height ?? 30 });
   const repo = o.repo ?? newRepo();
   const ledger = new Ledger(repo);
@@ -65,8 +65,8 @@ async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?:
   };
   const send = async (t: string) => { await setup.mockInput.typeText(t); setup.mockInput.pressEnter(); };
   const cleanup = async () => { await app.quit(); setup.renderer.destroy(); };
-  void app.start("claude", true);
-  await frame((f) => f.includes("new session"));
+  void app.start("claude", !o.resume);
+  await frame((f) => f.includes(o.resume ? "resumed" : "new session"));
   return { setup, app, repo, ledger, prompts, frame, send, cleanup };
 }
 
@@ -217,6 +217,38 @@ test("/rewind cuts a forking agent's conversation too: it is not told, and the j
   } finally { await h.cleanup(); }
 }, 30000);
 
+test("/rewind after a restart still cuts the conversation: snapshots keep where it stood", async () => {
+  const log: ForkLog = { forks: [], created: [], promptedIn: [] };
+  const handler: Handler = async (text, ctx) => {
+    if (text.startsWith("second")) writeFileSync(join(repo, "new.txt"), "x\n");
+    await ctx.say(`did ${text.split(" ")[0]}`);
+  };
+  const repo = newRepo();
+  let h = await harness(handler, { fork: log, repo });
+  try {
+    await h.send("first change");
+    await h.frame((f) => f.includes("did first"));
+    await h.send("second change");
+    await h.frame((f) => f.includes("did second"));
+  } finally { await h.cleanup(); }
+  const first = log.created[0]!;
+  h = await harness(handler, { fork: log, repo, resume: true });
+  try {
+    await h.send("/rewind");
+    await h.frame((f) => f.includes("Rewind the files to before which message?"));
+    await h.setup.mockInput.typeText("second");
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    const f = await h.frame((f) => f.includes("Restore files only"));
+    expect(f).toContain("files and Claude Code's conversation");
+    h.setup.mockInput.pressArrow("down");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("no longer remembers the later turns") && f.includes("rewound the files to before"));
+    expect(log.forks).toEqual([{ from: first, messageId: "m-1", to: expect.any(String) }]);
+    expect(existsSync(join(repo, "new.txt"))).toBe(false);
+  } finally { await h.cleanup(); }
+}, 30000);
+
 test("/rewind falls back to telling the agent when its conversation cannot be forked", async () => {
   const log: ForkLog = { forks: [], created: [], promptedIn: [], fail: true };
   const h = await harness(async (text, ctx) => {
@@ -323,4 +355,15 @@ test("check commands are found from the project's own files", () => {
   writeFileSync(join(npm, "package.json"), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
   writeFileSync(join(npm, "go.mod"), "module x");
   expect(verifyCandidates(npm)).toEqual(["go test ./...", "go vet ./..."]);
+});
+
+test("starting in a mode where the agent approves itself (your Claude settings' auto) is pointed out", () => {
+  const claude = [{ id: "default", name: "Default" }, { id: "acceptEdits", name: "Accept Edits" }, { id: "auto", name: "Auto" }, { id: "bypassPermissions", name: "Bypass Permissions" }];
+  expect(selfApprovingMode("auto", claude)).toEqual({ what: '"Auto"', effect: "it acts without asking", ask: "default" });
+  expect(selfApprovingMode("acceptEdits", claude)?.effect).toBe("it edits files without asking");
+  expect(selfApprovingMode("yolo", [{ id: "default", name: "Default" }, { id: "yolo", name: "YOLO" }])?.what).toBe('"YOLO"');
+  expect(selfApprovingMode("default", claude)).toBeNull();
+  expect(selfApprovingMode("plan", claude)).toBeNull();
+  expect(selfApprovingMode("on-request", [])).toBeNull();
+  expect(selfApprovingMode(undefined, claude)).toBeNull();
 });

@@ -1,0 +1,36 @@
+# The full test suite on real macOS, Linux and Windows machines: the chat UI,
+# engines, rewind, checks after edits and the rest, against scripted fake
+# agents (no logins, no network, no quota). Windows is the one place codemax
+# sessions are otherwise untested.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    paths: [package.json, bun.lock, bunfig.toml, tsconfig.json, bin/**, src/**, test/**, .github/workflows/test.yml]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.5
+      # Snapshots and rewind need git to commit; CI machines have no identity.
+      - run: git config --global user.email ci@localhost && git config --global user.name ci && git config --global init.defaultBranch main
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test

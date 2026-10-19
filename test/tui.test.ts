@@ -24,7 +24,10 @@ async function waitText(setup: Awaited<ReturnType<typeof createTestRenderer>>, p
   throw new Error(`timeout; last frame:\n${frame}`);
 }
 
-test("agent pane paints child output, including alt-screen apps", async () => {
+// The embedded-terminal fallback (--tui, --raw) is Unix-only.
+const onWindows = process.platform === "win32";
+
+test.skipIf(onWindows)("agent pane paints child output, including alt-screen apps", async () => {
   const setup = await createTestRenderer({ width: 60, height: 10 });
   try {
     const pane = new AgentPane(setup.renderer, {
@@ -40,7 +43,7 @@ test("agent pane paints child output, including alt-screen apps", async () => {
   }
 }, 20000);
 
-test("app: status bar, hotkey opens menu, Esc closes, x quits", async () => {
+test.skipIf(onWindows)("app: status bar, hotkey opens menu, Esc closes, x quits", async () => {
   const setup = await createTestRenderer({ width: 100, height: 20 });
   const repo = mkdtempSync(join(tmpdir(), "codemax-tui-repo-"));
   Bun.spawnSync(["git", "init", "-q"], { cwd: repo });

@@ -51,10 +51,14 @@ export interface Checkpoint {
   sha: string;
   label: string;
   ts: number;
+  /** Where the agent's conversation stood (for /rewind after a restart), kept in the snapshot's message. */
+  fork?: { agent?: string; sessionId: string; messageId: string | null };
 }
 
+const FORK_TRAILER = "Codemax-Rewind-Point: ";
+
 /** Snapshot the working tree. Returns null outside a git repo. */
-export async function createCheckpoint(cwd: string, label: string): Promise<Checkpoint | null> {
+export async function createCheckpoint(cwd: string, label: string, fork?: Checkpoint["fork"]): Promise<Checkpoint | null> {
   const dir = await gitDir(cwd);
   if (!dir) return null;
   const index = join(dir, "codemax-checkpoint-index");
@@ -62,12 +66,12 @@ export async function createCheckpoint(cwd: string, label: string): Promise<Chec
   if (!tree) return null;
   const head = await run(cwd, ["rev-parse", "--verify", "-q", "HEAD"]);
   const ident = { GIT_AUTHOR_NAME: "codemax", GIT_AUTHOR_EMAIL: "codemax@localhost", GIT_COMMITTER_NAME: "codemax", GIT_COMMITTER_EMAIL: "codemax@localhost" };
-  const c = await run(cwd, ["commit-tree", tree, ...(head.code === 0 ? ["-p", head.out] : []), "-m", label], ident);
+  const c = await run(cwd, ["commit-tree", tree, ...(head.code === 0 ? ["-p", head.out] : []), "-m", label, ...(fork ? ["-m", FORK_TRAILER + JSON.stringify(fork)] : [])], ident);
   if (c.code !== 0) return null;
   const ts = Date.now();
   await run(cwd, ["update-ref", `refs/codemax/checkpoints/${ts}`, c.out]);
   await pruneCheckpoints(cwd);
-  return { sha: c.out, label, ts };
+  return { sha: c.out, label, ts, ...(fork ? { fork } : {}) };
 }
 
 /** Keep the newest KEEP_CHECKPOINTS refs; delete the rest. */
@@ -105,11 +109,20 @@ export async function restoreCheckpoint(cwd: string, sha: string): Promise<{ res
 }
 
 export async function listCheckpoints(cwd: string, limit = 20): Promise<Checkpoint[]> {
-  const r = await run(cwd, ["for-each-ref", "--sort=-refname", `--count=${limit}`, "--format=%(objectname) %(refname:lstrip=3) %(contents:subject)", "refs/codemax/checkpoints"]);
+  // Fields split by \x1f, records by \x1e: the body (rewind point) may span lines.
+  const r = await run(cwd, ["for-each-ref", "--sort=-refname", `--count=${limit}`, "--format=%(objectname)%1f%(refname:lstrip=3)%1f%(contents:subject)%1f%(contents:body)%1e", "refs/codemax/checkpoints"]);
   if (r.code !== 0 || !r.out) return [];
-  return r.out.split("\n").map((l) => {
-    const [sha, ts, ...rest] = l.split(" ");
-    return { sha: sha!, ts: Number(ts), label: rest.join(" ") };
+  return r.out.split("\x1e").map((rec) => rec.replace(/^\n/, "")).filter(Boolean).map((rec) => {
+    const [sha, ts, label, body] = rec.split("\x1f");
+    const line = (body ?? "").split("\n").find((l) => l.startsWith(FORK_TRAILER));
+    let fork: Checkpoint["fork"];
+    try {
+      const f = line ? JSON.parse(line.slice(FORK_TRAILER.length)) : undefined;
+      if (f && typeof f.sessionId === "string") fork = { agent: typeof f.agent === "string" ? f.agent : undefined, sessionId: f.sessionId, messageId: typeof f.messageId === "string" ? f.messageId : null };
+    } catch {
+      /* not ours */
+    }
+    return { sha: sha!, ts: Number(ts), label: label ?? "", ...(fork ? { fork } : {}) };
   });
 }
 

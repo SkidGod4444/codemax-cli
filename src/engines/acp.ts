@@ -371,7 +371,7 @@ export class AcpEngine implements Engine {
     if (this.toolDiffs.size > 200) this.toolDiffs.delete(this.toolDiffs.keys().next().value!);
   }
 
-  private subagentLaunches = new Map<string, { background: boolean }>();
+  private subagentLaunches = new Map<string, { background: boolean; ids?: string[] }>();
 
   /**
    * Subagents from tool calls. A launch is Claude's Agent/Task tool, OpenCode's task tool or
@@ -389,18 +389,37 @@ export class AcpEngine implements Engine {
     const launch = this.subagentLaunches.get(id);
     if (launch) {
       const st = u.status;
-      if (st === "failed") this.emit({ type: "subagent", id, status: "failed" });
-      else if (st === "completed" && !launch.background) this.emit({ type: "subagent", id, status: "done" });
+      for (const sub of launch.ids ?? [id]) {
+        if (st === "failed") this.emit({ type: "subagent", id: sub, status: "failed" });
+        else if (st === "completed" && !launch.background) this.emit({ type: "subagent", id: sub, status: "done" });
+      }
       return;
     }
     if (!isNew) return;
     const input = u.rawInput ?? {};
+    const title = String(u.title ?? "");
     const tool = String(meta.toolName ?? input._toolName ?? "");
+    // Antigravity: one invoke_subagent call starts each entry of `Subagents` ({ Role, Prompt, TypeName }).
+    // The call completes as soon as they are started and they send nothing of their own, so they
+    // count as running until the turn ends (the main agent waits for their replies within it).
+    if (Array.isArray(input.Subagents) && /invoke_subagent/i.test(`${tool} ${title}`)) {
+      const ids = input.Subagents.map((_: unknown, i: number) => `${id}:${i}`);
+      this.subagentLaunches.set(id, { background: true, ids });
+      input.Subagents.forEach((sub: any, i: number) => {
+        const type = typeof sub?.TypeName === "string" && sub.TypeName !== "self" ? sub.TypeName : "subagent";
+        const task = String(sub?.Role ?? sub?.Prompt ?? "").replace(/\s+/g, " ").trim();
+        this.emit({ type: "subagent", id: ids[i]!, name: type, task: task || undefined, status: "running" });
+      });
+      return;
+    }
     const type = input.subagent_type ?? input.subagentType;
-    const isLaunch = /^(agent|task)$/i.test(tool) || typeof type === "string" || /^Task: /.test(String(u.title ?? ""));
+    // Claude's Agent/Task, OpenCode's task, Cursor's "Task: …", Grok's spawn_subagent (its persona is the kind of agent).
+    const isLaunch = /^(agent|task|spawn_subagent)$/i.test(tool) || typeof type === "string" || /^Task: /.test(title) || /spawn_subagent/i.test(title);
     if (!isLaunch || !(input.prompt || input.description || type)) return;
     this.subagentLaunches.set(id, { background: !!(input.run_in_background ?? input.background) });
-    this.emit({ type: "subagent", id, name: typeof type === "string" && type ? type : input.name ?? "agent", task: input.description ?? String(u.title ?? "").replace(/^Task: /, ""), status: "running" });
+    const name = typeof type === "string" && type ? type : typeof input.persona === "string" && input.persona ? input.persona : input.name ?? "agent";
+    const task = input.description ?? (/spawn_subagent/i.test(title) ? undefined : title.replace(/^Task: /, "")) ?? String(input.prompt ?? "").split("\n")[0];
+    this.emit({ type: "subagent", id, name, task, status: "running" });
   }
 
   /** A spawned agent's own session (agents that run subagents as sessions). */

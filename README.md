@@ -16,7 +16,7 @@
 - **One shared task across every agent.** Every step each agent takes is recorded, so a switch is a resume, not a summary. An agent you return to is caught up on what the others did.
 - **Only the subscriptions you already pay for.** No API keys, no per-token bills, no new account.
 - **Every agent asks before acting.** Edits and commands wait for your approval, just like in each agent's own app, and an edit shows you its diff first.
-- **Undo any turn, or rewind further.** `/undo` rolls back the last reply's changes; **Esc Esc** (or `/rewind`) puts the files back to before any earlier message, and with Claude Code cuts its conversation back too.
+- **Undo any turn, or rewind further.** `/undo` rolls back the last reply's changes; **Esc Esc** (or `/rewind`) puts the files back to before any earlier message, and with Claude Code or Codex cuts its conversation back too.
 - **Checks after every edit.** Pick your test or typecheck command in `/config`: it runs after each turn that changes files, and a failure can go straight back to the agent to fix.
 - **See what you're getting.** `/usage` shows tokens and their API-equivalent value per agent, with daily budgets if you want them.
 - **Free and open source.** Everything stays on your machine.
@@ -94,12 +94,12 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
-| `/update` | Update codemax when a new version is out (also `codemax update`) |
+| `/update` | Update codemax when a new version is out, then restart into it with the same agent and session (`codemax update` updates without starting) |
 | `/config` | Every setting in one panel: theme, keep awake, side agent and its model, handoffs, snapshots… |
 | Side agent | Turn it on in `/config` and pick its agent and model. It reviews the work in the background and speaks up only when something needs attention: its note waits above the prompt, where **1** expands it, **2** sends it to the main agent to discuss, **0** dismisses it. It never uses the main agent's plan unless you allow that in `/config` |
 | `/awake on`, `/awake lid` | Keep the machine from sleeping while agents work; `lid` also with the lid closed |
 | `/undo` | Revert the last turn's changes |
-| **Esc Esc** or `/rewind` | Put the files back to before an earlier message (with Claude Code, its conversation too), and edit and resend it if you like (`/undo` brings the files back) |
+| **Esc Esc** or `/rewind` | Put the files back to before an earlier message (with Claude Code or Codex, its conversation too), and edit and resend it if you like (`/undo` brings the files back) |
 | `/verify` | Run this project's checks now; `/verify <command>` sets them, `/verify off` stops them |
 | `/usage`, `/budget` | Usage and spend per agent |
 | `/model`, `/effort`, **Shift+Tab** | Pick the model or reasoning effort, cycle permission mode |

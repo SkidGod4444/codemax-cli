@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.CODEMAX_HOME = mkdtempSync(join(tmpdir(), "codemax-update-home-"));
-const { checkForUpdate, installKind, isNewer, updatePlan, updateSource } = await import("../src/core/update.ts");
+const { checkForUpdate, installKind, isNewer, relaunchArgv, updatePlan, updateSource } = await import("../src/core/update.ts");
 
 test("version comparison", () => {
   expect(isNewer("0.1.3", "0.1.2")).toBe(true);
@@ -101,4 +101,12 @@ test("models are shown by their full display name everywhere, never the id", asy
   expect(displayModelName("opus", [{ id: "x", name: "Opus 4.6" }, { id: "y", name: "Opus 5.5" }])).toBe("Opus 5.5"); // saved alias
   expect(displayModelName("gpt-6.1-codex", [{ id: "gpt-6.1-codex", name: "GPT-6.1-Codex" }])).toBe("GPT-6.1-Codex");
   expect(displayModelName("grok-4.7")).toBe("grok-4.7");
+});
+
+test("after /update codemax restarts with the same arguments, minus --fresh and a stale --agent", () => {
+  const yes = () => true;
+  expect(relaunchArgv(["bun", "/x/src/cli.ts", "--agent", "codex", "--fresh", "--theme", "dark"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts", "--theme", "dark"]);
+  expect(relaunchArgv(["bun", "/x/src/cli.ts", "-a", "claude"], "/b/bun", "/x/src/cli.ts", yes)).toEqual(["/b/bun", "/x/src/cli.ts"]);
+  // Bun or the script gone (replaced by the update): `codemax` from PATH.
+  expect(relaunchArgv(["bun", "/x/src/cli.ts", "start"], "/gone/bun", "/x/src/cli.ts", (p) => p !== "/gone/bun", () => "/usr/local/bin/codemax")).toEqual(["/usr/local/bin/codemax", "start"]);
 });

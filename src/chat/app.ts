@@ -33,7 +33,7 @@ import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
 import { logoLines } from "./logo.ts";
-import { checkForUpdate, updatePlan } from "../core/update.ts";
+import { checkForUpdate, relaunch, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
@@ -137,6 +137,8 @@ export class ChatApp {
   private autoForwards = new Map<string, number>();
   /** A newer codemax on npm, when the update check found one. */
   private updateAvailable: string | null = null;
+  /** Set by a successful /update: after quitting, runChat starts the new version resuming this agent. */
+  restartAfterQuit: { agent?: AgentId; version: string | null } | null = null;
   /** Update check (tests swap it; it never runs under `bun test`). */
   updateChecker: (current: string) => Promise<string | null> = (current) => (process.env.NODE_ENV === "test" ? Promise.resolve(null) : checkForUpdate(current));
   /** Keep-awake (/awake). Tests swap its system runner. */
@@ -260,6 +262,11 @@ export class ChatApp {
     if (this.config.awake && this.config.awake !== "off") {
       const st = await this.awake.set(this.config.awake).catch(() => null);
       if (st) notes.push(st.mode === "off" ? "keep-awake could not be turned on" : `keeping this machine awake${st.lid ? ", lid closed included" : ""} (/awake off to stop)`, ...st.notes);
+    }
+    const updatedTo = process.env[UPDATED_TO_ENV];
+    if (updatedTo !== undefined) {
+      delete process.env[UPDATED_TO_ENV];
+      notes.push(updatedTo ? `updated to v${updatedTo} and restarted` : "updated and restarted");
     }
     const stripped = strippedKeys();
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
@@ -550,8 +557,9 @@ export class ChatApp {
 
   private async checkpoint(active: Active, text: string, message?: string): Promise<Checkpoint | null> {
     if (!this.config.checkpoints) return null;
-    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
-    if (cp) this.checkpoints.push({ ...cp, agent: active.agent, message, fork: active.engine.rewindPoint?.() ?? undefined });
+    const point = active.engine.rewindPoint?.() ?? undefined;
+    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`, point && { agent: active.agent, ...point }).catch(() => null);
+    if (cp) this.checkpoints.push({ ...cp, agent: active.agent, message, fork: point });
     return cp;
   }
 
@@ -1610,6 +1618,10 @@ export class ChatApp {
       const model = info.currentModel ? ` · ${displayModelName(info.currentModel, info.models)}` : "";
       this.transcript.divider(`${adapter.name}${version ? ` ${version}` : ""}${model} · ${resumed ? "resumed" : "new session"}`);
       if (NO_PERMISSION_PROMPTS.has(agent)) this.transcript.note(grokPermissionNote() ?? `${adapter.name} acts without asking permission`, C.warn);
+      else {
+        const loose = selfApprovingMode(info.currentMode, info.modes);
+        if (loose) this.transcript.note(`${adapter.name} starts in ${loose.what} mode (its own settings): ${loose.effect}, so you won't see those prompts or their diffs. Shift+Tab or /mode to switch${loose.ask ? ` to "${loose.ask}"` : ""}.`, C.warn);
+      }
       this.setWorking(null);
       this.renderFooter();
       this.setTitle();
@@ -2270,7 +2282,10 @@ export class ChatApp {
     if (ok) {
       const to = this.updateAvailable;
       this.updateAvailable = null;
-      this.transcript.note(`updated${to ? ` to ${to}` : ""} · restart codemax (/quit, then codemax) to use the new version`, C.ok);
+      this.transcript.note(`updated${to ? ` to ${to}` : ""} · restarting codemax…`, C.ok);
+      // Quit cleanly (sessions saved, keep-awake released), then runChat starts the new version.
+      this.restartAfterQuit = { agent: this.active?.agent, version: to };
+      return void this.quit();
     } else this.transcript.error(`update failed · run it yourself: ${plan.cmd.map((c) => c.join(" ")).join(" && ")}`);
     this.renderFooter();
   }
@@ -2451,6 +2466,20 @@ export class ChatApp {
 }
 
 /**
+ * A permission mode in which the agent approves its own actions (Claude's auto,
+ * acceptEdits, bypassPermissions; Antigravity's auto_edit, yolo; Codex's never),
+ * with the mode that asks instead, when the agent lists one.
+ */
+export function selfApprovingMode(mode: string | undefined, modes: { id: string; name: string }[] = []): { what: string; effect: string; ask?: string } | null {
+  if (!mode) return null;
+  const edits = /^(acceptEdits|auto_edit)$/.test(mode);
+  if (!edits && !/^(auto|bypassPermissions|yolo|never)$/.test(mode)) return null;
+  const ask = modes.find((m) => m.id === "default" || m.id === "on-request");
+  const name = modes.find((m) => m.id === mode)?.name ?? mode;
+  return { what: `"${name}"`, effect: edits ? "it edits files without asking" : "it acts without asking", ask: ask?.id };
+}
+
+/**
  * Does the agent's reply end by asking you something ("Option 1 or 2?")? Then a lone
  * digit you type is an answer, not a note key.
  */
@@ -2507,6 +2536,10 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
     } catch {
       /* output already gone */
     }
+  }
+  if (app.restartAfterQuit) {
+    process.stdout.write("codemax: starting the new version…\n");
+    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version);
   }
   process.stdout.write(`codemax: bye. ledger at ${ledger.dir}\n`);
 }

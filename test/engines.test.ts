@@ -234,3 +234,155 @@ test("ACP: a turn you interrupted is 'cancelled' even when the agent ends it wit
   stop();
   expect(await next).toBe("end_turn"); // the next, uninterrupted turn is not marked
 });
+
+test("subagents: Antigravity's invoke_subagent (recorded from agy_acp_server 1.4.1) and Grok's spawn_subagent are listed", async () => {
+  const { clientStream, agentStream } = pipePair();
+  new AgentSideConnection((conn): Agent => ({
+    async initialize() { return { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } as any; },
+    async newSession() { return { sessionId: "s" } as any; },
+    async authenticate() { return {}; },
+    async prompt({ sessionId }) {
+      const up = (update: any) => conn.sessionUpdate({ sessionId, update });
+      // Recorded shape: the launch, then "in progress" with empty input, then completed once started.
+      await up({ sessionUpdate: "tool_call", toolCallId: "t1", title: "Run invoke_subagent?", kind: "other", status: "pending", rawInput: { Subagents: [{ Model: "inherit", Prompt: "Reply with the single word PONG.", Role: "Ping Responder", TypeName: "self", Workspace: "inherit" }, { Prompt: "Read the tests", Role: "Test Reader", TypeName: "explorer" }] } });
+      await up({ sessionUpdate: "tool_call_update", toolCallId: "t1", kind: "other", status: "in_progress", title: "Running invoke_subagent", rawInput: {} });
+      await up({ sessionUpdate: "tool_call_update", toolCallId: "t1", status: "completed", rawOutput: "Subagent invocation" });
+      // Grok: its spawn_subagent tool (persona is the kind of agent).
+      await up({ sessionUpdate: "tool_call", toolCallId: "g1", title: "spawn_subagent", kind: "other", status: "in_progress", rawInput: { persona: "reviewer", prompt: "Review the diff\nCarefully" } });
+      await up({ sessionUpdate: "tool_call_update", toolCallId: "g1", status: "completed" });
+      // A refused launch shows as failed.
+      await up({ sessionUpdate: "tool_call", toolCallId: "t2", title: "Run invoke_subagent?", kind: "other", status: "pending", rawInput: { Subagents: [{ Prompt: "x", Role: "Refused", TypeName: "self" }] } });
+      await up({ sessionUpdate: "tool_call_update", toolCallId: "t2", status: "failed", rawOutput: "Rejected by user" });
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {},
+  }), agentStream);
+  const e = new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: [], stream: clientStream });
+  const subs: EngineEvent[] = [];
+  e.onEvent((x) => x.type === "subagent" && subs.push(x));
+  await e.start({ cwd: "/tmp" });
+  await e.prompt("go");
+  expect(subs).toEqual([
+    { type: "subagent", id: "t1:0", name: "subagent", task: "Ping Responder", status: "running" },
+    { type: "subagent", id: "t1:1", name: "explorer", task: "Test Reader", status: "running" },
+    // Completing the launch call does not end them: they run until the turn ends.
+    { type: "subagent", id: "g1", name: "reviewer", task: "Review the diff", status: "running" },
+    { type: "subagent", id: "g1", status: "done" },
+    { type: "subagent", id: "t2:0", name: "subagent", task: "Refused", status: "running" },
+    { type: "subagent", id: "t2:0", status: "failed" },
+  ]);
+});
+
+/** A scripted codex app-server: `on(method, msg, reply, notify)` answers each client message. */
+function codexFake(on: (m: any, reply: (o: object) => void, n: (method: string, params: object) => void) => void) {
+  let toEngine: ((line: string) => void) | undefined;
+  const sent: any[] = [];
+  const reply = (obj: object) => toEngine?.(JSON.stringify(obj));
+  const n = (method: string, params: object) => reply({ jsonrpc: "2.0", method, params });
+  const transport = {
+    send(line: string) {
+      const m = JSON.parse(line);
+      sent.push(m);
+      queueMicrotask(() => {
+        if (m.method === "initialize") reply({ jsonrpc: "2.0", id: m.id, result: { userAgent: "codemax/0.159.3 (test)" } });
+        else if (m.method === "model/list") reply({ jsonrpc: "2.0", id: m.id, result: { data: [], nextCursor: null } });
+        else if (m.method === "account/read") reply({ jsonrpc: "2.0", id: m.id, result: { account: null } });
+        else on(m, reply, n);
+      });
+    },
+    onLine(cb: (line: string) => void) { toEngine = cb; },
+    async close() {},
+  };
+  return { transport, sent };
+}
+
+test("codex questions: request_user_input (recorded from codex 0.159.3) opens the dialog; the question feature follows /config", async () => {
+  const { transport, sent } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th", model: "gpt-6.1-sol" } } });
+    else if (m.method === "turn/start") {
+      reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "t1" } } });
+      reply({ jsonrpc: "2.0", id: 5, method: "item/tool/requestUserInput", params: { threadId: "th", turnId: "t1", itemId: "call_1", isBlocking: false, autoResolutionMs: null, questions: [
+        { id: "color", header: "Which color?", question: "Which color?", isOther: true, isSecret: false, options: [{ label: "Red", description: "Choose red." }, { label: "Blue", description: "Choose blue." }] },
+        { id: "name", header: "Name", question: "What should it be called?", isOther: false, isSecret: false, options: null },
+      ] } });
+    } else if (m.id === 5) {
+      n("item/agentMessage/delta", { threadId: "th", delta: JSON.stringify(m.result) });
+      n("turn/completed", { threadId: "th", turn: { id: "t1", status: "completed" } });
+    }
+  });
+  const e = new CodexEngine({ transport });
+  let text = "";
+  const asked: any[] = [];
+  e.onEvent((x) => {
+    if (x.type === "text_delta") text += x.text;
+    if (x.type === "question_request") {
+      asked.push(x.request);
+      e.answerQuestion(x.request.id, { action: "accept", content: { color: "Red", color__other: "teal", name: "widget" } });
+    }
+  });
+  await e.start({ cwd: "/tmp", questions: true });
+  expect(sent.find((m) => m.method === "thread/start").params.config).toEqual({ "features.default_mode_request_user_input": true, suppress_unstable_features_warning: true });
+  await e.prompt("ask me");
+  expect(asked[0].fields).toEqual([
+    { key: "color", title: undefined, question: "Which color?", kind: "single", options: [{ value: "Red", label: "Red", description: "Choose red." }, { value: "Blue", label: "Blue", description: "Choose blue." }], otherKey: "color__other", required: false },
+    { key: "name", title: "Name", question: "What should it be called?", kind: "text", options: [], otherKey: undefined, required: false },
+  ]);
+  // "Other" text wins over the picked option.
+  expect(JSON.parse(text)).toEqual({ answers: { color: { answers: ["teal"] }, name: { answers: ["widget"] } } });
+
+  // Questions off: the feature is never turned on, and a question gets no dialog.
+  const off = codexFake((m, reply) => m.method === "thread/start" && reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } }));
+  const e2 = new CodexEngine({ transport: off.transport });
+  await e2.start({ cwd: "/tmp", questions: false });
+  expect(off.sent.find((m) => m.method === "thread/start").params.config).toBeUndefined();
+
+  // A Codex that rejects the feature still starts, without it.
+  const old = codexFake((m, reply) => {
+    if (m.method === "thread/start") reply(m.params.config ? { jsonrpc: "2.0", id: m.id, error: { code: -32600, message: "unknown feature default_mode_request_user_input" } } : { jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+  });
+  const e3 = new CodexEngine({ transport: old.transport });
+  await e3.start({ cwd: "/tmp", questions: true });
+  expect(e3.session?.id).toBe("th");
+  expect(old.sent.filter((m) => m.method === "thread/start").map((m) => !!m.params.config)).toEqual([true, false]);
+});
+
+test("codex rewind: forks the thread through the turn before the message, or starts a new one before the first", async () => {
+  let turn = 0;
+  const { transport, sent } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: `th${sent.filter((x) => x.method === "thread/start").length}` } } });
+    else if (m.method === "thread/fork") {
+      n("thread/started", { thread: { id: "fork1" } }); // the copy, not a spawned agent
+      n("thread/tokenUsage/updated", { threadId: "fork1", tokenUsage: { total: { inputTokens: 600, cachedInputTokens: 0, outputTokens: 30 }, last: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 } } });
+      reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "fork1" } } });
+    } else if (m.method === "thread/unsubscribe") reply({ jsonrpc: "2.0", id: m.id, result: {} });
+    else if (m.method === "turn/start") {
+      const id = `t${++turn}`;
+      reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id } } });
+      // A fork's totals include its share of the original's; only `last` is this update's own.
+      if (m.params.threadId === "fork1") n("thread/tokenUsage/updated", { threadId: "fork1", tokenUsage: { total: { inputTokens: 900, cachedInputTokens: 0, outputTokens: 40 }, last: { inputTokens: 300, cachedInputTokens: 0, outputTokens: 10 } } });
+      n("turn/completed", { threadId: m.params.threadId, turn: { id, status: "completed" } });
+    }
+  });
+  const e = new CodexEngine({ transport });
+  const events: any[] = [];
+  e.onEvent((x) => events.push(x));
+  await e.start({ cwd: "/tmp" });
+  const before = e.rewindPoint();
+  expect(before).toEqual({ sessionId: "th1", messageId: null });
+  await e.prompt("one");
+  const afterOne = e.rewindPoint();
+  expect(afterOne).toEqual({ sessionId: "th1", messageId: "t1" });
+  await e.prompt("two");
+  await e.rewindConversation(afterOne!);
+  expect(sent.find((m) => m.method === "thread/fork").params).toMatchObject({ threadId: "th1", lastTurnId: "t1", excludeTurns: true });
+  expect(e.session?.id).toBe("fork1");
+  expect(events.some((x) => x.type === "subagent")).toBe(false);
+  expect(sent.find((m) => m.method === "thread/unsubscribe").params).toEqual({ threadId: "th1" });
+  await e.prompt("three");
+  expect(sent.filter((m) => m.method === "turn/start").at(-1).params.threadId).toBe("fork1");
+  expect(events.filter((x) => x.type === "usage").map((x) => [x.inputTokens, x.outputTokens])).toEqual([[300, 10]]);
+  // Before the first message: a new, empty thread.
+  await e.rewindConversation({ sessionId: "fork1", messageId: null });
+  expect(e.session?.id).toBe("th2");
+  expect(e.rewindPoint()).toEqual({ sessionId: "th2", messageId: null });
+});
