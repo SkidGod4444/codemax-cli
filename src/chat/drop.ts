@@ -27,7 +27,8 @@ export function splitDropped(text: string): string[] {
     const c = t[i]!;
     if (quote) {
       if (c === quote) quote = null;
-      else if (c === "\\" && quote === '"' && i + 1 < t.length) cur += t[++i];
+      // In double quotes a backslash escapes on macOS / Linux; on Windows it separates folders.
+      else if (c === "\\" && quote === '"' && i + 1 < t.length && process.platform !== "win32") cur += t[++i];
       else cur += c;
     } else if (c === "'" || c === '"') {
       quote = c;

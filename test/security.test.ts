@@ -116,6 +116,8 @@ test("drag and drop: what terminals paste for a dropped file is read as its path
   if (unix) expect(splitDropped("/Users/me/My\\ Shot.png")).toEqual(["/Users/me/My Shot.png"]); // Terminal.app, iTerm2, Ghostty
   expect(splitDropped("'/Users/me/My Shot.png' '/tmp/b.pdf'")).toEqual(["/Users/me/My Shot.png", "/tmp/b.pdf"]); // VS Code, Warp
   expect(splitDropped('"/tmp/a b.jpg"')).toEqual(["/tmp/a b.jpg"]);
+  // Windows Terminal quotes a dropped path; its backslashes are folders, not escapes.
+  if (!unix) expect(splitDropped('"C:\\Users\\me\\My Shot.png" C:\\tmp\\b.txt')).toEqual(["C:\\Users\\me\\My Shot.png", "C:\\tmp\\b.txt"]);
   expect(splitDropped(unix ? "file:///Users/me/My%20Shot.png" : "file:///C:/Users/me/My%20Shot.png")).toEqual([unix ? "/Users/me/My Shot.png" : "C:/Users/me/My Shot.png"]);
   expect(splitDropped("/tmp/a.png\n/tmp/b.png")).toEqual(["/tmp/a.png", "/tmp/b.png"]);
   const exists = (p: string) => ["/tmp/a.png", "/tmp/b.png", "/Users/me/My Shot.png"].includes(p);
