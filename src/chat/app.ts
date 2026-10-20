@@ -352,7 +352,7 @@ export class ChatApp {
         working: !!this.active?.turn,
         agent: this.active?.agent,
         agentCommands: this.active?.commands.length,
-        promptChars: this.input.plainText.length,
+        promptChars: this.closed ? undefined : this.input.plainText.length, // the prompt is gone after quit
       }));
     }
     renderer.keyInput.on("paste", this.onPaste);
