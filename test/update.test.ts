@@ -155,3 +155,12 @@ test.skipIf(process.platform === "win32")("npm launcher: without a Bun 1.3+ on P
   expect(existsSync(join(home, ".codemax", "global-bun.json"))).toBe(true);
   void readlinkSync;
 });
+
+test("restarting an npm install goes through its launcher (which picks the bundled Bun), not this process's Bun", async () => {
+  const { relaunchArgv } = await import("../src/core/update.ts");
+  const script = "/g/lib/node_modules/codemax-cli/src/cli.ts";
+  const yes = () => true;
+  expect(relaunchArgv(["bun", script, "--theme", "dark"], "/g/lib/node_modules/bun/bin/bun.exe", script, yes, (b) => (b === "node" ? "/usr/bin/node" : null))).toEqual(["/usr/bin/node", "/g/lib/node_modules/codemax-cli/bin/codemax.cjs", "--theme", "dark"]);
+  // A source checkout or an installer install restarts with the same Bun, as before.
+  expect(relaunchArgv(["bun", "/x/src/cli.ts"], "/b/bun", "/x/src/cli.ts", yes, () => "/usr/bin/node")).toEqual(["/b/bun", "/x/src/cli.ts"]);
+});

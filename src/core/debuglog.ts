@@ -42,7 +42,8 @@ export function debugEvent(kind: string, fields: Record<string, unknown> = {}) {
     if (existsSync(file) && statSync(file).size > MAX_BYTES) renameSync(file, `${file}.1`);
     const clean: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(fields)) clean[k] = typeof v === "string" ? scrub(v) : v;
-    appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), kind, ...clean }) + "\n", { mode: 0o600 });
+    // The event's name always wins: a field called `kind` or `ts` cannot overwrite it.
+    appendFileSync(file, JSON.stringify({ ...clean, ts: new Date().toISOString(), kind }) + "\n", { mode: 0o600 });
   } catch {
     /* the log must never get in the way */
   }

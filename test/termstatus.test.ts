@@ -67,3 +67,17 @@ test("turning the settings off sends nothing", () => {
   t.turnEnded({ reply: "y", ms: 99_000, longMs: 1 });
   expect(calls).toEqual([]);
 });
+
+test("a question always notifies when you are not looking, in Warp too; so does a reply that asks you something", () => {
+  const { t, calls } = rig(WARP);
+  t.started("cursor", "Cursor Agent", "ses-2");
+  t.focused = false;
+  t.waiting("question", "Which database should I use?", "question");
+  t.waiting("permission", "Run bun test", "execute"); // Warp notifies for this one itself
+  t.asked("Should I also update the migrations?");
+  const own = calls.filter((c) => c.title === "codemax").map((c) => c.message);
+  expect(own).toEqual(["Cursor Agent has a question: Which database should I use?", "Cursor Agent asks: Should I also update the migrations?"]);
+  t.focused = true;
+  t.asked("Anything else?");
+  expect(calls.filter((c) => c.title === "codemax").length).toBe(2); // looking at it: no notification
+});

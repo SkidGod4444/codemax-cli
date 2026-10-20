@@ -36,11 +36,23 @@ export class PerfLog {
     for (const t of this.timers) (t as any).unref?.();
     // Key → screen and selection → screen: the first frame after each one closes it.
     this.onFrame = () => this.frameDone();
+    // Selection lag is timed while dragging: from each move that changes the selection to the
+    // frame that draws it. (OpenTUI's "selection" event only fires on release, after the last
+    // frame, so timing from it measured idle time, not lag.)
     this.onSelection = () => {
-      const now = performance.now();
-      this.selections++;
-      this.pendingSelection ??= now;
+      this.selectionsDone++;
     };
+    const r = renderer as any;
+    if (typeof r.updateSelection === "function") {
+      const orig = r.updateSelection.bind(renderer);
+      this.restoreSelection = () => (r.updateSelection = orig);
+      r.updateSelection = (...args: unknown[]) => {
+        this.selections++;
+        this.selectionMoves++;
+        this.pendingSelection ??= performance.now();
+        return orig(...args);
+      };
+    }
     renderer.on("frame", this.onFrame);
     renderer.on("selection", this.onSelection);
     this.timers.push(setInterval(() => this.flushSecond(), 1000));
@@ -49,6 +61,10 @@ export class PerfLog {
 
   private onFrame: () => void;
   private onSelection: () => void;
+  private restoreSelection: (() => void) | null = null;
+  private selectionsDone = 0;
+  /** Drag updates seen since start. */
+  selectionMoves = 0;
   /** Keys handled but not yet on screen: when each arrived, and its kind. */
   private pendingKeys: { at: number; kind: string }[] = [];
   private pendingSelection: number | null = null;
@@ -80,8 +96,9 @@ export class PerfLog {
    * After codemax handled a printable key that should have gone into the prompt: did it?
    * `before`/`after` are the prompt's lengths (never its text).
    */
-  keyLanded(k: { kind: string; at: number }, expected: boolean, before: number, after: number) {
-    if (expected && after === before) this.write({ event: "key-missed", keyKind: k.kind, promptChars: before });
+  keyLanded(k: { kind: string; at: number; char?: string; focused?: boolean; open?: string }, expected: boolean, before: number, after: number) {
+    // A lost punctuation key names itself (never a letter or digit), with where the keyboard was.
+    if (expected && after === before) this.write({ event: "key-missed", keyKind: k.kind, char: k.kind === "punct" ? k.char : undefined, focusedBefore: k.focused, open: k.open, promptChars: before });
     // Only a key that changed the prompt must reach the screen: time it to the next frame.
     if (after !== before) {
       this.pendingKeys.push(k);
@@ -114,6 +131,11 @@ export class PerfLog {
       this.pendingKeys = this.pendingKeys.filter((k) => now - k.at <= 1000);
     }
     if (this.selections > 120) this.write({ event: "selection-flood", perSecond: this.selections });
+    // A drag with no frame for over a second: the selection was not drawn at all.
+    if (this.pendingSelection !== null && now - this.pendingSelection > 1000) {
+      this.write({ event: "selection-not-drawn", waitedMs: round(now - this.pendingSelection) });
+      this.pendingSelection = null;
+    }
     this.selections = 0;
     this.second = { keys: 0, worstKeyMs: 0, worstSelectionMs: 0 };
   }
@@ -127,6 +149,7 @@ export class PerfLog {
     try {
       this.renderer.off("frame", this.onFrame);
       this.renderer.off("selection", this.onSelection);
+      this.restoreSelection?.();
     } catch {
       /* renderer gone */
     }

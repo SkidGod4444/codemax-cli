@@ -13,7 +13,8 @@ test.skipIf(process.platform === "win32")("passthrough → hotkey menu → close
 
   let out = "";
   const term = new Bun.Terminal({ cols: 100, rows: 30, data: (_t, c) => (out += new TextDecoder().decode(c)) });
-  const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "cli.ts"), "start", "--raw", "--agent", "fake"], {
+  // This Bun, not whatever `bun` is first on PATH (an older one there has no Bun.Terminal).
+  const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli.ts"), "start", "--raw", "--agent", "fake"], {
     cwd: repo,
     terminal: term,
     env: { ...process.env, CODEMAX_FAKE_AGENT: "1", CODEMAX_HOME: home, PS1: "FAKE$ ", ENV: "/dev/null", TERM: "xterm" },

@@ -81,6 +81,7 @@ export class CodexEngine implements Engine {
 
     this.questions = o.questions !== false;
     this.instructions = o.instructions?.trim() || undefined;
+    this.shared = o.mcpServers ?? [];
     let thread: any;
     if (o.resume) {
       try {
@@ -164,8 +165,26 @@ export class CodexEngine implements Engine {
   /** Thread settings codemax adds: the question feature when questions are on. */
   private instructions?: string;
 
+  private shared: import("../core/share.ts").SharedMcpServer[] = [];
+
+  /** Codex's thread config: the question feature, and the shared MCP servers as `mcp_servers.<name>.*` overrides (what `codex -c` takes). */
   private threadConfig(): { config?: Record<string, unknown> } {
-    return this.questions ? { config: { "features.default_mode_request_user_input": true, suppress_unstable_features_warning: true } } : {};
+    const config: Record<string, unknown> = this.questions ? { "features.default_mode_request_user_input": true, suppress_unstable_features_warning: true } : {};
+    for (const s of this.shared) {
+      const key = `mcp_servers.${s.name.replace(/[^A-Za-z0-9_-]+/g, "_")}`;
+      const t = s.transport;
+      if (t.type === "stdio") {
+        config[`${key}.command`] = t.command;
+        config[`${key}.args`] = t.args;
+        if (Object.keys(t.env).length) config[`${key}.env`] = t.env;
+        if (t.cwd) config[`${key}.cwd`] = t.cwd;
+      } else {
+        config[`${key}.url`] = t.url;
+        if (Object.keys(t.headers).length) config[`${key}.http_headers`] = t.headers;
+      }
+    }
+    if (this.shared.length) debugEvent("shared-mcp-given", { agent: "codex", servers: this.shared.length });
+    return Object.keys(config).length ? { config } : {};
   }
 
   /** codemax's few lines, as Codex's own developer instructions (added to its prompt, not replacing it). */
@@ -181,7 +200,10 @@ export class CodexEngine implements Engine {
       if (!this.questions || !/feature|config|default_mode_request_user_input/i.test(`${e?.message ?? ""} ${JSON.stringify(e?.data ?? "")}`)) throw e;
       this.questions = false;
       this.emit({ type: "log", level: "warn", message: `Codex refused its question feature (${e?.message ?? e}); it will not ask questions in this session` });
-      return this.request(method, { ...params, ...this.extra() });
+      const cfg = { ...this.threadConfig().config };
+      delete cfg["features.default_mode_request_user_input"];
+      delete cfg.suppress_unstable_features_warning;
+      return this.request(method, { ...params, ...this.extra(), ...(Object.keys(cfg).length ? { config: cfg } : {}) });
     }
   }
 

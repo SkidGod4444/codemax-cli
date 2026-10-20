@@ -20,6 +20,8 @@ export class TaskPanel {
   readonly box: BoxRenderable;
   private text: TextRenderable;
   private entries: PlanEntry[] = [];
+  /** Ctrl+T: only the summary line ("3 tasks (1 done, …) · ctrl+t to show"). */
+  collapsed = false;
 
   constructor(renderer: CliRenderer) {
     this.box = new BoxRenderable(renderer, { id: "tasks", width: "100%", flexShrink: 0, flexDirection: "column", paddingX: 2, marginTop: 1 });
@@ -50,10 +52,22 @@ export class TaskPanel {
     this.render();
   }
 
+  /** Ctrl+T, as in Claude Code: fold the list to its summary line, or show it again. */
+  toggle(): boolean {
+    this.collapsed = !this.collapsed;
+    this.render();
+    return this.collapsed;
+  }
+
+  /** The task being worked on (Claude sends its "active form": "Running the auth tests"). */
+  get inProgress(): string | undefined {
+    return this.entries.find((e) => e.status === "in_progress")?.content;
+  }
+
   private render() {
     this.box.visible = this.entries.length > 0;
     if (!this.entries.length) return;
-    this.text.content = styleTasks(this.entries);
+    this.text.content = styleTasks(this.entries, this.collapsed ? 0 : TASK_ROWS);
   }
 }
 
@@ -78,6 +92,10 @@ export function styleTasks(entries: PlanEntry[], rows = TASK_ROWS): StyledText {
     else chunks.push(fg(C.text ?? C.dim)(`${G.todo} ${e.content}`));
   }
   const hidden = entries.filter((_, i) => !shown.has(i));
+  if (rows === 0) {
+    chunks.push(dim(" · ctrl+t to show"));
+    return new StyledText(chunks);
+  }
   if (hidden.length) {
     const p = hidden.filter((e) => e.status !== "completed").length;
     const c = hidden.length - p;

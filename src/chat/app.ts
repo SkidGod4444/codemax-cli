@@ -13,7 +13,7 @@ import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
 import { createEngine, EDITS_WITHOUT_ASKING, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
 import type { Engine, EngineEvent, PermissionRequest, PromptImage, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
 import { droppedContents, droppedFiles, imageType, splitDropped } from "./drop.ts";
-import { CODEMAX_HOME, ensureDir, insideDir } from "../core/paths.ts";
+import { CODEMAX_HOME, HOME, ensureDir, insideDir } from "../core/paths.ts";
 import { threadMarkdown } from "../core/export.ts";
 import { basename, join, relative, resolve } from "node:path";
 import { strippedKeys } from "../engines/env.ts";
@@ -45,9 +45,10 @@ import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
 import { critiquePrompt, debateCost, finalPlan, judgePrompt, parseSettled, proposalPrompt, roundsLabel, settledPrompt, UNTIL_SETTLED_MAX, type DebateRounds } from "../core/debate.ts";
 import { logoLines } from "./logo.ts";
-import { checkForUpdate, relaunch, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
+import { checkForUpdate, relaunch, RESTARTED_ENV, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { whatsNew } from "../core/whatsnew.ts";
 import { MAKER, firstName, greeting } from "./greeting.ts";
+import { collectShared, sharedFor, skillsIndex, type Shared } from "../core/share.ts";
 import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12, fmtTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
@@ -131,7 +132,7 @@ function limitWarning(m: Map<string, { usedPercent?: number; resetsAt?: number; 
 }
 
 /** Built-in commands that start agent work or replace the session: they wait for the agent to finish. */
-const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup)\b/i;
+const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup|restart)\b/i;
 /** How long a lone 0 / 1 / 2 must sit in the prompt before it acts on the side agent's note. */
 const NOTE_ARM_MS = 800;
 /** A question left unanswered this long is skipped when `questions` is "timeout". */
@@ -233,7 +234,7 @@ export class ChatApp {
   /** A newer codemax on npm, when the update check found one. */
   private updateAvailable: string | null = null;
   /** Set by a successful /update: after quitting, runChat starts the new version resuming this agent. */
-  restartAfterQuit: { agent?: AgentId; version: string | null } | null = null;
+  restartAfterQuit: { agent?: AgentId; version: string | null; restartOnly?: boolean } | null = null;
   /** Update check (tests swap it; it never runs under `bun test`). */
   updateChecker: (current: string, force?: boolean) => Promise<string | null> = (current, force) => (process.env.NODE_ENV === "test" ? Promise.resolve(null) : checkForUpdate(current, { force }));
   /**
@@ -318,6 +319,7 @@ export class ChatApp {
       "@ to attach a file        /undo reverts the last turn's edits        /ask <agent> <msg> for a one-off",
       "ctrl + o expands output   ctrl + ^ switches agent                    /theme dark | light | auto",
       "ctrl + r searches history esc twice rewinds to an earlier message    /verify runs your checks",
+      "ctrl + t folds the tasks  ctrl + enter sends now (interrupts)        /restart restarts codemax",
     ])
       this.shortcuts.add(new TextRenderable(renderer, { content: l, fg: C.dim, wrapMode: "none", truncate: true }));
     root.add(this.shortcuts);
@@ -414,6 +416,13 @@ export class ChatApp {
       notes.push(updatedTo ? `updated to v${updatedTo} and restarted` : "updated and restarted");
       this.showWhatsNew(VERSION, from);
     }
+    // What the other agents have set up, now shared with every agent (one line; details in the debug log).
+    const sh = this.refreshShared();
+    if (sh.mcp.length || sh.skills.length) {
+      const by = Object.entries(sh.mcp.reduce<Record<string, number>>((m, s) => ((m[s.source.split(":")[0]!] = (m[s.source.split(":")[0]!] ?? 0) + 1), m), {})).map(([k, v]) => `${k} ${v}`).join(", ");
+      notes.push(`every agent gets the others' setup: ${sh.mcp.length} MCP server${sh.mcp.length === 1 ? "" : "s"}${by ? ` (${by})` : ""} and ${sh.skills.length} skill${sh.skills.length === 1 ? "" : "s"}`);
+    }
+    for (const e of sh.errors.slice(0, 3)) notes.push(`could not read ${e.file.replace(HOME, "~")}: ${e.error.slice(0, 80)}`);
     debugEvent("app-start", this.debugInfo());
     // The debug log is on by default: say so once, with what it can contain and how to stop it.
     if (debugLogOn() && !this.config.debugNotified) {
@@ -424,6 +433,10 @@ export class ChatApp {
       } catch {
         /* read-only home */
       }
+    }
+    if (process.env[RESTARTED_ENV]) {
+      delete process.env[RESTARTED_ENV];
+      notes.push("restarted");
     }
     if (process.env.CODEMAX_USAGE_RESET) {
       notes.push("usage history cleared once: earlier figures counted Claude twice or more · /usage counts from now");
@@ -487,7 +500,10 @@ export class ChatApp {
     const perf = this.perf;
     if (!perf || key.eventType === "release") return this.safely("key handling", () => this.handleKey(key));
     const t0 = performance.now();
-    const k = perf.keyIn(key);
+    const k: { kind: string; at: number; char?: string; focused?: boolean; open?: string } = perf.keyIn(key);
+    k.char = key.sequence;
+    k.focused = this.input.focused;
+    k.open = this.palette ? `palette:${this.paletteKind}` : this.permission ? "dialog" : this.threadPicker ? "thread-picker" : this.onboarding ? "setup" : undefined;
     const before = this.input.plainText.length;
     // A printable key that nothing else takes should land in the prompt (checked once the
     // textarea, which handles keys after this listener, has had it).
@@ -727,6 +743,12 @@ export class ChatApp {
       }
       return;
     }
+    if (key.name === "t" && key.ctrl && this.tasks.current.length) {
+      key.stopPropagation();
+      const folded = this.tasks.toggle();
+      debugEvent("tasks-toggle", { folded, tasks: this.tasks.current.length });
+      return;
+    }
     if (key.name === "r" && key.ctrl) {
       key.stopPropagation();
       this.openHistorySearch();
@@ -761,6 +783,13 @@ export class ChatApp {
         return;
       } else this.setFlash("ctrl+c again to quit");
       this.lastCtrlC = now;
+      return;
+    }
+    // Ctrl+Enter (or Alt+Enter, for terminals that cannot send Ctrl+Enter): send now. With text,
+    // that message; on an empty prompt, the first queued one. A turn in progress is stopped.
+    if (key.name === "return" && (key.ctrl || key.meta) && !this.palette && !this.queueEdit) {
+      key.stopPropagation();
+      this.safelyAsync("send now", this.sendNow());
       return;
     }
     if (key.name === "up" && !this.palette && this.historyIdx < 0 && (this.input.plainText === "" || this.queueEdit) && (this.queue.length || this.queueEdit)) {
@@ -1156,7 +1185,7 @@ export class ChatApp {
     this.transcript.divider(`${why} · ${adapter.name}`);
     this.transcript.user(text);
     try {
-      await engine.start({ cwd: this.cwd, questions: this.config.questions !== "off", instructions: this.narration(agent) });
+      await engine.start({ cwd: this.cwd, questions: this.config.questions !== "off", instructions: this.narration(agent), mcpServers: this.sharedMcp(agent) });
       const brief = this.ledger.turns().length ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: this.active?.agent, config: this.config, purpose: "context" }) : "";
       const body = this.withAttachments(text);
       await this.checkpoint(side, text);
@@ -1636,7 +1665,7 @@ export class ChatApp {
 
   /** Queue a message (or command) until the agent's turn ends; it shows above the prompt. */
   private enqueue(text: string) {
-    debugEvent("queue-add", { kind: text.startsWith("/") ? "command" : text.startsWith("!") ? "shell" : isForwardedNote(text) ? "note" : "message", size: this.queue.length + 1, working: !!this.active?.turn || undefined, sending: this.sending || undefined, draining: this.draining || undefined });
+    debugEvent("queue-add", { what: text.startsWith("/") ? "command" : text.startsWith("!") ? "shell" : isForwardedNote(text) ? "note" : "message", size: this.queue.length + 1, working: !!this.active?.turn || undefined, sending: this.sending || undefined, draining: this.draining || undefined });
     // An edited queued message goes back to the place it came from.
     if (this.queueEdit) {
       this.queue.splice(Math.min(this.queueEdit.index, this.queue.length), 0, text);
@@ -1720,7 +1749,7 @@ export class ChatApp {
       while (this.queue.length && this.active === active && !active.turn && !this.closed) {
         const next = this.queue.shift()!;
         this.renderQueue();
-        debugEvent("queue-send", { kind: next.startsWith("/") ? "command" : next.startsWith("!") ? "shell" : "message", left: this.queue.length });
+        debugEvent("queue-send", { what: next.startsWith("/") ? "command" : next.startsWith("!") ? "shell" : "message", left: this.queue.length });
         try {
           await this.dispatch(active, next);
         } catch (e) {
@@ -1898,6 +1927,7 @@ export class ChatApp {
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/debug", description: "Debug log of what codemax did not expect (never your chat): /debug on | off | export", run: (a) => this.debugCommand(a) },
       { name: "/theme", description: `Colours: /theme ${COLOR_THEMES.map((t) => t.id).join(" | ")}, or dark | light | auto (saved)`, run: (a) => this.setThemePref(a) },
+      { name: "/restart", description: "Restart codemax and come back to this thread and agent (picks up settings and a new Bun)", run: () => this.restart() },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
   }
@@ -2272,6 +2302,12 @@ export class ChatApp {
     this.palette = new Palette(this.renderer, {
       items,
       filter,
+      // Tab completes the highlighted command in the prompt; Enter runs it, or add arguments first.
+      onTab: (it) => {
+        debugEvent("palette-tab", { palette: "commands", builtin: it.value.startsWith("builtin:") || undefined });
+        this.input.setText(`${it.label} `);
+        this.input.gotoBufferEnd?.();
+      },
       onPick: (it) => {
         this.closePalette();
         this.input.clear();
@@ -2424,6 +2460,41 @@ export class ChatApp {
     return best;
   }
 
+  /**
+   * Ctrl+Enter: what you typed (or the first queued message) goes to the agent now, ahead of
+   * the queue. A running turn is interrupted first; checks and debates are not (it then waits
+   * at the front of the queue).
+   */
+  private async sendNow() {
+    const a = this.active;
+    const typed = this.input.plainText.trim();
+    const text = typed || this.queue[0];
+    if (!a || !text) return this.setFlash(a ? "nothing to send" : "no agent running");
+    if (typed) {
+      this.input.clear();
+      this.pushHistory(typed);
+    } else this.queue.shift();
+    // A /command or a "!" one is not a message: it runs as it would on Enter.
+    if (text.startsWith("/") || text.startsWith("!")) return this.dispatch(a, text);
+    debugEvent("send-now", { interrupted: !!a.turn || undefined, fromQueue: !typed || undefined, queued: this.queue.length || undefined });
+    this.queue.unshift(text);
+    this.renderQueue();
+    if (a.turn) {
+      this.transcript.note("interrupting to send your message now", C.dim);
+      await a.engine.cancel().catch(() => {});
+      return; // the turn ends, and the queue (this message first) is sent
+    }
+    if (!this.busy()) await this.drainQueue(a);
+  }
+
+  /** /restart: quit and start again into the same thread and agent, as /update does after installing. */
+  private restart() {
+    if (this.active?.turn) return this.transcript.note("an agent is working; /restart when the turn ends (or Esc first)", C.warn);
+    debugEvent("restart", { agent: this.active?.agent, queued: this.queue.length || undefined });
+    this.restartAfterQuit = { agent: this.active?.agent, version: null, restartOnly: true };
+    void this.quit();
+  }
+
   /** /debug on | off | export [path]: the debug log (src/core/debuglog.ts). */
   private debugCommand(arg: string) {
     const [sub, ...rest] = arg.trim().split(/\s+/);
@@ -2475,10 +2546,42 @@ export class ChatApp {
     };
   }
 
-  /** NARRATE for agents that lack it (everyone but Claude Code), unless /config turned it off. */
-  private narration(agent: AgentId): string | undefined {
-    return agent !== "claude" && this.config.narrate !== false ? NARRATE : undefined;
+  /** What the other agents have set up (MCP servers, skills), read fresh at each agent start. */
+  private shared: Shared = { mcp: [], skills: [], errors: [] };
+
+  private refreshShared(): Shared {
+    this.shared = this.safelyGet("shared", () => collectShared(this.cwd), { mcp: [], skills: [], errors: [] });
+    return this.shared;
   }
+
+  private safelyGet<T>(where: string, fn: () => T, fallback: T): T {
+    let out = fallback;
+    this.safely(where, () => {
+      out = fn();
+    });
+    return out;
+  }
+
+  /**
+   * The agent's instructions: NARRATE for agents that lack it (everyone but Claude Code), unless
+   * /config turned it off, plus the index of skills it does not see itself.
+   */
+  private narration(agent: AgentId): string | undefined {
+    const parts: string[] = [];
+    if (agent !== "claude" && this.config.narrate !== false) parts.push(NARRATE);
+    const skills = sharedFor(agent, this.shared).skills;
+    if (skills.length) parts.push(skillsIndex(skills));
+    return parts.length ? parts.join("\n\n") : undefined;
+  }
+
+  /** The MCP servers this agent does not load itself. */
+  private sharedMcp(agent: AgentId) {
+    const given = sharedFor(agent, this.shared);
+    debugEvent("shared-for-agent", { agent, mcp: given.mcp.length, skills: given.skills.length });
+    return given.mcp;
+  }
+
+  private modeCycleTold = new Set<AgentId>();
 
   private async cycleMode() {
     const a = this.active;
@@ -2492,9 +2595,16 @@ export class ChatApp {
     // Shown at once: the next Shift+Tab moves on from here, not from the mode the agent last confirmed.
     a.mode = next;
     this.renderFooter();
+    // Agents without an auto mode (Cursor: agent / plan / ask) are said so once, so the cycle is not taken for a bug.
+    if (!ids.includes("auto") && !this.modeCycleTold.has(a.agent)) {
+      this.modeCycleTold.add(a.agent);
+      this.transcript.note(`${a.name}'s modes: ${order.map((m) => modeLabel(a.agent, m).text).join(" → ")} (no auto mode here)`, C.dim);
+    }
     try {
       await a.engine.setMode(next);
+      debugEvent("mode-cycle", { agent: a.agent, from, to: next, order, working: !!a.turn || undefined });
     } catch (e: any) {
+      debugEvent("mode-cycle-failed", { agent: a.agent, from, to: next, ...errorFields(e) });
       if (a.mode === next) a.mode = from;
       this.renderFooter();
       this.setFlash(`could not switch mode: ${String(e?.message ?? e).slice(0, 80)}`);
@@ -2524,7 +2634,8 @@ export class ChatApp {
     this.setWorking(`${pick(G.spinner, 0)} Starting ${adapter.name}…`);
     try {
       const startedAt = Date.now();
-      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
+      this.refreshShared();
+      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), mcpServers: this.sharedMcp(agent), costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
       debugEvent("agent-start", { agent, ms: Date.now() - startedAt, resumed: !!resume && engine.session?.id === resume.id, resumeAsked: !!resume || undefined, handoffFrom: o.from, version: this.detect.get(agent)?.version ?? info.version, model: info.currentModel, models: info.models?.length, modes: info.modes?.map((m) => m.id), mode: info.currentMode, options: info.options?.map((x) => x.id) });
       active.mode = info.currentMode;
       if (engine.session) this.ledger.saveSession({ agent, id: engine.session.id, cwd: this.cwd, startedAt: engine.session.startedAt, lastUsedAt: Date.now() } as SessionRef);
@@ -2635,6 +2746,12 @@ export class ChatApp {
     }
     if (main && turn) this.notePanel.setPaused(asksUser(turn.block.text()));
     if (turn && main) this.term.turnEnded({ reply: turn.block.text(), ms: Date.now() - turn.startedAt, error: stop === "error", longMs: this.config.bellAfterSeconds > 0 ? this.config.bellAfterSeconds * 1000 : Infinity });
+    // A reply that ends by asking you something waits for you: notify, however short the turn.
+    if (turn && main && stop === "end_turn" && asksUser(turn.block.text())) {
+      const q = turn.block.text().trim().split("\n").filter((l) => l.includes("?")).at(-1) ?? "";
+      this.term.asked(q.trim());
+      debugEvent("agent-asks", { agent: active.agent, chars: q.length });
+    }
     // Turns that did not end normally, with how long and how many tools (never what was said).
     if (turn) {
       const st = turn.stats;
@@ -2681,7 +2798,12 @@ export class ChatApp {
       if (isLimitNotice(reply)) {
         // The agent ended the turn with only a limit notice: treat it as running out, and leave
         // the user's request unanswered in the ledger so the next agent is asked to finish it.
-        this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: reply.slice(0, 120), resetsAt: parseResetTime(reply), at: Date.now() });
+        this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: reply.slice(-120), resetsAt: parseResetTime(reply), at: Date.now() });
+        // Work done before the notice (Cursor says "Upgrade your plan to continue" after some)
+        // is kept; only the notice itself is not an answer.
+        const work = reply.split(/\n\s*\n/).slice(0, -1).join("\n\n").trim();
+        debugEvent("limit-in-reply", { agent: active.agent, keptWork: !!work || undefined, tools: turn.tools.size || undefined });
+        if (o.record !== false && (work || turn.tools.size)) this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "assistant", text: work, tools: turn.tools.size ? [...turn.tools] : undefined }]);
       } else if (broken) {
         // The agent refuses every turn until its own MCP setup works: the request stays
         // unanswered for the next agent, and you get what to do about it.
@@ -3781,9 +3903,12 @@ export class ChatApp {
       if (this.permission) this.setWorking(this.permission instanceof QuestionDialog ? `${glyph} Waiting for your answer (${secs}) · esc to skip` : `${glyph} Waiting for your approval (${secs}) · esc to say no`);
       else {
         // Tips live in the empty prompt only, never on this line above it.
-        // The step it is on, so a run of tool calls still says what is happening.
+        // The step it is on, so a run of tool calls still says what is happening; between
+        // tools, the task in progress in its active form, as Claude Code's spinner shows it.
         const step = t.step ? ` · ${t.step.replace(/\s+/g, " ").slice(0, 60)}` : "";
-        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)}${step}`);
+        const task = active === this.active ? this.tasks.inProgress : undefined;
+        const verb = task && !t.step ? task.replace(/\s+/g, " ").replace(/[.…]+$/, "").slice(0, 60) : t.verb;
+        this.setWorking(`${glyph} ${verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)}${step}`);
       }
     }, 120);
   }
@@ -4080,7 +4205,7 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   }
   if (app.restartAfterQuit) {
     process.stdout.write("codemax: starting the new version…\n");
-    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version, app.threadId, VERSION);
+    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version, app.threadId, VERSION, { restartOnly: app.restartAfterQuit.restartOnly });
   }
   process.stdout.write(app.threadUsed ? `codemax: to continue this thread, run: codemax --resume ${app.threadId}\n` : "codemax: bye\n");
 }

@@ -135,6 +135,7 @@ export class AcpEngine implements Engine {
     };
     this.conn = new ClientSideConnection(() => client, stream);
     this.instructions = o.instructions?.trim() || undefined;
+    this.shared = o.mcpServers ?? [];
     const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
 
     let sessionId: string;
@@ -143,21 +144,21 @@ export class AcpEngine implements Engine {
     let config: any;
     if (o.resume) {
       try {
-        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
+        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
         sessionId = o.resume.id;
         modes = r?.modes;
         models = r?.models;
         config = r?.configOptions;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new session` });
-        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
+        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
         sessionId = s.sessionId;
         config = s.configOptions;
         modes = s.modes;
         models = s.models;
       }
     } else {
-      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
+      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
       sessionId = s.sessionId;
       modes = s.modes;
       models = s.models;
@@ -334,6 +335,24 @@ export class AcpEngine implements Engine {
       case "current_mode_update":
         this.emit({ type: "mode", modeId: u.currentModeId });
         break;
+      case "config_option_update": {
+        // An agent whose modes and models are config options (Cursor, OpenCode) reports changes here.
+        const opts: any[] = Array.isArray(u.configOptions) ? u.configOptions : u.configOption ? [u.configOption] : [];
+        for (const c of opts) {
+          if (!c?.id) continue;
+          if (c.id === this.configIds.mode && typeof c.currentValue === "string") {
+            if (this.info) this.info.currentMode = c.currentValue;
+            this.emit({ type: "mode", modeId: c.currentValue });
+          } else if (c.id === this.configIds.model && typeof c.currentValue === "string") {
+            if (this.info) this.info.currentModel = c.currentValue;
+          } else {
+            const o = this.info?.options?.find((x) => x.id === c.id);
+            if (o && typeof c.currentValue === "string") o.current = c.currentValue;
+          }
+        }
+        debugEvent("acp-config-update", { agent: this.agent, ids: opts.map((c) => c?.id) });
+        break;
+      }
       case "available_commands_update":
         this.emit({ type: "commands", commands: (u.availableCommands ?? []).map((c: any) => ({ name: c.name, description: c.description })) });
         break;
@@ -400,6 +419,26 @@ export class AcpEngine implements Engine {
   private systemPromptSlot = false;
   private initResult: any;
 
+  private shared: import("../core/share.ts").SharedMcpServer[] = [];
+
+  /**
+   * The shared MCP servers in ACP's shape, for session requests. Stdio servers always (every ACP
+   * agent takes them); http / sse only when the agent's mcpCapabilities say so.
+   */
+  private mcpServers(init: any): any[] {
+    const caps = init?.agentCapabilities?.mcpCapabilities ?? {};
+    const out: any[] = [];
+    let dropped = 0;
+    for (const s of this.shared) {
+      const t = s.transport;
+      if (t.type === "stdio") out.push({ name: s.name, command: t.command, args: t.args, env: Object.entries(t.env).map(([name, value]) => ({ name, value })) });
+      else if (caps[t.type]) out.push({ type: t.type, name: s.name, url: t.url, headers: Object.entries(t.headers).map(([name, value]) => ({ name, value })) });
+      else dropped++;
+    }
+    if (this.shared.length) debugEvent("shared-mcp-given", { agent: this.agent, servers: out.length, dropped: dropped || undefined, http: !!caps.http, sse: !!caps.sse });
+    return out;
+  }
+
   /** `systemPrompt` for a session request: only to an agent that advertises it (the spec requires that). */
   private systemPrompt(init: any): { systemPrompt?: unknown } {
     this.initResult = init;
@@ -414,8 +453,8 @@ export class AcpEngine implements Engine {
     const old = this.session.id;
     const { currentModel, currentMode } = this.info ?? {};
     const r: any = point.messageId
-      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: [], ...this.systemPrompt(this.initResult), _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
-      : await this.conn.newSession({ cwd: this.cwd, mcpServers: [], ...this.systemPrompt(this.initResult) } as any);
+      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult), _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
+      : await this.conn.newSession({ cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult) } as any);
     this.session = { agent: this.agent, id: r.sessionId, cwd: this.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.lastMessageId = point.messageId;
     this.idStale = false;

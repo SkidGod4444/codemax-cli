@@ -12,6 +12,8 @@ test("limit wording from every agent is classified as quota", () => {
   ]) expect(classifyError(msg)).toBe("quota");
   expect(classifyError("Please run /login")).toBe("auth");
   expect(classifyError("tool failed: ENOENT")).toBe("protocol");
+  // A plan that stopped paying: Cursor, OpenCode via AWS Marketplace.
+  for (const msg of ["Upgrade your plan to continue", "Internal error: undefined: Model access is denied due to INVALID_PAYMENT_INSTRUMENT:A valid payment instrument must be provided.. Your AWS Marketplace subscription for this model cannot be completed", "You're out of fast requests", "Your credit balance is too low to access the API"]) expect(classifyError(msg)).toBe("quota");
   // Ordinary errors are not a plan running out (they used to offer a handoff).
   for (const msg of ["insufficient permissions to write /etc/hosts", "context window limit reached; compacting", "status 429 from the GitHub API mock", "the author field is required"]) expect(classifyError(msg)).toBe("protocol");
 });
@@ -20,6 +22,9 @@ test("a reply that is only a limit notice is recognised; ordinary replies are no
   expect(isLimitNotice("You've hit your session limit · resets 3pm")).toBe(true);
   expect(isLimitNotice("Claude AI usage limit reached|1792400000")).toBe(true);
   expect(isLimitNotice("I added a rate limiter; you've hit your session limit only in tests.")).toBe(false);
+  expect(isLimitNotice("Upgrade your plan to continue")).toBe(true);
+  expect(isLimitNotice("I fixed the parser and ran half the tests.\n\nUpgrade your plan to continue")).toBe(true); // Cursor, mid-task
+  expect(isLimitNotice("You can upgrade your plan to continue using GPU instances, as the docs say.\n\nThe deploy script is updated.")).toBe(false);
   expect(isLimitNotice("")).toBe(false);
 });
 

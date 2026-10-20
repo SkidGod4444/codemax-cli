@@ -96,6 +96,8 @@ export const RESTART_THREAD_ENV = "CODEMAX_RESTART_THREAD";
 export const UPDATED_TO_ENV = "CODEMAX_UPDATED_TO";
 /** The version that ran /update, so the new one can say what changed since (whatsnew.ts). */
 export const UPDATED_FROM_ENV = "CODEMAX_UPDATED_FROM";
+/** Set by /restart for the new process (a restart, not an update). */
+export const RESTARTED_ENV = "CODEMAX_RESTARTED";
 
 /**
  * The command that starts this codemax again with the same arguments, minus the
@@ -122,14 +124,20 @@ export function relaunchArgv(argv = process.argv, execPath = process.execPath, s
     if (a.startsWith("--agent=")) continue;
     args.push(a);
   }
+  // An npm install restarts through its own launcher, which picks the Bun codemax ships with:
+  // restarting with this process's Bun kept a session on a stale one (1.2.19) after /update.
+  const launcher = resolve(script, "..", "..", "bin", "codemax.cjs");
+  const node = script.includes("node_modules") && exists(launcher) ? which("node") : null;
+  if (node) return [node, launcher, ...args];
   if (exists(execPath) && exists(script)) return [execPath, script, ...args];
   return [which("codemax") ?? "codemax", ...args];
 }
 
 /** Run the updated codemax in this terminal, resuming `agent`, and exit with its code. */
-export async function relaunch(agent: string | undefined, version: string | null, thread?: string, from?: string): Promise<never> {
+export async function relaunch(agent: string | undefined, version: string | null, thread?: string, from?: string, o: { restartOnly?: boolean } = {}): Promise<never> {
   const argv = relaunchArgv();
-  const env: Record<string, string | undefined> = { ...process.env, [UPDATED_TO_ENV]: version ?? "", ...(from ? { [UPDATED_FROM_ENV]: from } : {}) };
+  // /restart is not an update: no "updated" note and no what's-new box in the new process.
+  const env: Record<string, string | undefined> = o.restartOnly ? { ...process.env, [RESTARTED_ENV]: "1" } : { ...process.env, [UPDATED_TO_ENV]: version ?? "", ...(from ? { [UPDATED_FROM_ENV]: from } : {}) };
   if (thread) env[RESTART_THREAD_ENV] = thread;
   if (agent) env[RESTART_AGENT_ENV] = agent;
   else delete env[RESTART_AGENT_ENV];

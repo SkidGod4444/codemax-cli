@@ -73,7 +73,15 @@ export class TerminalStatus {
     if (kind === "question") this.warpEvent("question_asked", { tool_name: tool ?? "question", summary: cut(summary, 200) });
     else this.warpEvent("permission_request", { summary: cut(summary, 200), tool_name: tool ?? "tool", tool_input: input ?? {} });
     this.status("blocked");
-    this.desktop(`${this.agent?.name ?? "The agent"} ${kind === "question" ? "has a question" : "needs your approval"}: ${cut(summary, 120)}`);
+    // A question always gets codemax's own notification, Warp included: Warp was not seen
+    // acting on question_asked, and a missed question stalls the work.
+    this.desktop(`${this.agent?.name ?? "The agent"} ${kind === "question" ? "has a question" : "needs your approval"}: ${cut(summary, 120)}`, kind === "question");
+  }
+
+  /** The agent's reply ended by asking you something (no dialog): it waits for you like a question. */
+  asked(question: string) {
+    this.status("blocked");
+    this.desktop(`${this.agent?.name ?? "The agent"} asks: ${cut(question, 140)}`, true);
   }
 
   answered(allowed: boolean) {
@@ -112,9 +120,9 @@ export class TerminalStatus {
   }
 
   /** A plain desktop notification, only when you are not looking (Warp sends its own). */
-  private desktop(message: string) {
+  private desktop(message: string, evenInWarp = false) {
     if (this.focused === true || !this.o.notify()) return;
-    if (this.warp && this.agent && WARP_AGENTS[this.agent.id] && this.o.enabled()) return;
+    if (!evenInWarp && this.warp && this.agent && WARP_AGENTS[this.agent.id] && this.o.enabled()) return;
     try {
       this.sink.notify(message, "codemax");
     } catch {

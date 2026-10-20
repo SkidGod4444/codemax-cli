@@ -25,6 +25,8 @@ export interface PaletteOptions {
   maxRows?: number;
   /** Tab picks the highlighted item instead of moving down (file completion). */
   tabAccepts?: boolean;
+  /** Tab writes the highlighted item into the prompt (the / palette: "/con" + Tab → "/config "), as in Claude Code. */
+  onTab?: (item: PaletteItem) => void;
 }
 
 /**
@@ -167,6 +169,11 @@ export class Palette {
     if (n === "up" || (n === "p" && key.ctrl)) return this.move(-1);
     if (n === "down" || (n === "n" && key.ctrl)) return this.move(1);
     if (n === "tab" && !key.shift) {
+      if (this.opts.onTab) {
+        const cur = this.current;
+        if (cur && !cur.disabled) this.opts.onTab(cur);
+        return true;
+      }
       if (this.opts.tabAccepts) {
         const cur = this.current;
         if (cur && !cur.disabled) this.opts.onPick(cur);

@@ -213,6 +213,12 @@ export function modeLabel(agent: string, modeId: string | undefined): { glyph: s
       return { glyph: G.modeOn, text: "don't ask on", color: C.error };
     case "auto":
       return { glyph: G.modeOn, text: "auto mode on", color: C.warn };
+    // Cursor's modes: agent (its working mode: edits without asking, asks for commands), plan, ask.
+    case "agent":
+      return { glyph: G.modeOn, text: "agent mode · edits without asking", color: C.warn };
+    // OpenCode's working mode (it asks, through codemax's inline permission config).
+    case "build":
+      return { glyph: G.modeAsk, text: "build mode · asks before acting", color: C.dim };
     case "ask":
       return { glyph: G.modePause, text: "ask mode · no edits", color: C.plan };
     case "on-request":

@@ -520,3 +520,45 @@ test("usage from the agent itself: a resumed session's running total counts only
   const got = tail.read();
   expect(got.map((g) => [g.output, g.cacheWrite])).toEqual([[106, 65058], [5, 65058], [903, 0]]);
 });
+
+test("shared MCP servers: ACP agents get them on session requests (http/sse only when advertised); Codex as mcp_servers.* config overrides", async () => {
+  const shared: import("../src/core/share.ts").SharedMcpServer[] = [
+    { name: "freecad", source: "claude", transport: { type: "stdio" as const, command: "uvx", args: ["freecad-mcp"], env: { FC_TOKEN: "s1" } } },
+    { name: "Better Auth", source: "cursor", transport: { type: "http" as const, url: "https://auth.example/mcp", headers: { Authorization: "Bearer t" } } },
+    { name: "events", source: "codex", transport: { type: "sse" as const, url: "https://ev.example/sse", headers: {} } },
+  ];
+  for (const caps of [{ http: true, sse: false }, undefined]) {
+    const { clientStream, agentStream } = pipePair();
+    let got: any[] | undefined;
+    new AgentSideConnection((): Agent => ({
+      async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", version: "1" }, agentCapabilities: caps ? { mcpCapabilities: caps } : {}, authMethods: [] } as any; },
+      async newSession(p: any) { got = p.mcpServers; return { sessionId: "s1" } as any; },
+      async authenticate() { return {}; },
+      async prompt() { return { stopReason: "end_turn" }; },
+      async cancel() {},
+    }), agentStream);
+    const e = new AcpEngine({ agent: "fake", name: "Fake", cmd: [], stream: clientStream });
+    await e.start({ cwd: "/tmp", mcpServers: shared });
+    const names = got!.map((s) => s.name);
+    expect(names).toContain("freecad"); // stdio: always
+    expect(got!.find((s) => s.name === "freecad")).toEqual({ name: "freecad", command: "uvx", args: ["freecad-mcp"], env: [{ name: "FC_TOKEN", value: "s1" }] });
+    if (caps) {
+      expect(got!.find((s) => s.name === "Better Auth")).toEqual({ type: "http", name: "Better Auth", url: "https://auth.example/mcp", headers: [{ name: "Authorization", value: "Bearer t" }] });
+      expect(names).not.toContain("events"); // sse not advertised
+    } else expect(names).toEqual(["freecad"]);
+    await e.close();
+  }
+  const { transport, sent } = codexFake((m, reply) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+  });
+  const c = new CodexEngine({ transport });
+  await c.start({ cwd: "/tmp", mcpServers: shared });
+  const cfg = sent.find((m: any) => m.method === "thread/start").params.config;
+  expect(cfg["mcp_servers.freecad.command"]).toBe("uvx");
+  expect(cfg["mcp_servers.freecad.args"]).toEqual(["freecad-mcp"]);
+  expect(cfg["mcp_servers.freecad.env"]).toEqual({ FC_TOKEN: "s1" });
+  expect(cfg["mcp_servers.Better_Auth.url"]).toBe("https://auth.example/mcp"); // a name Codex's config can hold
+  expect(cfg["mcp_servers.Better_Auth.http_headers"]).toEqual({ Authorization: "Bearer t" });
+  expect(cfg["mcp_servers.events.url"]).toBe("https://ev.example/sse");
+  await c.close();
+});

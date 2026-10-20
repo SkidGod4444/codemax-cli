@@ -146,6 +146,8 @@ export interface EngineStartOptions {
    * otherwise once, ahead of the first message of a new session, never again.
    */
   instructions?: string;
+  /** MCP servers from the other agents' setups, to load alongside this agent's own (src/core/share.ts). */
+  mcpServers?: import("../core/share.ts").SharedMcpServer[];
 }
 
 export interface EngineInfo {

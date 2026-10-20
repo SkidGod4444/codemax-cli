@@ -11,12 +11,13 @@ const { AcpEngine } = await import("../src/engines/acp.ts");
 const { Ledger } = await import("../src/core/ledger.ts");
 const { DEFAULT_CONFIG } = await import("../src/config.ts");
 
-type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void> };
+type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void>; cancelled: () => boolean };
 type Handler = (text: string, ctx: Ctx) => Promise<void | Record<string, unknown>>;
 /** Extra fields a fake agent returns from newSession (e.g. OpenCode's configOptions), and config-option calls it received. */
 type FakeOpts = { session?: Record<string, unknown>; configCalls?: unknown[] };
 
 function fakeStream(handler: Handler, fo: FakeOpts = {}) {
+  let cancelled = false;
   const a2c = new TransformStream<Uint8Array, Uint8Array>();
   const c2a = new TransformStream<Uint8Array, Uint8Array>();
   let n = 0;
@@ -30,10 +31,11 @@ function fakeStream(handler: Handler, fo: FakeOpts = {}) {
     async prompt({ sessionId, prompt }) {
       const text = (prompt[0] as any).text as string;
       const say = (t: string) => conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } as any });
-      const extra = await handler(text, { conn, sessionId, say });
-      return { stopReason: "end_turn", ...(extra ?? {}) } as any;
+      cancelled = false;
+      const extra = await handler(text, { conn, sessionId, say, cancelled: () => cancelled });
+      return { stopReason: cancelled ? "cancelled" : "end_turn", ...(extra ?? {}) } as any;
     },
-    async cancel() {},
+    async cancel() { cancelled = true; },
   }), ndJsonStream(a2c.writable, c2a.readable));
   return ndJsonStream(c2a.writable, a2c.readable);
 }
@@ -1468,10 +1470,13 @@ test("52. the debug log catches a lost key and a slow screen without recording w
     expect(events().some((e) => e.kind === "ui-slow-key-to-screen" && e.keyKind === "letter" && e.ms >= 120)).toBe(true);
     // Selecting text in the transcript: a fast selection is not reported, a slow one is.
     await h.send("say something");
-    await h.frame((f) => f.includes("ok"));
-    await h.setup.mockMouse.drag(2, 3, 40, 6);
+    await h.frame((f) => f.includes("⏺ ok"));
+    const rows = h.setup.captureCharFrame().split("\n");
+    const row = rows.findIndex((l) => l.includes("⏺ ok"));
+    await h.setup.mockMouse.drag(3, row, 6, row); // over the reply's text
     for (let i = 0; i < 5; i++) await h.setup.renderOnce();
     expect(events().filter((e) => e.kind === "ui-slow-selection")).toEqual([]);
+    expect(app.perf.selectionMoves).toBeGreaterThan(0); // the drag was seen, move by move
     (app.perf as any).pendingSelection = performance.now() - 200;
     await h.setup.renderOnce();
     await h.setup.mockInput.typeText("z");
@@ -1619,5 +1624,132 @@ test("57. shortcuts and quitting are in the debug log: which key, what it did, n
   } finally {
     d.setDebugLog(false);
     try { h.setup.renderer.destroy(); } catch { /* gone */ }
+  }
+}, 30000);
+
+test("58. in the / palette, Tab writes the highlighted command into the prompt; no key typed around the palette is lost", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { existsSync, rmSync } = await import("node:fs");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    const step = async (keys: string) => { await h.setup.mockInput.typeText(keys); await Bun.sleep(30); };
+    await step("/");
+    await h.frame((f) => f.includes("/config"));
+    h.setup.mockInput.pressBackspace();
+    await Bun.sleep(30);
+    await step("/");
+    await step("con");
+    h.setup.mockInput.pressTab();
+    await Bun.sleep(30);
+    expect(app.input.plainText).toBe("/config ");
+    expect(app.palette).toBeNull(); // completed: the menu closes, Enter runs it
+    for (let i = 0; i < 8; i++) h.setup.mockInput.pressBackspace();
+    await Bun.sleep(30);
+    await step("/sta");
+    h.setup.mockInput.pressTab();
+    await Bun.sleep(30);
+    expect(app.input.plainText).toBe("/status ");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => /thread|session/i.test(f) && !f.includes("/status "));
+    const events = readFileSync(d.debugLogPath(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(events.filter((e) => e.kind === "ui-key-missed")).toEqual([]);
+    expect(events.filter((e) => e.kind === "palette-tab").length).toBe(2);
+  } finally {
+    d.setDebugLog(false);
+    await h.cleanup();
+  }
+}, 30000);
+
+test("59. todos like Claude Code: the spinner names the task in progress; Ctrl+T folds the pinned list", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "plan", entries: [{ content: "Find the bug", status: "completed", priority: "high" }, { content: "Running the auth tests", status: "in_progress", priority: "high" }, { content: "Ship it", status: "pending", priority: "low" }] });
+      await gate;
+      await ctx.say("done");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("go");
+    let f = await h.frame((f) => /Running the auth tests… \(\d+s/.test(f));
+    expect(f).toContain("3 tasks (1 done, 1 in progress, 1 open)");
+    h.setup.mockInput.pressKey("t", { ctrl: true });
+    f = await h.frame((f) => f.includes("· ctrl+t to show"));
+    expect(f).not.toContain("◻ Ship it");
+    h.setup.mockInput.pressKey("t", { ctrl: true });
+    await h.frame((f) => f.includes("◻ Ship it"));
+    release();
+    await h.frame((f) => f.includes("done"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("60. Ctrl+Enter sends now: interrupts the running turn and the message goes first; on an empty prompt the first queued one goes", async () => {
+  const got: string[] = [];
+  const h = await harness({
+    claude: async (text, ctx) => {
+      got.push(text);
+      if (text === "slow") {
+        for (let i = 0; i < 40 && !ctx.cancelled(); i++) await Bun.sleep(100);
+        return ctx.say("slow done");
+      }
+      await Bun.sleep(150);
+      await ctx.say(`answered ${text}`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("slow");
+    await Bun.sleep(50);
+    await h.send("q1");
+    await h.send("q2");
+    await h.setup.mockInput.typeText("urgent");
+    (h.setup.renderer as any).stdin.emit("data", Buffer.from("\x1b[13;5u")); // Ctrl+Enter as terminals send it
+    await h.frame((f) => f.includes("answered urgent"));
+    await h.frame((f) => f.includes("answered q2"), 10000);
+    expect(got).toEqual(["slow", "urgent", "q1", "q2"]);
+    // Empty prompt, messages queued, agent idle: Ctrl+Enter sends the first queued one.
+    const app: any = h.app;
+    app.queue.push("later1", "later2");
+    app.renderQueue();
+    (h.setup.renderer as any).stdin.emit("data", Buffer.from("\x1b[13;5u")); // Ctrl+Enter as terminals send it
+    await h.frame((f) => f.includes("answered later2"), 10000);
+    expect(got.slice(-2)).toEqual(["later1", "later2"]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("61. at start, one line says what the other agents' setups gave every agent; the agent's own servers are not sent back to it", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "codemax-share-home-"));
+  mkdirSync(join(home, ".cursor"), { recursive: true });
+  writeFileSync(join(home, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { gitk: { command: "npx", args: ["gitkraken-mcp"] } } }));
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { freecad: { type: "stdio", command: "uvx", args: ["freecad-mcp"] } } }));
+  mkdirSync(join(home, ".codex", "skills", "tdd"), { recursive: true });
+  writeFileSync(join(home, ".codex", "skills", "tdd", "SKILL.md"), "---\nname: tdd\ndescription: Red, green, refactor\n---\n");
+  const prev = process.env.CODEMAX_SHARE_HOME;
+  process.env.CODEMAX_SHARE_HOME = home;
+  const sessions: any[] = [];
+  const h = await harness({ claude: async (text, ctx) => ctx.say(`got: ${text.slice(0, 60)}`) }, {}, undefined, { claude: { session: {}, configCalls: sessions } });
+  try {
+    void h.app.start("claude", true);
+    const f = await h.frame((f) => f.includes("new session"));
+    expect(f).toContain("every agent gets the others' setup: 2 MCP servers (claude 1, cursor 1) and 1 skill");
+    await h.send("hi");
+    await h.frame((f) => f.includes("got: "));
+    // Claude (no systemPrompt slot in the fake) gets Codex's skill in its first message, not its own freecad server.
+    const first = h.prompts.find((p) => p.agent === "claude")!.text;
+    expect(first).toContain("- tdd: Red, green, refactor → ");
+    expect(first).toContain("hi");
+  } finally {
+    process.env.CODEMAX_SHARE_HOME = prev;
+    await h.cleanup();
   }
 }, 30000);
