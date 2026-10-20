@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { appendFileSync, chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { CODEMAX_HOME, ensureDir } from "./paths.ts";
+import { CODEMAX_HOME, ensureDir, writeAtomic } from "./paths.ts";
 
 /**
  * Prompt history that survives restarts: every message you send, one JSON line
@@ -64,7 +64,7 @@ export function appendHistory(cwd: string, text: string) {
     if (fresh) chmodSync(file, 0o600);
     if (statSync(file).size > MAX_BYTES) {
       const keep = readAll().slice(-KEEP_ENTRIES);
-      writeFileSync(file, keep.map((e) => JSON.stringify(e)).join("\n") + "\n", { mode: 0o600 });
+      writeAtomic(file, keep.map((e) => JSON.stringify(e)).join("\n") + "\n");
     }
   } catch {
     /* history is a convenience: never fail a send over it */

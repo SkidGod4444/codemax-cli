@@ -12,6 +12,8 @@ test("limit wording from every agent is classified as quota", () => {
   ]) expect(classifyError(msg)).toBe("quota");
   expect(classifyError("Please run /login")).toBe("auth");
   expect(classifyError("tool failed: ENOENT")).toBe("protocol");
+  // Ordinary errors are not a plan running out (they used to offer a handoff).
+  for (const msg of ["insufficient permissions to write /etc/hosts", "context window limit reached; compacting", "status 429 from the GitHub API mock", "the author field is required"]) expect(classifyError(msg)).toBe("protocol");
 });
 
 test("a reply that is only a limit notice is recognised; ordinary replies are not", () => {

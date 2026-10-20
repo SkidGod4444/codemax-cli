@@ -77,6 +77,8 @@ export interface Checkpoint {
 const FORK_TRAILER = "Codemax-Rewind-Point: ";
 const THREAD_TRAILER = "Codemax-Thread: ";
 
+let lastTs = 0;
+
 /** Snapshot the working tree. Returns null outside a git repo. */
 export async function createCheckpoint(cwd: string, label: string, fork?: Checkpoint["fork"], thread?: string): Promise<Checkpoint | null> {
   const dir = await gitDir(cwd);
@@ -88,7 +90,9 @@ export async function createCheckpoint(cwd: string, label: string, fork?: Checkp
   const ident = { GIT_AUTHOR_NAME: "codemax", GIT_AUTHOR_EMAIL: "codemax@localhost", GIT_COMMITTER_NAME: "codemax", GIT_COMMITTER_EMAIL: "codemax@localhost" };
   const c = await run(cwd, ["commit-tree", tree, ...(head.code === 0 ? ["-p", head.out] : []), "-m", label, ...(fork || thread ? ["-m", [fork && FORK_TRAILER + JSON.stringify(fork), thread && THREAD_TRAILER + thread].filter(Boolean).join("\n")] : [])], ident);
   if (c.code !== 0) return null;
-  const ts = Date.now();
+  // Unique even when two snapshots land in the same millisecond (the ref name is the time).
+  const ts = Math.max(Date.now(), lastTs + 1);
+  lastTs = ts;
   await run(cwd, ["update-ref", `refs/codemax/checkpoints/${ts}`, c.out]);
   await pruneCheckpoints(cwd);
   return { sha: c.out, label, ts, ...(fork ? { fork } : {}), ...(thread ? { thread } : {}) };
@@ -107,7 +111,8 @@ export async function restoreCheckpoint(cwd: string, sha: string): Promise<{ res
   if (!dir) throw new Error("not a git repository");
   const index = join(dir, "codemax-restore-index");
   const now = await treeOfWorkingDir(cwd, index);
-  const list = async (tree: string) => (await run(cwd, ["ls-tree", "-r", "--name-only", tree])).out.split("\n").filter(Boolean);
+  // -z: names as they are (without it git quotes non-ASCII ones: "caf\303\251.ts").
+  const list = async (tree: string) => (await run(cwd, ["ls-tree", "-r", "-z", "--name-only", tree])).out.split("\0").filter(Boolean);
   const target = new Set(await list(sha));
   const current = now ? await list(now) : [];
   const removed = current.filter((f) => !target.has(f));
@@ -165,8 +170,8 @@ export async function checkpointChangeCounts(cwd: string, shas: string[]): Promi
   const now = await treeOfWorkingDir(cwd, join(dir, "codemax-restore-index"));
   if (!now) return out;
   for (const sha of shas) {
-    const r = await run(cwd, ["diff", "--name-only", "--no-renames", sha, now]);
-    if (r.code === 0) out.set(sha, r.out ? r.out.split("\n").length : 0);
+    const r = await run(cwd, ["diff", "--name-only", "-z", "--no-renames", sha, now]);
+    if (r.code === 0) out.set(sha, r.out.split("\0").filter(Boolean).length);
   }
   return out;
 }

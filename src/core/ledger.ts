@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { appendFileSync, closeSync, copyFileSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { ensureDir, projectDir } from "./paths.ts";
+import { appendLine, ensureDir, projectDir, writeAtomic } from "./paths.ts";
 import type { AgentId, QuotaStatus, SessionRef, Turn } from "../adapters/types.ts";
 import type { UsageRecord } from "./usage.ts";
 import { Journal } from "./journal.ts";
@@ -170,7 +170,7 @@ export class Ledger {
       const k = turnKey(t);
       if (this.seen.has(k)) continue;
       this.seen.add(k);
-      appendFileSync(this.file("turns.jsonl"), JSON.stringify(t) + "\n", { mode: 0o600 });
+      appendLine(this.file("turns.jsonl"), JSON.stringify(t));
       n++;
     }
     return n;
@@ -181,7 +181,7 @@ export class Ledger {
   }
 
   addEvent(e: Omit<LedgerEvent, "ts"> & { ts?: number }) {
-    appendFileSync(this.file("events.jsonl"), JSON.stringify({ ts: Date.now(), ...e }) + "\n", { mode: 0o600 });
+    appendLine(this.file("events.jsonl"), JSON.stringify({ ts: Date.now(), ...e }));
   }
 
   sessions(): Partial<Record<AgentId, SessionRef>> {
@@ -197,7 +197,7 @@ export class Ledger {
   saveSession(ref: SessionRef) {
     const all = this.sessions();
     all[ref.agent] = ref;
-    writeFileSync(this.file("sessions.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
+    writeAtomic(this.file("sessions.json"), JSON.stringify(all, null, 2) + "\n");
   }
 
   summary(): string {
@@ -214,7 +214,7 @@ export class Ledger {
   }
 
   addUsage(r: UsageRecord) {
-    appendFileSync(this.file("usage.jsonl"), JSON.stringify(r) + "\n", { mode: 0o600 });
+    appendLine(this.file("usage.jsonl"), JSON.stringify(r));
   }
 
   quota(): Partial<Record<AgentId, QuotaStatus>> {
@@ -230,13 +230,13 @@ export class Ledger {
   saveQuota(q: QuotaStatus) {
     const all = this.quota();
     all[q.agent] = q;
-    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
+    writeAtomic(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
   }
 
   clearQuota(agent?: AgentId) {
     const all = agent ? this.quota() : {};
     if (agent) delete all[agent];
-    writeFileSync(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n", { mode: 0o600 });
+    writeAtomic(this.file("quota.json"), JSON.stringify(all, null, 2) + "\n");
   }
 }
 

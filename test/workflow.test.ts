@@ -52,7 +52,7 @@ function newRepo() {
   return repo;
 }
 
-async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog; resume?: boolean; thread?: string; pickThread?: boolean; onboard?: boolean; models?: ModelOpts; prep?: (app: any) => void } = {}) {
+async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?: number; fork?: ForkLog; resume?: boolean; thread?: string; pickThread?: boolean; onboard?: boolean; models?: ModelOpts; prep?: (app: any) => void; agent?: string } = {}) {
   const setup = await createTestRenderer({ width: 110, height: o.height ?? 30 });
   const repo = o.repo ?? newRepo();
   const ledger = new Ledger(repo, undefined, o.thread);
@@ -69,7 +69,8 @@ async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?:
   const send = async (t: string) => { await setup.mockInput.typeText(t); setup.mockInput.pressEnter(); };
   const cleanup = async () => { await app.quit(); setup.renderer.destroy(); };
   o.prep?.(app);
-  void app.start("claude", !o.resume && !o.pickThread, { pickThread: o.pickThread, onboard: o.onboard });
+  if (o.agent) (app as any).refreshDetect = async () => void (app as any).detect.set(o.agent, { installed: true, version: "t", engine: true });
+  void app.start((o.agent ?? "claude") as any, !o.resume && !o.pickThread, { pickThread: o.pickThread, onboard: o.onboard });
   await frame((f) => f.includes(o.onboard ? "Welcome to codemax" : o.pickThread ? "Resume which thread?" : o.resume ? "resumed" : "new session"));
   return { setup, app, repo, ledger, prompts, frame, send, cleanup };
 }
@@ -867,4 +868,70 @@ test("Ctrl+G edits the message in your editor; /copy copies the last reply; /exp
     expect(md).toContain("### Claude Code");
     expect(md).toContain("reply to draft and more");
   } finally { await h.cleanup(); }
+}, 30000);
+
+test("Antigravity /model: Gemini models to pick, and the Claude / GPT models only its own app offers, greyed with where to get them", async () => {
+  const models: ModelOpts = { list: [{ modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" }, { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" }], set: [] };
+  const h = await harness(async (_t, ctx) => ctx.say("ok"), {
+    agent: "antigravity",
+    models,
+    height: 34,
+    prep: (app) => { app.agyOnly = async () => [{ id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)" }, { id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" }]; },
+  });
+  try {
+    await h.send("/model");
+    const f = await h.frame((f) => f.includes("Model for") && f.includes("Claude Sonnet 4.6 (Thinking)"));
+    expect(f).toContain("Gemini 3.8 Flash (High)");
+    expect(f).toContain("GPT-OSS 120B (Medium)");
+    expect(f).toContain("codemax --tui --agent antigravity");
+    // A greyed model cannot be picked.
+    await h.setup.mockInput.typeText("claude");
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    await Bun.sleep(200);
+    expect(models.set).toEqual([]);
+  } finally { await h.cleanup(); }
+}, 20000);
+
+test("bug fixes: a message sent while the agent starts waits for it (no stuck agent); queued messages keep their own dropped images; Ctrl+C leaves the setup", async () => {
+  const h = await harness(async (text, ctx) => ctx.say(`got ${text.split("\n")[0]}`), {
+    prep: (app) => {
+      const make = app.engineFactory;
+      app.engineFactory = (a: string) => {
+        const e = make(a);
+        const start = e.start.bind(e);
+        e.start = async (o: any) => (await Bun.sleep(300), start(o));
+        return e;
+      };
+    },
+  });
+  try {
+    // Start a new session and type at once, while it is still starting.
+    void (h.app as any).launch("claude", { fresh: true });
+    await Bun.sleep(30);
+    await h.send("hello while starting");
+    await h.frame((f) => f.includes("got hello while starting"), 10000);
+    expect((h.app as any).active.turn).toBeNull();
+    // Two queued messages, each with its own image.
+    const app: any = h.app;
+    const png = join(mkdtempSync(join(tmpdir(), "codemax-drop2-")), "a.png");
+    writeFileSync(png, "x");
+    const one = app.dropFile(png), two = app.dropFile(png);
+    expect([one, two]).toEqual(["[Image #1]", "[Image #2]"]);
+    expect(app.takeDropped(`first ${one}`).images.length).toBe(1);
+    expect(app.takeDropped(`second ${two}`).images.length).toBe(1); // used to be dropped with the first
+  } finally { await h.cleanup(); }
+
+  const { CONFIG_PATH, saveConfigKey } = await import("../src/config.ts");
+  saveConfigKey("onboarded", false); // an earlier test in this file finished its setup
+  const s = await harness(async (_t, ctx) => ctx.say("ok"), { onboard: true });
+  try {
+    s.setup.mockInput.pressKey("c", { ctrl: true });
+    await (s.app as any).done; // the quit finished (codemax closes the screen only after that)
+    expect((s.app as any).closed).toBe(true);
+    // Not marked done: it comes back next time.
+    expect(existsSync(CONFIG_PATH) ? JSON.parse(readFileSync(CONFIG_PATH, "utf8")).onboarded : undefined).not.toBe(true);
+  } finally {
+    try { s.setup.renderer.destroy(); } catch { /* already gone with the quit */ }
+  }
 }, 30000);

@@ -82,7 +82,7 @@ export function nextTip(index: number, c: TipContext, tips: Tip[] = TIPS, width 
     if (t.when && !t.when(c)) continue;
     const tip = t.text.replace("{hotkey}", c.hotkey);
     const full = `${tip} · / for commands`;
-    const text = full.length <= width ? full : tip.length <= width ? tip : `${tip.slice(0, Math.max(10, width - 1))}…`;
+    const text = full.length <= width ? full : tip.length <= width ? tip : `${tip.slice(0, Math.max(1, width - 1))}…`;
     return { text, index: i };
   }
   return { text: "/ for commands", index };

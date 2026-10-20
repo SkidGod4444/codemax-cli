@@ -15,8 +15,14 @@ const STORAGE = new Set(["const", "let", "var", "function", "fn", "def", "class"
 
 export function languageOf(lang: string): string | undefined {
   const l = lang.trim().toLowerCase().split(/[\s{]/)[0] ?? "";
-  const name = ALIASES[l] ?? l;
-  return name && hljs.getLanguage(name) ? name : undefined;
+  // Own keys only: a fence labelled "constructor" or "__proto__" must not reach Object's.
+  const name = Object.hasOwn(ALIASES, l) ? ALIASES[l]! : l;
+  if (!name || !/^[a-z0-9+#._-]+$/.test(name)) return undefined;
+  try {
+    return hljs.getLanguage(name) ? name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const ENTITIES: Record<string, string> = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#x27;": "'", "&#39;": "'" };
@@ -27,7 +33,7 @@ function colourFor(classes: string[], text: string): string | undefined {
   for (const cls of [...classes].reverse()) {
     const name = cls.replace(/^hljs-/, "").split(/[\s.]/)[0]!.replace(/_$/, "");
     if (name === "keyword" && STORAGE.has(text.trim())) return C.syntax.storage;
-    const c = C.syntax[name];
+    const c = Object.hasOwn(C.syntax, name) ? C.syntax[name] : undefined;
     if (c) return c;
   }
   return undefined;

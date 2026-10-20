@@ -65,7 +65,8 @@ export async function checkForUpdate(current: string, o: { force?: boolean; fetc
     latest = await latestVersion(source, o.fetchImpl);
     try {
       ensureDir(CODEMAX_HOME);
-      writeFileSync(CACHE(), JSON.stringify({ at: Date.now(), latest, source }) + "\n");
+      // A failed check (offline) is not cached: the next start asks again instead of in 12 hours.
+      if (latest !== null) writeFileSync(CACHE(), JSON.stringify({ at: Date.now(), latest, source }) + "\n");
     } catch {
       /* read-only home: check again next time */
     }

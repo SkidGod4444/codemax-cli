@@ -46,7 +46,9 @@ export function displayModelName(id: string | undefined, models: ModelEntry[] = 
   const tidy = (n: string) => n.replace(/\s*\((recommended|default)\)\s*$/i, "");
   if (listed && listed.name && listed.name !== listed.id) return tidy(listed.name);
   if (!bare || /^(default|auto)$/i.test(bare)) return bare.toLowerCase() === "auto" ? "Auto" : "Default";
-  const claude = bare.match(/^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d{1,2})(?:[-.](\d{1,2}))?)?(?:-\d{8})?$/i);
+  // "claude-opus-4-6" and the older order "claude-3-5-sonnet-20241022".
+  const older = bare.match(/^claude-(\d{1,2})(?:[-.](\d{1,2}))?-(opus|sonnet|haiku)(?:-\d{8}|-latest)?$/i);
+  const claude = older ? [bare, older[3]!, older[1]!, older[2]] as RegExpMatchArray : bare.match(/^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d{1,2})(?:[-.](\d{1,2}))?)?(?:-\d{8})?$/i);
   if (claude) {
     const family = claude[1]![0]!.toUpperCase() + claude[1]!.slice(1).toLowerCase();
     if (claude[2]) return `${family} ${claude[2]}${claude[3] ? `.${claude[3]}` : ""}`;

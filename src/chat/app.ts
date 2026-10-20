@@ -22,6 +22,7 @@ import { Transcript, type AgentBlock } from "./transcript.ts";
 import { PermissionDialog } from "./permission.ts";
 import { QuestionDialog } from "./question.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
+import { TaskPanel } from "./tasks.ts";
 import { C, DONE_VERBS, G, VERBS, applyTheme, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
@@ -48,7 +49,7 @@ import { NotePanel, splitNote } from "./notes.ts";
 import { Onboarding, type OnboardingStep } from "./onboarding.ts";
 import { nextTip, TIPS } from "./tips.ts";
 import { SubagentPanel } from "./subagents.ts";
-import { antigravityInstallPlan, installAntigravityServer, type InstallPlan } from "../engines/antigravity.ts";
+import { agyOnlyModels, antigravityInstallPlan, installAntigravityServer, type InstallPlan } from "../engines/antigravity.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -93,6 +94,8 @@ export class ChatApp {
   private permission: PermissionDialog | QuestionDialog | null = null;
   /** First-run setup (or /setup), shown where permission prompts go. */
   private onboarding: Onboarding | null = null;
+  /** Ends the setup screen (Esc, the last step, or Ctrl+C). */
+  private endOnboarding: ((skipped: boolean, done?: boolean) => void) | null = null;
   /** A setup step opened its own picker (the handoff order editor): keys go there meanwhile. */
   private onboardingAside = false;
   private permissionQueue: ({ request: PermissionRequest; engine: Engine } | { question: QuestionRequest; engine: Engine })[] = [];
@@ -189,7 +192,8 @@ export class ChatApp {
     const root = new BoxRenderable(renderer, { id: "chat-root", width: "100%", height: "100%", flexDirection: "column" });
     this.transcript = new Transcript(renderer);
     root.add(this.transcript.box);
-    this.working = new TextRenderable(renderer, { id: "working", content: "", fg: C.dim, height: 1, width: "100%", flexShrink: 0, wrapMode: "none", truncate: true });
+    // Claude Code's spacing: a blank line between the transcript and the spinner, and again above the prompt.
+    this.working = new TextRenderable(renderer, { id: "working", content: "", fg: C.dim, height: 1, width: "100%", flexShrink: 0, wrapMode: "none", truncate: true, marginTop: 1 } as any);
     this.working.visible = false;
     root.add(this.working);
     this.dialogHost = new BoxRenderable(renderer, { id: "dialog-host", width: "100%", flexShrink: 0, flexDirection: "column" });
@@ -197,13 +201,17 @@ export class ChatApp {
     // Side-agent notes wait here, above the queue, until you expand, discuss or dismiss them.
     this.notePanel = new NotePanel(renderer, () => this.active?.name ?? "the main agent");
     root.add(this.notePanel.box);
+    // The agent's plan, pinned above the prompt like Claude Code's task list.
+    this.tasks = new TaskPanel(renderer);
+    root.add(this.tasks.box);
     // Queued messages wait here, pinned just above the prompt, until they are sent.
     this.queueBox = new BoxRenderable(renderer, { id: "queue", width: "100%", flexShrink: 0, flexDirection: "column", paddingX: 1 });
     this.queueBox.visible = false;
     root.add(this.queueBox);
-    this.inputWrap = new BoxRenderable(renderer, { id: "input-wrap", width: "100%", flexShrink: 0, flexDirection: "column", border: ["top", "bottom"], borderStyle: "single", borderColor: C.accent });
+    this.inputWrap = new BoxRenderable(renderer, { id: "input-wrap", width: "100%", flexShrink: 0, flexDirection: "column", border: ["top", "bottom"], borderStyle: "rounded", borderColor: C.promptBorder, marginTop: 1 } as any);
     const inputRow = new BoxRenderable(renderer, { id: "input-row", width: "100%", flexDirection: "row" });
-    inputRow.add(new TextRenderable(renderer, { id: "input-prompt", content: `${G.prompt} `, width: 2, fg: C.accent }));
+    this.promptGlyph = new TextRenderable(renderer, { id: "input-prompt", content: `${G.prompt} `, width: 2, fg: C.dim });
+    inputRow.add(this.promptGlyph);
     this.input = new TextareaRenderable(renderer, {
       id: "chat-input",
       flexGrow: 1,
@@ -215,7 +223,7 @@ export class ChatApp {
         { name: "return", shift: true, action: "newline" },
         { name: "j", ctrl: true, action: "newline" },
       ],
-      onSubmit: () => void this.submit(),
+      onSubmit: () => this.safelyAsync("sending", this.submit()),
     } as any);
     this.input.onContentChange = () => this.onInputChanged();
     inputRow.add(this.input);
@@ -290,6 +298,7 @@ export class ChatApp {
     if (o.onboard) {
       const before = this.config.order[0];
       await this.runOnboarding();
+      if (this.closed) return this.done; // Ctrl+C during the setup
       if (!o.explicit && this.config.order[0] !== before) agent = this.config.order[0] ?? agent;
     }
     const ok = (a: AgentId) => this.detect.get(a)?.installed && this.detect.get(a)?.engine;
@@ -332,6 +341,13 @@ export class ChatApp {
    * shown as a short line and codemax carries on.
    */
   private uiErrors = 0;
+  /** The same for async work started from a key or command: a failure is one line, never a crash. */
+  private safelyAsync(where: string, p: Promise<unknown>) {
+    p.catch((e: any) => this.safely(where, () => {
+      throw e;
+    }));
+  }
+
   private safely(where: string, fn: () => void) {
     try {
       fn();
@@ -415,7 +431,8 @@ export class ChatApp {
       if (images.some((i) => i.path === path) || !droppedFiles(m[1]!)) continue;
       images.push({ path, mimeType: imageType(path)! });
     }
-    this.dropped = [];
+    // Only what this message used: another queued message keeps its own attachments.
+    this.dropped = this.dropped.filter((d) => !text.includes(d.mimeType ? `[Image #${d.n}]` : `[File #${d.n}: ${d.name}]`));
     if (!notes.length) return { text, images };
     return { text: `${text}\n\n[attached by the user]\n${notes.join("\n")}`, images };
   }
@@ -427,6 +444,12 @@ export class ChatApp {
     if (!this.input.focused && !this.closed) this.input.focus();
     if (this.onboarding && !this.onboardingAside) {
       key.stopPropagation();
+      // Ctrl+C leaves the setup and quits, as everywhere else.
+      if (key.name === "c" && key.ctrl) {
+        this.endOnboarding?.(true, false); // not marked done: it comes back next start
+        void this.quit();
+        return;
+      }
       this.onboarding.handleKey(key);
       return;
     }
@@ -496,7 +519,7 @@ export class ChatApp {
         if (now - this.lastEsc < 600) {
           key.stopPropagation();
           this.lastEsc = 0;
-          void this.openRewind();
+          this.safelyAsync("rewind", this.openRewind());
           return;
         }
         this.lastEsc = now;
@@ -611,6 +634,11 @@ export class ChatApp {
     // Wrapping is measured at layout: check again once the frame has the new text.
     setTimeout(() => this.safely("input size", () => this.fitInput()), 0);
     const text = this.input.plainText;
+    // "!" runs a shell command: the prompt says so in pink, as Claude Code's bash mode does.
+    const shell = text.startsWith("!");
+    this.inputWrap.borderColor = shell ? C.accent : C.promptBorder;
+    this.promptGlyph.content = shell ? "! " : `${G.prompt} `;
+    this.promptGlyph.fg = shell ? C.accent : C.dim;
     this.armNote(text);
     if (this.historyIdx >= 0 && text !== this.history[this.historyIdx]) this.historyIdx = -1;
     const mention = text.match(MENTION_RE);
@@ -662,7 +690,9 @@ export class ChatApp {
     this.input.clear();
     this.pushHistory(text);
     this.rotateTip();
-    const busy = !!this.active?.turn || !!this.verifying || !!this.debate;
+    // Busy also while the agent is still starting or a message is on its way (its snapshot):
+    // a second message then queues instead of reaching a half-started agent or racing the first.
+    const busy = !!this.active?.turn || !!this.verifying || !!this.debate || this.starting || this.sending;
     const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
     if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
       this.enqueue(text);
@@ -676,7 +706,7 @@ export class ChatApp {
     }
     const route = this.routeFor(text);
     if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
-    if (this.active.turn || this.verifying || this.debate) {
+    if (this.active.turn || this.verifying || this.debate || this.starting || this.sending) {
       this.enqueue(text);
       return;
     }
@@ -715,6 +745,7 @@ export class ChatApp {
   private async openRewind() {
     if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
     if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /rewind", C.warn);
+    if (this.debate) return this.transcript.note("a debate is reading the code; Esc stops it, then /rewind", C.warn);
     if (!this.config.checkpoints) return this.transcript.note("rewind needs snapshots: /config → Snapshots for /undo → on", C.warn);
     const mine = [...this.checkpoints].reverse().filter((c) => c.message !== undefined && !c.label.startsWith("before rewind: "));
     // Older snapshots of this thread (ones from before threads carry none and are kept).
@@ -768,15 +799,15 @@ export class ChatApp {
       ],
       onPick: (it) => {
         this.closePalette();
-        void this.rewindTo(c, it.value === "edit");
+        this.safelyAsync("rewind", this.rewindTo(c, it.value === "edit"));
       },
-      onClose: () => void this.openRewind(),
+      onClose: () => this.safelyAsync("rewind", this.openRewind()),
     }, this.paletteAnchor);
     this.renderer.root.add(this.palette.box);
   }
 
   private async rewindTo(c: Checkpoint & { agent: AgentId; text: string; fork?: RewindPoint }, edit: boolean) {
-    if (this.active?.turn || this.verifying) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
+    if (this.active?.turn || this.verifying || this.debate) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
     const short = c.text.replace(/\s+/g, " ").slice(0, 60);
     // The conversation first: when it cannot be cut, the agent is told instead.
     const convo = this.conversationRewind(c);
@@ -847,13 +878,16 @@ export class ChatApp {
   private async undo() {
     if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /undo", C.warn);
     if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /undo", C.warn);
-    const cp = this.checkpoints.pop() ?? (await listCheckpoints(this.cwd, 1))[0];
+    if (this.debate) return this.transcript.note("a debate is reading the code; Esc stops it, then /undo", C.warn);
+    // Look before taking it: an undo that finds nothing changed keeps the snapshot for later.
+    const cp = this.checkpoints.at(-1) ?? (await listCheckpoints(this.cwd, 1))[0];
     if (!cp) return this.transcript.note("no checkpoint to restore (checkpoints need a git repo)", C.warn);
     const stat = await checkpointDiffStat(this.cwd, cp.sha);
     if (!stat.trim()) {
       this.transcript.note(`nothing changed since the checkpoint "${cp.label}"`);
       return;
     }
+    if (this.checkpoints.at(-1) === cp) this.checkpoints.pop();
     const r = await restoreCheckpoint(this.cwd, cp.sha);
     this.transcript.note(`reverted to the snapshot ${cp.label}`, C.warn);
     for (const l of stat.split("\n")) this.transcript.note(l);
@@ -1083,7 +1117,9 @@ export class ChatApp {
       if (actives.length < 2) throw new Error("fewer than two agents could start");
       const ask = (a: Active, prompt: string) => new Promise<string>((done) => {
         let reply = "";
-        void this.runTurn(a, prompt, { record: false, journal: false, onReply: (r) => (reply = r) }).finally(() => done(reply));
+        void this.runTurn(a, prompt, { record: false, journal: false, onReply: (r) => (reply = r) })
+          .catch((e: any) => this.transcript.error(`${a.name}: ${String(e?.message ?? e).slice(0, 200)}`))
+          .finally(() => done(reply));
       });
       const me = (a: Active) => ({ name: a.name });
       const others = (a: Active) => actives.filter((x) => x !== a).map(me);
@@ -1171,7 +1207,9 @@ export class ChatApp {
       const spent = fmtUsd(this.today.get(k) ?? 0);
       const label = k === "all" ? "all agents" : getAdapter(k).name;
       if (level === "warn") this.transcript.note(`${label} has used ${spent} of its ${fmtUsd(b[k])} daily budget (80%+)`, C.warn);
-      else this.offerHandoff(agent, `${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, k === "all");
+      // A handoff only for the agent you are on (an /ask or a debater going over does not move you).
+      else if (this.active?.agent === agent && !this.debate) this.offerHandoff(agent, `${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, k === "all");
+      else this.transcript.note(`${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, C.warn);
     }
   }
 
@@ -1196,7 +1234,7 @@ export class ChatApp {
     // After the current one first, then from the top (an earlier agent's limit may have reset).
     const ordered = at >= 0 ? [...list.slice(at + 1), ...list.slice(0, at)] : list;
     for (const e of ordered) {
-      if (e.agent === from || this.broken.has(e.agent)) continue;
+      if (e.agent === from || e.agent === this.active?.agent || this.broken.has(e.agent)) continue;
       const d = this.detect.get(e.agent);
       if (!d?.installed || !d.engine) continue;
       if (isExhausted(this.quota.get(e.agent))) continue;
@@ -1244,7 +1282,7 @@ export class ChatApp {
     }
     this.closePalette();
     // The rest of the order, then any other agent, each once.
-    const rest = [...this.chain(), ...listAdapters(this.config.order).map((a): { agent: AgentId; model?: string; modelName?: string } => ({ agent: a.id }))].filter((e, i, all) => e.agent !== next.agent && e.agent !== from && all.findIndex((x) => x.agent === e.agent) === i && this.detect.get(e.agent)?.engine);
+    const rest = [...this.chain(), ...listAdapters(this.config.order).map((a): { agent: AgentId; model?: string; modelName?: string } => ({ agent: a.id }))].filter((e, i, all) => e.agent !== next.agent && e.agent !== from && e.agent !== this.active?.agent && !this.broken.has(e.agent) && all.findIndex((x) => x.agent === e.agent) === i && this.detect.get(e.agent)?.engine);
     const entries = [next, ...rest];
     const items: PaletteItem[] = [
       { label: `Continue in ${this.entryLabel(next)}`, description: "next in your handoff order: hand over the conversation and the unfinished request", value: "0" },
@@ -1465,10 +1503,16 @@ export class ChatApp {
     if (!o.verifyFix && !isForwardedNote(text)) this.verifyFixes = 0;
     const typed = o.shown ?? text;
     this.transcript.user(typed);
+    this.sending = true;
     const drop = this.takeDropped(text);
     if (drop.images.length) this.transcript.note(`attached ${drop.images.length} image${drop.images.length === 1 ? "" : "s"}: ${drop.images.map((i) => basename(i.path)).join(", ")}`, C.dimmer);
     text = this.withAttachments(drop.text);
-    const cp = await this.checkpoint(active, text, typed);
+    let cp: Checkpoint | null;
+    try {
+      cp = await this.checkpoint(active, text, typed);
+    } finally {
+      this.sending = false;
+    }
     this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "user", text }]);
     const rec = new TurnRecorder(this.ledger.journal, active.agent);
     rec.user(text, cp?.sha);
@@ -1593,8 +1637,8 @@ export class ChatApp {
       { name: "/clear", description: "Clear the screen (history stays in the ledger)", run: () => this.clearScreen() },
       { name: "/help", description: "Keyboard shortcuts and commands", run: () => void (this.shortcuts.visible = true) },
       { name: "/new", description: "Start a fresh session with the current agent", run: () => void (this.active && this.switchTo(this.active.agent, true)) },
-      { name: "/undo", description: "Revert the files changed by the last agent turn", run: () => void this.undo() },
-      { name: "/rewind", description: "Put the files back to before an earlier message (Esc twice)", run: () => void this.openRewind() },
+      { name: "/undo", description: "Revert the files changed by the last agent turn", run: () => this.safelyAsync("undo", this.undo()) },
+      { name: "/rewind", description: "Put the files back to before an earlier message (Esc twice)", run: () => this.safelyAsync("rewind", this.openRewind()) },
       { name: "/verify", description: "Run this project's checks now · /verify <command> sets them · /verify off", run: (a) => void this.verifyCommand(a) },
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
@@ -1700,6 +1744,11 @@ export class ChatApp {
   }
 
   private pendingShell: string[] = [];
+  private tasks: TaskPanel;
+  private promptGlyph: TextRenderable;
+  /** An agent is starting (launch), or a message is being prepared (send): new messages queue. */
+  private starting = false;
+  private sending = false;
   /** A running `!` command (stopped by Esc and on quit). */
   private shellRun: { stop: () => void } | null = null;
   /** Agents started for a moment (to list their models): closed on quit. */
@@ -1750,12 +1799,26 @@ export class ChatApp {
       }
     };
     if (arg) return void apply(arg);
+    // Antigravity's ACP server offers only Gemini on a Google sign-in; the models its own app
+    // adds (Claude, GPT-OSS) are listed, greyed, with where to use them.
+    if (a.agent === "antigravity" && !this.agyChecked) {
+      this.agyChecked = true;
+      void this.agyOnly(models).then((extra) => {
+        this.agyExtra = extra;
+        if (this.active === a) this.openModels("");
+      });
+      return;
+    }
+    const extra = a.agent === "antigravity" ? this.agyExtra : [];
     this.closePalette();
     this.paletteKind = "modes";
     this.palette = new Palette(this.renderer, {
-      title: `Model for ${a.name}`,
+      title: extra.length ? `Model for ${a.name} · greyed ones: its ACP server offers only Gemini on a Google sign-in` : `Model for ${a.name}`,
       // The agent's own list, newest first, by its display name (e.g. "Opus 5.5" for the id "opus").
-      items: sortModels(models).map((m, i) => ({ label: `${m.name}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id, weight: 100 - i })),
+      items: [
+        ...sortModels(models).map((m, i) => ({ label: `${m.name}${m.id === a.engine.info?.currentModel ? "  (current)" : ""}`, value: m.id, weight: 1000 - i })),
+        ...extra.map((m, i) => ({ label: m.name, description: "codemax --tui --agent antigravity (its own app)", value: m.id, disabled: true, weight: 100 - i })),
+      ],
       onPick: (it) => {
         this.closePalette();
         void apply(it.value);
@@ -1764,6 +1827,11 @@ export class ChatApp {
     }, this.paletteAnchor);
     this.renderer.root.add(this.palette.box);
   }
+
+  /** Antigravity: the models its own CLI lists that its ACP server does not offer (swapped in tests). */
+  agyOnly: (acp: { id: string }[]) => Promise<{ id: string; name: string }[]> = (acp) => agyOnlyModels(acp);
+  private agyChecked = false;
+  private agyExtra: { id: string; name: string }[] = [];
 
   private effortOption(a: Active) {
     return a.engine.info?.options?.find((o) => o.category === "thought_level" || /effort|reasoning/i.test(o.id));
@@ -2087,6 +2155,8 @@ export class ChatApp {
     // Agent output never reaches the terminal raw (see safeText).
     active.unsubscribe = engine.onEvent((e) => this.onEngineEvent(active, safeDeep(e)));
     this.active = active;
+    this.tasks.clear();
+    this.starting = true;
     this.setWorking(`${pick(G.spinner, 0)} Starting ${adapter.name}…`);
     try {
       const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off" });
@@ -2127,7 +2197,11 @@ export class ChatApp {
         // A resumed session already remembers its own work: tell it only what others did since.
         const catchup = resumed ? await buildCatchup(input) : null;
         const packet = resumed ? catchup : await buildBrief(input);
-        if (this.closed || this.active !== active) return;
+        if (this.closed || this.active !== active) {
+          if (this.active !== active) return;
+          this.starting = false;
+          return;
+        }
         if (packet) {
           const task = this.ledger.journal.task();
           const what = resumed ? "catching it up on what the other agents did" : task.request ? `handing over the task: ${task.steps.filter((s) => s.kind === "tool").length} steps, the plan and the code diff` : "handing over the conversation and the repo state";
@@ -2140,8 +2214,11 @@ export class ChatApp {
           await this.runTurn(active, packet, { record: false, rec });
         }
       }
+      // Ready: what you typed meanwhile goes now, in order.
+      this.starting = false;
       await this.drainQueue(active);
     } catch (e: any) {
+      this.starting = false;
       this.setWorking(null);
       this.transcript.error(`${adapter.name} failed to start: ${e?.message ?? e}`);
       if (this.active === active) {
@@ -2163,7 +2240,14 @@ export class ChatApp {
     this.setTitle(`✳ ${active.name} working`);
     const main = !this.side.has(active);
     if (main) this.term.prompt(o.record === false ? "(handoff to " + active.name + ")" : text);
-    const stop = await active.engine.prompt(text, o.images);
+    let stop: StopReason;
+    try {
+      stop = await active.engine.prompt(text, o.images);
+    } catch (e: any) {
+      // The agent could not take the turn (not started, gone): never leave it looking busy.
+      this.transcript.error(`${active.name}: ${String(e?.message ?? e).slice(0, 300)}`);
+      stop = "error";
+    }
     if (this.closed) {
       active.turn?.rec?.end(stop);
       active.turn = null;
@@ -2175,6 +2259,10 @@ export class ChatApp {
     this.setTitle();
     if (turn && this.config.bellAfterSeconds > 0 && Date.now() - turn.startedAt > this.config.bellAfterSeconds * 1000) process.stdout.write("\x07");
     if (main) this.subagents.endAll();
+    if (main && active === this.active) {
+      const done = this.tasks.turnEnded();
+      if (done && turn) turn.block.tasksDone(done);
+    }
     if (main && turn) this.notePanel.setPaused(asksUser(turn.block.text()));
     if (turn && main) this.term.turnEnded({ reply: turn.block.text(), ms: Date.now() - turn.startedAt, error: stop === "error", longMs: this.config.bellAfterSeconds > 0 ? this.config.bellAfterSeconds * 1000 : Infinity });
     if (turn) {
@@ -2246,7 +2334,9 @@ export class ChatApp {
         break;
       case "plan":
         active.turn?.rec?.plan(e.entries);
-        target().plan(e.entries);
+        // A live turn of the agent you talk to pins its plan above the prompt; replays keep it in the transcript.
+        if (active === this.active && active.turn) this.tasks.set(e.entries);
+        else target().plan(e.entries);
         break;
       case "tool_call":
         active.turn?.tools.add(e.title.split(/[\s(]/)[0] ?? e.title);
@@ -2401,7 +2491,7 @@ export class ChatApp {
     this.renderFooter();
     if (isExhausted(q) && !isExhausted(prev)) {
       this.ledger.addEvent({ kind: "quota", agent: q.agent, detail: q.detail });
-      if (this.config.autoSwitch && (!this.active || this.active.agent === q.agent)) this.offerHandoff(q.agent, `${getAdapter(q.agent).name} is out of quota${q.resetsAt ? ` until ${fmtTime(q.resetsAt)}` : ""}`);
+      if (this.config.autoSwitch && !this.debate && (!this.active || this.active.agent === q.agent)) this.offerHandoff(q.agent, `${getAdapter(q.agent).name} is out of quota${q.resetsAt ? ` until ${fmtTime(q.resetsAt)}` : ""}`);
     }
   }
 
@@ -2706,19 +2796,22 @@ export class ChatApp {
     };
     return new Promise<void>((resolve) => {
       this.closePalette();
-      this.onboarding = new Onboarding(this.renderer, {
-        steps,
-        apply,
-        onDone: (skipped) => {
+      const finish = (skipped: boolean, done = true) => {
           this.onboarding?.destroy();
           this.onboarding = null;
-          saveConfigKey("onboarded", true);
-          this.config.onboarded = true;
+          if (done) {
+            saveConfigKey("onboarded", true);
+            this.config.onboarded = true;
+          }
           this.transcript.note(skipped ? "setup skipped: the rest keep their defaults · /setup or /config to change them" : `all set${this.config.sideAgent?.agent ? " · pick the side agent's model in /config" : ""} · /config changes any of it`, C.ok);
           this.input.focus();
           resolve();
-        },
-      });
+      };
+      this.endOnboarding = (skipped, done) => {
+        this.endOnboarding = null;
+        if (this.onboarding) finish(skipped, done);
+      };
+      this.onboarding = new Onboarding(this.renderer, { steps, apply, onDone: (skipped) => this.endOnboarding?.(skipped) });
       this.dialogHost.add(this.onboarding.box);
     });
   }
@@ -3148,6 +3241,7 @@ export class ChatApp {
 
   private startSpinner(active: Active) {
     this.stopSpinner();
+    this.renderFooter(); // "esc to interrupt"
     this.spinnerTimer = setInterval(() => {
       const t = active.turn;
       if (!t) return this.stopSpinner();
@@ -3159,7 +3253,7 @@ export class ChatApp {
       if (this.permission) this.setWorking(this.permission instanceof QuestionDialog ? `${glyph} Waiting for your answer (${secs}) · esc to skip` : `${glyph} Waiting for your approval (${secs}) · esc to say no`);
       else {
         // Tips live in the empty prompt only, never on this line above it.
-        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)} · esc to interrupt`);
+        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)}`);
       }
     }, 120);
   }
@@ -3177,6 +3271,7 @@ export class ChatApp {
     if (this.spinnerTimer) clearInterval(this.spinnerTimer);
     this.spinnerTimer = null;
     this.setWorking(null);
+    if (!this.closed) setTimeout(() => this.renderFooter(), 0); // after the turn is cleared
   }
 
   private setWorking(text: string | null) {
@@ -3208,12 +3303,16 @@ export class ChatApp {
     const canCycle = !!a?.engine.setMode && (a.engine.info?.modes.length ?? 0) > 1;
     // Pieces in priority order; low-priority ones are dropped until the line fits.
     const left: { text: string; prio: number }[] = [];
-    if (mode) left.push({ text: `${mode.glyph} ${mode.text}`, prio: 0 });
-    else left.push({ text: "no agent · /switch", prio: 0 });
-    if (canCycle) left.push({ text: "shift+tab to cycle", prio: 3 });
+    // Claude Code's hint line: the permission mode only when it is not the default, then what
+    // the keys do right now (esc while working, ? when idle).
+    const working = !!a?.turn || !!this.verifying || !!this.debate;
+    const special = !!mode && a?.mode !== undefined && !/^(default|on-request)$/.test(a.mode);
+    if (!a) left.push({ text: "no agent · /switch", prio: 0 });
+    else if (special) left.push({ text: `${mode!.glyph} ${mode!.text}${canCycle ? " (shift+tab to cycle)" : ""}`, prio: 0 });
     if (this.flash) left.push({ text: this.flash, prio: 1 });
-    else if (this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
-    else if (!this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
+    else if (working) left.push({ text: "esc to interrupt", prio: 1 });
+    if (!this.flash && this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
+    if (!this.flash && !working && !this.queue.length && !this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
     if (this.updateAvailable) left.push({ text: `↑ ${this.updateAvailable} available · /update`, prio: 1 });
     if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.config.sideAgent.model ? ` ${displayModelName(this.config.sideAgent.model, this.reviewer?.engine.info?.models)}` : ""}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
@@ -3242,7 +3341,7 @@ export class ChatApp {
       c = compose(L, R);
     }
     this.footerText.content = c.gap >= 2 ? c.ls + " ".repeat(c.gap) + c.rs : `${c.ls}  ${c.rs}`.slice(0, width);
-    this.footerText.fg = this.flash ? C.dim : color;
+    this.footerText.fg = this.flash || !special ? C.dim : color;
   }
 
   // ---------- detection / switching / quit ----------
@@ -3265,7 +3364,17 @@ export class ChatApp {
     // Every switch path (menu, /switch, routing, handoff offers) ends here, so an agent that is not really installed is refused here.
     const d = this.detect.get(agent);
     if (d && !d.installed) return this.transcript.note(d.problem ?? `${getAdapter(agent).name} is not installed`, C.warn);
+    // An offer made for the agent you are leaving no longer applies.
+    this.pendingOffer = null;
     this.switching = true;
+    try {
+      await this.switchToInner(agent, fresh, o);
+    } finally {
+      this.switching = false;
+    }
+  }
+
+  private async switchToInner(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean; model?: string }) {
     const prev = this.active;
     let from: AgentId | undefined;
     const pq = prev ? this.quota.get(prev.agent) : undefined;
@@ -3294,7 +3403,6 @@ export class ChatApp {
     const pending = lastTurn?.role === "user" ? "; finish the last user request" : "";
     const reason = fromQ && isExhausted(fromQ) ? `${from} ran out of quota${pending ? " mid-task" : ""}${pending}` : overBudget ? `${from} hit its daily budget${pending}` : o.resumeTask ? `${from} stopped${pending}` : undefined;
     await this.launch(agent, { fresh, from, reason, model: o.model });
-    this.switching = false;
   }
 
   async quit() {

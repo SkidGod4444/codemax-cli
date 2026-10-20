@@ -293,10 +293,30 @@ test("9. reasoning shows as a collapsed Thinking line and plans as a checklist",
     await h.send("plan it");
     const f = await h.frame((f) => f.includes("Done."));
     expect(f).toContain("Thinking");
-    expect(f).toContain("The user wants tests first.");
-    expect(f).toContain("☒ write tests");
+    expect(f).not.toContain("The user wants tests first."); // reasoning waits for ctrl+o, as in Claude Code
+    // The plan is pinned above the prompt (Claude Code's task list), not in the transcript.
+    expect(f).toContain("3 tasks (1 done, 1 in progress, 1 open)");
+    expect(f).toContain("✔ write tests");
     expect(f).toContain("◼ fix theme");
-    expect(f).toContain("☐ ship");
+    expect(f).toContain("◻ ship");
+    h.setup.mockInput.pressKey("o", { ctrl: true });
+    expect(await h.frame((f) => f.includes("The user wants tests first."))).toContain("Thinking…");
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("9b. a finished plan leaves one line in the chat when the pinned list clears", async () => {
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "plan", entries: [{ content: "write tests", status: "completed", priority: "high" }, { content: "ship", status: "completed", priority: "low" }] });
+      await ctx.say("All done.");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("do it");
+    const f = await h.frame((f) => f.includes("2 tasks done: write tests, ship"));
+    expect(f).not.toContain("2 tasks (2 done"); // the pinned list is gone
   } finally { await h.cleanup(); }
 }, 30000);
 
@@ -857,7 +877,7 @@ test("29. queued messages stay pinned above the prompt until sent; the spinner a
     void h.app.start("claude", true);
     await h.frame((f) => f.includes("new session"));
     await h.send("long task");
-    await h.frame((f) => f.includes("Working on it…") && f.includes("Claude Code · Opus 5.5 · esc to interrupt"));
+    await h.frame((f) => f.includes("Working on it…") && f.includes("Claude Code · Opus 5.5") && f.includes("esc to interrupt"));
     await h.send("second message");
     await h.send("third message");
     const f = await h.frame((f) => f.includes("❯ second message") && f.includes("❯ third message"));

@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CODEMAX_HOME } from "../core/paths.ts";
-import { IS_WINDOWS } from "../core/spawn.ts";
+import { IS_WINDOWS, platformArgv } from "../core/spawn.ts";
 
 /**
  * Antigravity CLI (`agy`, Google's successor to Gemini CLI) has no ACP mode of
@@ -95,4 +95,27 @@ export async function installAntigravityServer(plan: InstallPlan, onProgress: (m
   if (!existsSync(bin)) throw new Error(`the archive has no ${BIN}`);
   if (!IS_WINDOWS) chmodSync(bin, 0o755);
   return { cmd: [bin, ...linuxArgs()], version: plan.version };
+}
+
+/**
+ * Models Antigravity's own CLI offers that its ACP server does not (checked with agy 1.4.2 and
+ * agy_acp_server 1.4.1: the server's Google sign-in gets the Gemini models only, and refuses
+ * Claude and GPT-OSS with "not available for the current authentication method"). Read from
+ * `agy models` (a listing, no prompt), so /model can say where those models are. Cached.
+ */
+let agyModels: Promise<{ id: string; name: string }[]> | null = null;
+export function agyOnlyModels(acp: { id: string }[], run: () => Promise<string> = defaultAgyModels): Promise<{ id: string; name: string }[]> {
+  agyModels ??= run()
+    .then((out) => out.split("\n").map((l) => l.split("\t")).filter((p) => p.length >= 2 && p[0]!.trim() && !/^Fetching/.test(p[0]!)).map(([id, name]) => ({ id: id!.trim(), name: name!.trim() })))
+    .catch(() => []);
+  return agyModels.then((all) => all.filter((m) => !acp.some((a) => a.id === m.id || a.id.startsWith(m.id) || m.id.startsWith(a.id))));
+}
+
+async function defaultAgyModels(): Promise<string> {
+  if (!Bun.which("agy")) return "";
+  const p = Bun.spawn(platformArgv(["agy", "models"]), { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+  const timer = setTimeout(() => p.kill(), 8000);
+  const out = await new Response(p.stdout).text();
+  clearTimeout(timer);
+  return out;
 }

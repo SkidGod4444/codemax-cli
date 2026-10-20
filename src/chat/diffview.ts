@@ -37,13 +37,27 @@ function langOfPath(path: string): string | undefined {
 }
 
 export function diffRows(text: string): DiffRow[] {
-  const lines = text.replace(/\n+$/, "").split("\n");
-  type File = { name: string; created: boolean; deleted: boolean; lines: string[] };
+  const lines = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "").split("\n");
+  type File = { name: string; created: boolean; deleted: boolean; lines: string[]; binary?: boolean };
   const files: File[] = [];
   let cur: File | null = null;
+  // A hunk with counts ("@@ -1,2 +1,2 @@") says how many lines follow: inside them "--- x" /
+  // "+++ y" are a removed "-- x" and an added "++ y" (SQL or Lua comments), not a file header.
+  let left = { old: 0, new: 0 };
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
-    if (l.startsWith("--- ") && lines[i + 1]?.startsWith("+++ ")) {
+    const inHunk = left.old > 0 || left.new > 0;
+    const h = l.match(/^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/);
+    if (h) left = { old: h[1] === undefined ? 1 : Number(h[1]), new: h[2] === undefined ? 1 : Number(h[2]) };
+    else if (inHunk) {
+      if (l.startsWith("-")) left.old--;
+      else if (l.startsWith("+")) left.new--;
+      else if (!l.startsWith("\\")) {
+        left.old--;
+        left.new--;
+      }
+    }
+    if (!inHunk && l.startsWith("--- ") && lines[i + 1]?.startsWith("+++ ")) {
       const from = l.slice(4).trim().replace(/^a\//, "");
       const to = lines[i + 1]!.slice(4).trim().replace(/^b\//, "");
       cur = { name: to === "/dev/null" ? from : to, created: from === "/dev/null", deleted: to === "/dev/null", lines: [] };
@@ -51,7 +65,14 @@ export function diffRows(text: string): DiffRow[] {
       i++;
       continue;
     }
-    if (/^diff --git /.test(l) || /^index [0-9a-f]+\.\.[0-9a-f]+/.test(l)) continue;
+    // Git's other header lines say nothing a reader needs; a binary change gets one line.
+    if (/^diff --git /.test(l) || /^index [0-9a-f]+\.\.[0-9a-f]+/.test(l) || /^(new|deleted) file mode |^(old|new) mode |^(dis)?similarity index |^rename (from|to) |^copy (from|to) /.test(l)) continue;
+    const bin = l.match(/^Binary files (?:a\/)?(.+?) and (?:b\/)?(.+?) differ$/);
+    if (bin) {
+      cur = { name: bin[2] === "/dev/null" ? bin[1]! : bin[2]!, created: bin[1] === "/dev/null", deleted: bin[2] === "/dev/null", lines: [], binary: true };
+      files.push(cur);
+      continue;
+    }
     if (!cur) {
       cur = { name: "", created: false, deleted: false, lines: [] };
       files.push(cur);
@@ -68,7 +89,7 @@ export function diffRows(text: string): DiffRow[] {
     const adds = f.lines.filter((l) => l.startsWith("+")).length;
     const dels = f.lines.filter((l) => l.startsWith("-")).length;
     // Claude Code's wording; with several files, each names its file.
-    const what = !adds && !dels ? "No changes" : adds ? `Added ${plural(adds, "line")}${dels ? `, removed ${plural(dels, "line")}` : ""}` : `Removed ${plural(dels, "line")}`;
+    const what = f.binary ? (f.created ? "Added a binary file" : f.deleted ? "Removed a binary file" : "Changed a binary file") : !adds && !dels ? "No changes" : adds ? `Added ${plural(adds, "line")}${dels ? `, removed ${plural(dels, "line")}` : ""}` : `Removed ${plural(dels, "line")}`;
     if (f.name && files.length > 1) out.push({ kind: "summary", text: `${f.name} · ${what}` });
     else out.push({ kind: "summary", text: what });
     const lang = langOfPath(f.name);

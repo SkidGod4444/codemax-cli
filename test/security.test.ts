@@ -131,3 +131,58 @@ test("drag and drop: what terminals paste for a dropped file is read as its path
   expect(imageType("/x/Shot.PNG")).toBe("image/png");
   expect(imageType("/x/notes.pdf")).toBeUndefined();
 });
+
+test("bug fixes: /undo removes new files with non-ASCII names; snapshots in one millisecond stay apart", async () => {
+  const { createCheckpoint, restoreCheckpoint, listCheckpoints } = await import("../src/core/checkpoint.ts");
+  const repo = mkdtempSync(join(tmpdir(), "codemax-sec-utf-"));
+  Bun.spawnSync(["git", "init", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "a.txt"), "a\n");
+  Bun.spawnSync(["git", "-c", "user.email=a@b", "-c", "user.name=t", "add", "-A"], { cwd: repo });
+  Bun.spawnSync(["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "init"], { cwd: repo });
+  const one = await createCheckpoint(repo, "first");
+  const two = await createCheckpoint(repo, "second"); // right after: possibly the same millisecond
+  expect(two!.ts).toBeGreaterThan(one!.ts);
+  expect((await listCheckpoints(repo)).length).toBe(2);
+  writeFileSync(join(repo, "café.ts"), "x");
+  writeFileSync(join(repo, "日本.md"), "y");
+  const r = await restoreCheckpoint(repo, one!.sha);
+  expect(r.removed.sort()).toEqual(["café.ts", "日本.md"].sort());
+  expect(existsSync(join(repo, "café.ts"))).toBe(false);
+});
+
+test("bug fixes: every AI vendor's key is kept from agents, other variables are not touched", async () => {
+  const { agentEnv } = await import("../src/engines/env.ts");
+  const keep = { ...process.env };
+  try {
+    Object.assign(process.env, { OPENROUTER_API_KEY: "x", DEEPSEEK_API_KEY: "x", AZURE_OPENAI_API_KEY: "x", CODEX_API_KEY: "x", MISTRAL_API_KEY: "x", ANTHROPIC_AUTH_TOKEN: "x", STRIPE_API_KEY: "keep", MY_SETTING: "keep" });
+    const env = agentEnv();
+    for (const k of ["OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "AZURE_OPENAI_API_KEY", "CODEX_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_AUTH_TOKEN"]) expect(env[k]).toBeUndefined();
+    expect(env.STRIPE_API_KEY).toBe("keep");
+    expect(env.MY_SETTING).toBe("keep");
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in keep)) delete process.env[k];
+  }
+});
+
+test("bug fixes: folders whose names differ only in punctuation keep separate histories; a torn journal line loses only itself", async () => {
+  const { projectDir } = await import("../src/core/paths.ts");
+  const base = mkdtempSync(join(tmpdir(), "codemax-sec-proj-"));
+  const a = projectDir(join(base, "my-app")), b = projectDir(join(base, "my_app")), c = projectDir(join(base, "my.app"));
+  expect(new Set([a, b, c]).size).toBe(3);
+  expect(projectDir(join(base, "my_app"))).toBe(b); // stable
+  const { Journal, TurnRecorder } = await import("../src/core/journal.ts");
+  const dir = mkdtempSync(join(tmpdir(), "codemax-sec-journal-"));
+  const j = new Journal(dir);
+  j.append({ id: "1", ts: 1, agent: "claude", turn: "1", kind: "user", text: "first" });
+  const { appendFileSync } = await import("node:fs");
+  appendFileSync(join(dir, "journal.jsonl"), '{"id":"2","ts":2,"agent":"cla'); // a crash mid-write
+  j.append({ id: "3", ts: 3, agent: "claude", turn: "3", kind: "user", text: "after the crash" });
+  expect(j.steps().map((s: any) => s.text)).toEqual(["first", "after the crash"]);
+  // A turn cut off by max_tokens is not finished.
+  const rec = new TurnRecorder(j, "claude");
+  rec.user("long task");
+  rec.end("max_tokens");
+  const end = j.steps().find((s: any) => s.kind === "end") as any;
+  expect(end.outcome).toBe("error");
+  expect(end.detail).toBe("stopped: max_tokens");
+});

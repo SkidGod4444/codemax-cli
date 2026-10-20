@@ -5,8 +5,10 @@ import type { ErrorKind } from "./types.ts";
  * your session limit · resets 3pm" or "Claude AI usage limit reached"; Codex
  * "You've hit your usage limit"; Grok "free-usage-exhausted" / 429.
  */
-const QUOTA = /usage limit|session limit|weekly limit|daily limit|monthly limit|hit your limit|limit reached|limit · resets|out of (credits|quota)|quota|rate.?limit|too many requests|\b429\b|insufficient|usage[-_ ]exhausted|credits? (exhausted|depleted)/i;
-const AUTH = /\bauth|login|unauthori[sz]ed|\b401\b|not logged in/i;
+// Specific wording only: "insufficient permissions", "context window limit reached" or a stray
+// "429" in some tool's error are not a subscription running out.
+const QUOTA = /usage limit|session limit|weekly limit|daily limit|monthly limit|hit your limit|limit · resets|out of (credits|quota)|quota (exceeded|exhausted)|exceeded your (current )?quota|rate.?limit|too many requests|insufficient (credits|quota|balance|funds)|usage[-_ ]exhausted|credits? (exhausted|depleted)/i;
+const AUTH = /\/login\b|authenticat|\bauth(entication)? required|\blog ?in (required|again|to)|login required|unauthori[sz]ed|\b401\b|not logged in|sign in (required|again|to)/i;
 
 /** The human part of an agent error: drops "Internal error" and unwraps {"details": "..."} / {"message": "..."}. */
 export function cleanError(text: string): string {

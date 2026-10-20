@@ -18,6 +18,8 @@ export interface AgentBlock {
   plan(entries: PlanEntry[]): void;
   tool(id: string, title: string, status: string, detail?: string, kind?: string): void;
   toolUpdate(id: string, status?: string, title?: string, detail?: string): void;
+  /** A plan finished: one dim line keeps it in the chat after the pinned list clears. */
+  tasksDone(entries: PlanEntry[]): void;
   /** Closing dim line, e.g. "✻ Worked for 13s · done 7:25 PM". */
   footer(text: string): void;
   /** The reply as plain text: paragraphs joined by blank lines. */
@@ -151,7 +153,11 @@ export class Transcript {
       if (para) {
         if (styleTimer) clearTimeout(styleTimer);
         styleTimer = null;
-        para.node.content = styleMarkdown(para.text);
+        try {
+          para.node.content = styleMarkdown(para.text);
+        } catch {
+          para.node.content = para.text;
+        }
       }
     };
     const toolResult = (detail: string, failed: boolean, kind?: string): Collapsible => {
@@ -188,7 +194,16 @@ export class Transcript {
         }
         const p = para;
         // Restyle at most every 80ms while streaming; the final append is always styled.
-        if (!styleTimer) styleTimer = setTimeout(() => { styleTimer = null; p.node.content = styleMarkdown(p.text); }, 80);
+        if (!styleTimer)
+          styleTimer = setTimeout(() => {
+            styleTimer = null;
+            // Styling runs on a timer, outside every handler: a failure keeps the plain text.
+            try {
+              p.node.content = styleMarkdown(p.text);
+            } catch {
+              p.node.content = p.text;
+            }
+          }, 80);
         self.scrollToEnd();
       },
       thought(t, messageId) {
@@ -200,9 +215,10 @@ export class Transcript {
             node: null as unknown as TextRenderable,
             full: "",
             render: (text, expanded) => {
+              // Claude Code keeps reasoning out of the normal view; ctrl+o shows it.
               const body = text.trim();
-              const shown = expanded ? body : clip(body, 2, 160);
-              return new StyledText([fg(C.thought)(italic(`Thinking${shown ? "… " : "…"}`)), fg(C.thought)(italic(shown))]);
+              if (!expanded) return new StyledText([fg(C.thought)(italic("Thinking…")), fg(C.dimmer)(body ? " (ctrl+o to expand)" : "")]);
+              return new StyledText([fg(C.thought)(italic("Thinking… ")), fg(C.thought)(italic(body))]);
             },
           };
           c.node = self.line(`${G.thought} `, "", { glyphFg: C.thought, gap: true });
@@ -269,6 +285,14 @@ export class Transcript {
             e.result.node.content = e.result.render(detail, self.expanded);
           } else e.result = toolResult(detail, status === "failed", e.kind);
         }
+      },
+      tasksDone(entries) {
+        settle();
+        para = null;
+        thinking = null;
+        const n = entries.length;
+        self.line(`${G.done_} `, `${n} task${n === 1 ? "" : "s"} done: ${entries.map((e) => e.content).join(", ")}`, { fg: C.dim, glyphFg: C.ok, gap: true });
+        self.scrollToEnd();
       },
       footer(text) {
         settle();
@@ -349,7 +373,8 @@ function clip(text: string, lines: number, width: number): string {
 
 /** Tool output: first lines, then "… +N lines" like Claude Code's collapsed results. */
 export function summarize(detail: string, keep = 5): string {
-  const lines = detail.replace(/\s+$/, "").split("\n");
+  // Each kept line at most 300 characters: one minified line must not fill the screen.
+  const lines = detail.replace(/\s+$/, "").split("\n").map((l) => (l.length > 300 ? `${l.slice(0, 299)}…` : l));
   if (lines.length <= keep) return lines.join("\n");
   return lines.slice(0, keep).join("\n") + `\n… +${lines.length - keep} lines (ctrl+o to expand)`;
 }
@@ -372,6 +397,7 @@ function toolTitle(title: string): StyledText {
 
 /** A file read, collapsed: "Read 42 lines" (ctrl+o shows the content), as Claude Code shows reads. */
 function readSummary(content: string): StyledText {
-  const n = content.replace(/\n+$/, "").split("\n").length;
+  const body = content.replace(/\n+$/, "");
+  const n = body ? body.split("\n").length : 0;
   return new StyledText([...stringToStyledText("Read ").chunks, bold(String(n)), ...stringToStyledText(` line${n === 1 ? "" : "s"}`).chunks, dim(" (ctrl+o to expand)")]);
 }

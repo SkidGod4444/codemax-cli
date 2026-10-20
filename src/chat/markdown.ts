@@ -13,6 +13,7 @@ const plain = (s: string): TextChunk[] => (s ? stringToStyledText(s).chunks : []
  * does not know is named once, dimmed, and shown in one colour). Diffs in a fence read as diffs.
  */
 export function styleMarkdown(text: string): StyledText {
+  text = text.replace(/\r\n?/g, "\n");
   const chunks: TextChunk[] = [];
   const lines = text.split("\n");
   let fence: { lang: string; lines: string[] } | null = null;
@@ -43,16 +44,17 @@ export function styleMarkdown(text: string): StyledText {
       chunks.push(bold(italic(underline(line.replace(/^#\s+/, "")))));
     } else if (/^#{2,6}\s/.test(line)) {
       chunks.push(bold(line.replace(/^#{2,6}\s+/, "")));
+    } else if (/^\s*(-{3,}|\*{3,}|_{3,}|(\*\s*){3,}|(-\s*){3,})\s*$/.test(line)) {
+      // A rule before a bullet: "* * *" and "- - -" are rules.
+      chunks.push(dim("---"));
     } else if (/^\s*[-*•+]\s+/.test(line)) {
       const m = line.match(/^(\s*)[-*•+]\s+(.*)$/)!;
       chunks.push(...plain(`${m[1]}- `), ...inline(m[2]!));
     } else if (/^\s*\d+[.)]\s+/.test(line)) {
       const m = line.match(/^(\s*\d+[.)]\s+)(.*)$/)!;
       chunks.push(...plain(m[1]!), ...inline(m[2]!));
-    } else if (/^\s*>\s?/.test(line)) {
+    } else if (/^\s*>(\s|$)/.test(line)) {
       chunks.push(dim("▎ "), ...inline(line.replace(/^\s*>\s?/, "")).map((c) => ({ ...c, attributes: (c.attributes ?? 0) | 2 })));
-    } else if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
-      chunks.push(dim("---"));
     } else {
       chunks.push(...inline(line));
     }
@@ -66,7 +68,8 @@ export function styleMarkdown(text: string): StyledText {
 /** Inline: `code`, **bold**, *italic*, [links](url). */
 function inline(s: string): TextChunk[] {
   const out: TextChunk[] = [];
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(\[[^\]]+\]\([^)\s]+\))/g;
+  // *italic* only when the asterisks are not inside a word or a path: "src/*.ts" and "*args" stay as typed.
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|((?<![\w*/])\*(?![\s*])[^*\n]+?(?<![\s*/])\*(?![\w*]))|(\[[^\]]+\]\([^)\s]+\))/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(s))) {
@@ -87,6 +90,7 @@ function inline(s: string): TextChunk[] {
 
 /** Tool output: colour diff lines, dim the rest. */
 export function styleToolOutput(text: string): StyledText {
+  text = text.replace(/\r\n?/g, "\n");
   if (isDiff(text)) return styleDiffRows(diffRows(text));
   const chunks: TextChunk[] = [];
   const lines = text.split("\n");

@@ -1,5 +1,6 @@
 import { join } from "node:path";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { appendLine } from "./paths.ts";
 import type { AgentId } from "../adapters/types.ts";
 
 /**
@@ -58,7 +59,7 @@ export class Journal {
   }
 
   append(step: Step) {
-    appendFileSync(this.path, JSON.stringify(step) + "\n", { mode: 0o600 });
+    appendLine(this.path, JSON.stringify(step));
   }
 
   /** All steps in order, each at its latest version, without the ones a rewind took back. */
@@ -214,8 +215,11 @@ export class TurnRecorder {
     for (const id of this.dirtyTools) this.writeTool(id);
     this.dirtyTools.clear();
     const inFlight = [...this.tools.values()].filter((t) => t.status === "pending" || t.status === "in_progress").map((t) => t.id);
-    const outcome: Outcome = this.limitHit ? "limit" : stopReason === "cancelled" ? "cancelled" : stopReason === "error" ? "error" : "done";
-    this.journal.append({ ...this.base(), id: `${this.turn}:end`, kind: "end", outcome, detail: clip(detail ?? this.lastError, 400), inFlight: inFlight.length ? inFlight : undefined });
+    // Only a turn that ended normally is done. One cut off by max_tokens, a refusal or an
+    // unknown reason is not: the next agent must be told to continue it, not that it finished.
+    const outcome: Outcome = this.limitHit ? "limit" : stopReason === "cancelled" ? "cancelled" : stopReason === "end_turn" || stopReason === "done" ? "done" : "error";
+    const why = outcome === "error" && stopReason !== "error" ? `stopped: ${stopReason}` : undefined;
+    this.journal.append({ ...this.base(), id: `${this.turn}:end`, kind: "end", outcome, detail: clip(detail ?? this.lastError ?? why, 400), inFlight: inFlight.length ? inFlight : undefined });
   }
 
   private writeTool(callId: string) {

@@ -124,7 +124,10 @@ export class CodexEngine implements Engine {
     })();
     void proc.exited.then((code) => {
       if (this.transport) this.emit({ type: "error", kind: "crashed", message: `codex app-server exited with code ${code}` });
-      if (this.turn) this.turn.resolve("error");
+      // Nothing will answer now: requests in flight fail instead of waiting forever.
+      for (const p of this.pending.values()) p.reject(new Error(`codex app-server exited with code ${code}`));
+      this.pending.clear();
+      if (this.turn) this.finishTurn("error");
     });
     const sink: { cb: ((line: string) => void) | null } = { cb: null };
     void (async () => {
@@ -172,6 +175,8 @@ export class CodexEngine implements Engine {
   }
 
   private request(method: string, params: unknown): Promise<any> {
+    if (!this.transport) return Promise.reject(new Error("Codex is not running"));
+    if (this.proc && this.proc.exitCode !== null) return Promise.reject(new Error(`codex app-server exited with code ${this.proc.exitCode}`));
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
@@ -231,7 +236,7 @@ export class CodexEngine implements Engine {
       return;
     }
     // Unknown server request: decline politely so the agent does not hang.
-    this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `codemax does not handle ${method}` } }));
+    this.transport?.send(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `codemax does not handle ${method}` } }));
   }
 
   /** Codex's request_user_input: one dialog field per question (pick an option, or type with "Other"). */
@@ -457,7 +462,7 @@ export class CodexEngine implements Engine {
     const a = this.pendingApprovals.get(requestId);
     if (!a) return;
     this.pendingApprovals.delete(requestId);
-    this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id: a.rpcId, result: { decision: optionId } }));
+    this.transport?.send(JSON.stringify({ jsonrpc: "2.0", id: a.rpcId, result: { decision: optionId } }));
   }
 
   /** Where this thread stands: after its latest turn (Codex forks a thread through a turn), or empty. */

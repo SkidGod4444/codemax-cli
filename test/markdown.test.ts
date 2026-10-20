@@ -57,3 +57,35 @@ test("diffs mark the words that changed (Claude Code's word-level highlight), no
   const rewritten = diffRows("@@ -1 +1 @@\n-alpha beta gamma\n+totally different words");
   expect(rewritten.find((r) => r.kind === "add")!.words).toBeUndefined(); // over 40% changed: whole-line band only
 });
+
+test("bug fixes: asterisks in paths and code stay, '>=' is not a quote, rules, constructor fences, CRLF", async () => {
+  const { applyTheme } = await import("../src/chat/theme.ts");
+  applyTheme("dark");
+  expect(text(styleMarkdown("edit src/*.ts and test/*.ts"))).toBe("edit src/*.ts and test/*.ts");
+  expect(text(styleMarkdown("use **kwargs and *args here"))).toBe("use **kwargs and *args here");
+  const it = styleMarkdown("this is *really* it");
+  expect(text(it)).toBe("this is really it");
+  expect(it.chunks.find((c: any) => c.text === "really")?.attributes).toBeTruthy();
+  expect(text(styleMarkdown(">= 2.0 is required"))).toBe(">= 2.0 is required");
+  expect(text(styleMarkdown("> quoted"))).toBe("▎ quoted");
+  expect(text(styleMarkdown("* * *"))).toBe("---");
+  expect(text(styleMarkdown("- - -"))).toBe("---");
+  expect(() => styleMarkdown("```constructor\nx\n```")).not.toThrow();
+  expect(() => styleMarkdown("```__proto__\nx\n```")).not.toThrow();
+  expect(text(styleMarkdown("# T\r\nbody\r\n"))).not.toContain("\r");
+});
+
+test("bug fixes: git headers in diffs, binary files, '-- ' comments inside a hunk, model names, tips at small widths", async () => {
+  const { diffRows } = await import("../src/chat/diffview.ts");
+  const kinds = (t: string) => diffRows(t).map((r) => (r.kind === "summary" || r.kind === "note" ? `${r.kind}:${r.text}` : r.kind));
+  expect(kinds("diff --git a/n.ts b/n.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/n.ts\n@@ -0,0 +1,2 @@\n+a\n+b")).toEqual(["summary:Added 2 lines", "add", "add"]);
+  expect(kinds("diff --git a/x.png b/x.png\nBinary files a/x.png and b/x.png differ")).toEqual(["summary:Changed a binary file"]);
+  expect(kinds("@@ -1,2 +1,2 @@\n--- old comment\n+++ new comment\n keep")).toEqual(["summary:Added 1 line, removed 1 line", "del", "add", "ctx"]);
+  const { displayModelName } = await import("../src/chat/models.ts");
+  expect(displayModelName("claude-3-5-sonnet-20241022")).toBe("Sonnet 3.5");
+  expect(displayModelName("claude-opus-4-6")).toBe("Opus 4.6");
+  const { nextTip } = await import("../src/chat/tips.ts");
+  expect(nextTip(0, { agents: 1, checks: false, hotkey: "ctrl+^" }, undefined, 5).text.length).toBeLessThanOrEqual(5);
+  const { summarize } = await import("../src/chat/transcript.ts");
+  expect(summarize("x".repeat(100_000)).length).toBeLessThan(400);
+});

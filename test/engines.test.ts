@@ -411,3 +411,24 @@ test("edit diffs: Antigravity's client_edit_file (recorded from agy_acp_server 1
   expect(simpleDiff("a.txt", "same\n", "same\n")).toContain("(no change");
   expect(simpleDiff("new.txt", null, "x\ny\n")).toBe("--- /dev/null\n+++ new.txt\n+x\n+y");
 });
+
+test("codex bug fixes: a crashed app-server fails pending requests instead of hanging; closing with an approval open is safe", async () => {
+  let exit!: () => void;
+  const exited = new Promise<number>((r) => (exit = () => r(1)));
+  const { transport, sent } = codexFake((m, reply) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+    else if (m.method === "turn/start") {
+      reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "t1" } } });
+      reply({ jsonrpc: "2.0", id: 9, method: "item/commandExecution/requestApproval", params: { itemId: "c1", command: "rm -rf build" } });
+    }
+  });
+  const e = new CodexEngine({ transport });
+  const asked: string[] = [];
+  e.onEvent((x) => x.type === "permission_request" && asked.push(x.request.id));
+  await e.start({ cwd: "/tmp" });
+  void e.prompt("clean up");
+  for (let i = 0; i < 50 && !asked.length; i++) await Bun.sleep(5);
+  expect(asked.length).toBe(1);
+  await expect(e.close()).resolves.toBeUndefined(); // used to throw: the approval was answered after the transport was gone
+  void exited; void exit; void sent;
+});

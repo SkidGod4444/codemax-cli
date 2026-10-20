@@ -13,12 +13,13 @@ export const G = {
   prompt: "❯",
   bullet: "⏺",
   nest: "⎿",
-  spinner: ["✻", "✶", "✳", "✢", "·", "✽"],
+  // Claude Code's frames, played forwards then back.
+  spinner: ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"],
   done: "✻",
   thought: "∴",
-  todo: "☐",
+  todo: "◻",
   doing: "◼",
-  done_: "☒",
+  done_: "✔",
   modeOn: "⏵⏵",
   modeAsk: "⏵",
   modePause: "⏸",
@@ -63,6 +64,8 @@ export interface Palette {
   link: string;
   /** The band behind your own messages. */
   userBg: string;
+  /** The lines above and below the prompt (pink only in "!" shell mode). */
+  promptBorder: string;
   /** Code highlighting, by highlight.js class (Monokai Extended dark, GitHub light, as Claude Code). */
   syntax: Record<string, string>;
   /** Reasoning text. */
@@ -95,6 +98,7 @@ const DARK: Palette = {
   code: "#b1b9f9",
   link: "#6cb6ff",
   userBg: "#373737",
+  promptBorder: "#888888",
   syntax: {
     keyword: "#f92672", operator: "#f92672", storage: "#66d9ef", built_in: "#a6e22e", type: "#a6e22e", title: "#a6e22e",
     literal: "#be84ff", number: "#be84ff", symbol: "#be84ff", string: "#e6db74", regexp: "#e6db74", params: "#fd971f",
@@ -128,6 +132,7 @@ const LIGHT: Palette = {
   code: "#5769f7",
   link: "#0b5cd5",
   userBg: "#f0f0f0",
+  promptBorder: "#999999",
   syntax: {
     keyword: "#a71d5d", operator: "#a71d5d", storage: "#a71d5d", built_in: "#0086b3", type: "#0086b3", title: "#795da3",
     literal: "#0086b3", number: "#0086b3", symbol: "#0086b3", string: "#183691", regexp: "#183691", params: "#0086b3",

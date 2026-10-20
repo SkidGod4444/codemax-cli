@@ -96,6 +96,8 @@ export class QuestionDialog {
     else if (n === "return") return this.enter();
     else if (n === "backspace" && onText) this.typed = this.typed.slice(0, -1);
     else if (n === "space" && !onText && this.field.kind === "multi") this.toggle(this.cursor);
+    // On a single-choice option Space does nothing (it used to start typing an answer).
+    else if (n === "space" && !onText) return true;
     // Digits pick unless you are typing an answer (an empty answer box still takes digits as picks).
     else if ((!onText || !this.typed) && /^[1-9]$/.test(n) && rows[Number(n) - 1]?.kind === "option") {
       const i = Number(n) - 1;
