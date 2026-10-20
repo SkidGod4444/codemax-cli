@@ -1,3 +1,4 @@
+import { debugEvent, debugOnce } from "../core/debuglog.ts";
 import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PromptImage, QuestionAnswer, QuestionRequest, RewindPoint, StopReason, ToolStatus } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
@@ -73,7 +74,9 @@ export class CodexEngine implements Engine {
     this.cwd = o.cwd;
     this.transport = this.opts.transport ?? this.spawn(o.cwd);
     this.transport.onLine((line) => this.onLine(line));
+    const t0 = Date.now();
     const init = await this.request("initialize", { clientInfo: { name: "codemax", version: pkg.version }, capabilities: {} });
+    debugEvent("codex-init", { userAgent: String(init?.userAgent ?? "").split(" ")[0], ms: Date.now() - t0, resume: !!o.resume || undefined });
     this.notify("initialized", {});
 
     this.questions = o.questions !== false;
@@ -187,7 +190,7 @@ export class CodexEngine implements Engine {
     if (this.proc && this.proc.exitCode !== null) return Promise.reject(new Error(`codex app-server exited with code ${this.proc.exitCode}`));
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, method, at: Date.now() } as any);
       this.transport!.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     });
   }
@@ -207,6 +210,11 @@ export class CodexEngine implements Engine {
       const p = this.pending.get(m.id);
       if (!p) return;
       this.pending.delete(m.id);
+      // Failed and slow requests, by method (debug log; never their parameters).
+      const pm = (p as any).method as string | undefined;
+      const ms = Date.now() - ((p as any).at ?? Date.now());
+      if (m.error) debugEvent("codex-rpc-error", { method: pm, code: m.error.code, message: String(m.error.message ?? "") });
+      else if (ms > 5000 && pm !== "turn/start") debugEvent("codex-rpc-slow", { method: pm, ms });
       if (m.error) p.reject(Object.assign(new Error(m.error.message ?? JSON.stringify(m.error)), { data: m.error }));
       else p.resolve(m.result);
       return;
@@ -244,6 +252,7 @@ export class CodexEngine implements Engine {
       return;
     }
     // Unknown server request: decline politely so the agent does not hang.
+    debugEvent("codex-unknown-request", { method });
     this.transport?.send(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32601, message: `codemax does not handle ${method}` } }));
   }
 
@@ -452,6 +461,7 @@ export class CodexEngine implements Engine {
         if (p.turn?.id) this.lastTurnId = p.turn.id;
         break;
       default:
+        debugOnce(`codex:${method}`, "codex-unknown-notification", { method });
         break;
     }
   }

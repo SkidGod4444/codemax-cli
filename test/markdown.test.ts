@@ -89,3 +89,17 @@ test("bug fixes: git headers in diffs, binary files, '-- ' comments inside a hun
   const { summarize } = await import("../src/chat/transcript.ts");
   expect(summarize("x".repeat(100_000)).length).toBeLessThan(400);
 });
+
+test("long code is highlighted in cached pieces: same text back, and a growing block reuses the earlier pieces", async () => {
+  const { highlightCode } = await import("../src/chat/highlight.ts");
+  const { applyTheme } = await import("../src/chat/theme.ts");
+  applyTheme("dark");
+  let code = "";
+  for (let i = 0; i < 300; i++) code += `const value${i}: number = compute(${i}, "x"); // note ${i}\n`;
+  const text = (cs: any[]) => cs.map((c) => c.text).join("");
+  expect(text(highlightCode(code, "ts"))).toBe(code);
+  const t0 = performance.now();
+  for (let i = 0; i < 30; i++) highlightCode(code + `const extra${i} = ${i};\n`, "ts"); // only the last piece is new
+  expect(performance.now() - t0).toBeLessThan(300);
+  expect(highlightCode(code, "ts").some((c: any) => c.fg)).toBe(true);
+});

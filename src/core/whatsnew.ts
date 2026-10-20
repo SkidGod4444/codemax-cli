@@ -6,6 +6,11 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.14": [
+    "Smoother typing while agents stream long code replies",
+    "Faster / and @file pickers, even in big projects",
+    "Debug log (on by default, never your chat): /debug export",
+  ],
   "0.1.13": [
     "Colour themes: Claude Code, Ocean, Teal, Mono (/theme)",
     "Usage limit warnings on the prompt, agent warnings shown",

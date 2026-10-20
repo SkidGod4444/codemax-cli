@@ -69,15 +69,41 @@ export class Palette {
     }
     this.filter = text;
     const q = text.trim().toLowerCase();
-    const scored = this.opts.items
-      .map((it) => ({ it, s: score(it, q) }))
-      .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || (b.it.weight ?? 0) - (a.it.weight ?? 0) || a.it.label.localeCompare(b.it.label));
-    this.matches = scored.map((x) => x.it);
+    // Fast on big lists (the @file picker over a large repo): labels are prepared once, the
+    // empty query reuses one sorted order, and a query that only grew searches the previous
+    // matches, not the whole list.
+    const items = this.opts.items;
+    if (items !== this.sortedFor) {
+      this.sortedFor = items;
+      this.sorted = [...items].sort(byWeightThenLabel);
+      this.last = null;
+    }
+    if (!q) {
+      this.matches = this.sorted;
+      this.last = null;
+    } else {
+      // Every kind of match narrows as the query grows, except that letters-in-order matching
+      // starts at 3 letters: going from 2 to 3 searches everything again.
+      const narrows = !!this.last && q.startsWith(this.last.q) && (this.last.q.length >= 3 || q.length < 3);
+      const pool = narrows ? this.last!.hits : this.sorted;
+      const scored: { it: PaletteItem; s: number }[] = [];
+      for (const it of pool) {
+        const sc = score(it, q);
+        if (sc > 0) scored.push({ it, s: sc });
+      }
+      // The pool is already in weight/label order, so a stable sort by score keeps it.
+      scored.sort((a, b) => b.s - a.s);
+      this.matches = scored.map((x) => x.it);
+      this.last = { q, hits: this.matches };
+    }
     this.cursor = Math.min(this.cursor, Math.max(0, this.matches.length - 1));
 
     this.render();
   }
+
+  private sortedFor: PaletteItem[] | null = null;
+  private sorted: PaletteItem[] = [];
+  private last: { q: string; hits: PaletteItem[] } | null = null;
 
   /** Replace items without losing the highlighted row (matched by value). */
   setItems(items: PaletteItem[]) {
@@ -176,14 +202,30 @@ export class Palette {
 }
 
 /** 3 = prefix match, 2 = word-start match (after : _ - /), 1 = substring in description; 0 = no match. */
+function byWeightThenLabel(a: PaletteItem, b: PaletteItem): number {
+  return (b.weight ?? 0) - (a.weight ?? 0) || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0);
+}
+
+/** An item's lower-cased label, its words and description, computed once per item. */
+const prepared = new WeakMap<PaletteItem, { label: string; words: string[]; desc: string }>();
+function prep(it: PaletteItem) {
+  let p = prepared.get(it);
+  if (!p) {
+    const label = it.label.toLowerCase().replace(/^\//, "");
+    p = { label, words: label.split(/[:_\-/. ]/), desc: (it.description ?? "").toLowerCase() };
+    prepared.set(it, p);
+  }
+  return p;
+}
+
 function score(it: PaletteItem, q: string): number {
   if (!q) return 1;
-  const label = it.label.toLowerCase().replace(/^\//, "");
+  const { label, words, desc } = prep(it);
   const needle = q.replace(/^\//, "");
   if (label.startsWith(needle)) return 3;
-  if (label.split(/[:_\-/. ]/).some((w) => w.startsWith(needle))) return 2;
+  if (words.some((w) => w.startsWith(needle))) return 2;
   if (label.includes(needle)) return 1.5;
-  if ((it.description ?? "").toLowerCase().includes(needle)) return 1;
+  if (desc.includes(needle)) return 1;
   // Letters in order ("mdl" → model) still find it, ranked last.
   return isSubsequence(needle, label) ? 0.5 : 0;
 }

@@ -117,3 +117,27 @@ test("the old, overcounted usage logs are removed once, on the first start of th
   expect(resetOldUsageOnce(cfg, () => {})).toBe(0); // never again
   expect(existsSync(join(proj, "usage.jsonl"))).toBe(true);
 });
+
+test("CODEMAX_PERF=1 logs slow keys and event-loop stalls with what was on screen", async () => {
+  const { PerfLog } = await import("../src/chat/perf.ts");
+  const { CODEMAX_HOME } = await import("../src/core/paths.ts");
+  const { createTestRenderer } = await import("@opentui/core/testing");
+  const { readFileSync, existsSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const file = join(CODEMAX_HOME, "perf.log");
+  if (existsSync(file)) rmSync(file);
+  const setup = await createTestRenderer({ width: 80, height: 24 });
+  const log = new PerfLog(setup.renderer, () => ({ palette: "commands", transcriptRows: 1200 }));
+  log.key("a", 1); // fast: not logged
+  log.key("b", 12);
+  await Bun.sleep(30);
+  const t0 = performance.now();
+  while (performance.now() - t0 < 150) {} // block the event loop
+  await Bun.sleep(120);
+  log.stop();
+  setup.renderer.destroy();
+  const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  expect(lines.find((l) => l.event === "slow-key")).toMatchObject({ key: "b", ms: 12, palette: "commands", transcriptRows: 1200 });
+  expect(lines.some((l) => l.event === "slow-key" && l.key === "a")).toBe(false);
+  expect(lines.find((l) => l.event === "stall")!.ms).toBeGreaterThan(60);
+});

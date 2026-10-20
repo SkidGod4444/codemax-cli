@@ -1360,3 +1360,73 @@ test("49. after /update, what changed since the old version shows above the prom
     await h.frame((f) => !f.includes("What's new in codemax"));
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("50. with the debug log on, errors and unknown agent messages are recorded, and nothing of the conversation is", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { existsSync, rmSync } = await import("node:fs");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true); // on by default: cli.ts turns it on before the app starts
+  const h = await harness({
+    claude: async (text, ctx) => {
+      await upd(ctx, { sessionUpdate: "session_info_update", title: "SECRET-PAYLOAD" }); // valid ACP, not shown by codemax
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "t1", title: "Read secret-plan.md", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "TOOL-OUTPUT-XYZ" } }] });
+      await ctx.say(`REPLY-ABC to ${text}`);
+      throw new Error("adapter exploded");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/debug on");
+    await h.frame((f) => f.includes("debug log on"));
+    await h.send("MY-PRIVATE-MESSAGE-123");
+    await h.frame((f) => f.includes("adapter exploded"));
+    await h.send("/debug export");
+    await h.frame((f) => f.includes("debug log saved to"));
+    const { readdirSync } = await import("node:fs");
+    const { CODEMAX_HOME } = await import("../src/core/paths.ts");
+    const dir = join(CODEMAX_HOME, "exports");
+    const path = join(dir, readdirSync(dir).filter((n) => n.startsWith("codemax-debug-")).sort().at(-1)!);
+    const text = readFileSync(path, "utf8");
+    expect(text).toContain('"kind":"acp-unknown-update"');
+    expect(text).toContain('"type":"session_info_update"');
+    expect(text).toContain("adapter exploded");
+    expect(text).toContain("codemax:");
+    // The detail around it: the start, the turn's numbers, the command used, the agent's features.
+    for (const kind of ["app-start", "acp-init", "agent-start", "turn-start", "turn-end", "command"]) expect(text).toContain(`"kind":"${kind}"`);
+    const turnEnd = text.split("\n").filter((l) => l.includes('"kind":"turn-end"')).map((l) => JSON.parse(l)).at(-1);
+    expect(turnEnd).toMatchObject({ agent: "claude", stop: "error", tools: { read: 1 } });
+    expect(typeof turnEnd.ms).toBe("number");
+    expect(text).toContain('"name":"/debug"');
+    for (const secret of ["MY-PRIVATE-MESSAGE-123", "REPLY-ABC", "TOOL-OUTPUT-XYZ", "SECRET-PAYLOAD", "secret-plan.md"]) expect(text).not.toContain(secret);
+    await h.send("/debug off");
+    await h.frame((f) => f.includes("debug log off"));
+  } finally {
+    d.setDebugLog(false);
+    await h.cleanup();
+  }
+}, 30000);
+
+test("51. the debug log is on by default and says so once at start, with what it can contain", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { CONFIG_PATH } = await import("../src/config.ts");
+  d.setDebugLog(true); // what cli.ts does unless debugLog is false
+  try {
+    let h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+    try {
+      void h.app.start("claude", true);
+      const f = await h.frame((f) => f.includes("new session"));
+      expect(f).toContain("debug log on");
+      expect(f).toContain("/debug off");
+    } finally { await h.cleanup(); }
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).debugNotified).toBe(true);
+    // The next start reads config.json (the harness passes what loadConfig would).
+    h = await harness({ claude: async (_t, ctx) => ctx.say("ok") }, { debugNotified: JSON.parse(readFileSync(CONFIG_PATH, "utf8")).debugNotified });
+    try {
+      void h.app.start("claude", true);
+      expect(await h.frame((f) => f.includes("new session"))).not.toContain("debug log on"); // only once
+    } finally { await h.cleanup(); }
+  } finally {
+    d.setDebugLog(false);
+  }
+}, 30000);

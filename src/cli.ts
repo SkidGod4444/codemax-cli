@@ -4,6 +4,7 @@ import { checkForUpdate, installKind, RESTART_AGENT_ENV, RESTART_THREAD_ENV, upd
 import { platformArgv } from "./core/spawn.ts";
 import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
+import { resolve } from "node:path";
 import { Ledger } from "./core/ledger.ts";
 import { Orchestrator } from "./core/orchestrator.ts";
 import { runApp } from "./tui/app.ts";
@@ -16,6 +17,7 @@ import type { AgentId } from "./adapters/types.ts";
 import { describeBytes, findHotkey, parseHotkeys } from "./core/hotkey.ts";
 import { diagnose } from "./core/doctor.ts";
 import { renderUsageTable, resetOldUsageOnce, sumCost } from "./core/usage.ts";
+import { debugEvent, debugLogPath, errorFields, exportDebugLog, setDebugLog } from "./core/debuglog.ts";
 import { fmtUsd, priceFor, priceProvenance, resetPriceCache } from "./core/pricing.ts";
 import { fetchLivePrices, loadLivePrices, LIVE_PRICES_PATH } from "./core/prices-live.ts";
 import { fmtDateTime12 } from "./core/time.ts";
@@ -39,6 +41,7 @@ usage:
   codemax awake [on|lid|off|status]          keep the machine awake while codemax runs (lid: also with the lid closed)
   codemax quota [clear [<id>]]               show or clear remembered quota state for this project
   codemax doctor [--fix]                     check agent auth/permission setup (API keys that would be billed, silent modes)
+  codemax debug [on|off|export [file]]       debug log of errors and odd behaviour (never your chat); export makes a file to send
   codemax usage [--all]                      tokens and API-equivalent cost per agent for this project (or every project)
   codemax prices [update] [<model>]          show price source and age, refresh the public list, or look up one model
 
@@ -53,6 +56,10 @@ function flag(args: string[], name: string): string | undefined {
 
 async function main(argv: string[]) {
   const config = loadConfig();
+  // On unless turned off (/debug off, /config); CODEMAX_DEBUG=0 turns it off for one run.
+  setDebugLog(process.env.CODEMAX_DEBUG === "0" ? false : config.debugLog !== false);
+  // Crashes are recorded (debug log on) without changing how codemax reacts to them.
+  process.on("uncaughtExceptionMonitor", (e, origin) => debugEvent("crash", { origin, ...errorFields(e) }));
   // Once: older usage logs overcounted Claude, so /usage starts fresh with this version.
   try {
     const cleared = resetOldUsageOnce(config, (k, v) => saveConfigKey(k, v));
@@ -104,6 +111,18 @@ async function main(argv: string[]) {
       } else {
         await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag && !resumed && !resumeId && !pickThread, !!agentFlag, pickThread, config.onboarded !== true);
       }
+      process.exit(0);
+    }
+    case "debug": {
+      const sub = args[0] ?? "";
+      if (sub === "on" || sub === "off") {
+        saveConfigKey("debugLog", sub === "on");
+        console.log(sub === "on" ? `debug log on: ${debugLogPath()}\nerrors and odd behaviour, never your messages or replies; error lines can name files, paths and commands, or quote a line of code` : "debug log off");
+      } else if (sub === "export") {
+        const os = await import("node:os");
+        const path = exportDebugLog({ codemax: pkg.version, os: `${process.platform} ${os.release()} ${process.arch}`, bun: process.versions.bun, terminal: process.env.TERM_PROGRAM ?? process.env.TERM ?? "unknown", debugLog: config.debugLog === false ? "off" : "on" }, args[1] ? resolve(cwd, args[1]) : undefined);
+        console.log(`saved ${path}\nno messages or replies, but error lines in it can name your files and commands or quote a line of code: skim it before sending`);
+      } else console.log(`debug log is ${config.debugLog === false ? "off" : "on"} (${debugLogPath()})\ncodemax debug on | off | export [file]`);
       process.exit(0);
     }
     case "threads": {
@@ -286,6 +305,7 @@ async function main(argv: string[]) {
 }
 
 main(process.argv.slice(2)).catch((e) => {
+  debugEvent("fatal", errorFields(e));
   console.error(`codemax: ${e?.message ?? e}`);
   process.exit(1);
 });

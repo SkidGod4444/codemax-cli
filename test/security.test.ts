@@ -186,3 +186,39 @@ test("bug fixes: folders whose names differ only in punctuation keep separate hi
   expect(end.outcome).toBe("error");
   expect(end.detail).toBe("stopped: max_tokens");
 });
+
+test("debug log: off by default; scrubs secrets, e-mail and the home folder; rotates; export has the facts and nothing else", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { existsSync, readFileSync, rmSync, writeFileSync, statSync } = await import("node:fs");
+  const { homedir } = await import("node:os");
+  const file = d.debugLogPath();
+  if (existsSync(file)) rmSync(file);
+  d.setDebugLog(false);
+  d.debugEvent("x", { a: 1 });
+  expect(existsSync(file)).toBe(false);
+  d.setDebugLog(true);
+  try {
+    d.debugEvent("agent-error", { message: `failed reading ${homedir()}/proj/.env with token=abcd1234efgh key sk-ant-api03-ABCDEFGHIJKLMNOP for me@example.com` });
+    const line = JSON.parse(readFileSync(file, "utf8").trim().split("\n").at(-1)!);
+    expect(line.message).toBe("failed reading ~/proj/.env with token=<secret> key <secret> for <email>");
+    d.debugOnce("k", "once", {});
+    d.debugOnce("k", "once", {});
+    expect(readFileSync(file, "utf8").match(/"once"/g)!.length).toBe(1);
+    const f = d.errorFields(new Error("boom"));
+    expect(f.error).toBe("boom");
+    // Past 5 MB it rolls over to debug.log.1.
+    writeFileSync(file, "x".repeat(5 * 1024 * 1024 + 10));
+    d.debugEvent("after-roll", {});
+    expect(statSync(file).size).toBeLessThan(1000);
+    expect(existsSync(`${file}.1`)).toBe(true);
+    const out = d.exportDebugLog({ codemax: "0.1.14", os: "test" });
+    const text = readFileSync(out, "utf8");
+    expect(text).toContain("codemax: 0.1.14");
+    expect(text).toContain('"kind":"after-roll"');
+    expect(text).toContain("No messages, replies or tool output are in this file");
+    expect(text).toContain("can name your files, folders and commands");
+  } finally {
+    d.setDebugLog(false);
+    rmSync(`${file}.1`, { force: true });
+  }
+});

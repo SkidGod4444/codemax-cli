@@ -84,3 +84,20 @@ test("typing / in the chat opens the palette; Esc keeps the typed text", async (
     setup.renderer.destroy();
   }
 });
+
+test("palette filtering narrows as you type and gives exactly what a fresh search gives", async () => {
+  const { Palette } = await import("../src/chat/palette.ts");
+  const { createTestRenderer } = await import("@opentui/core/testing");
+  const setup = await createTestRenderer({ width: 80, height: 24 });
+  const items = Array.from({ length: 3000 }, (_, i) => ({ label: `src/mod${i % 40}/comp_${i}.tsx`, value: String(i), description: i % 7 ? undefined : "model helper" }));
+  const live = new Palette(setup.renderer, { title: "t", items, onPick: () => {}, onClose: () => {} } as any, () => ({ top: 10, width: 80 }));
+  for (const q of ["m", "mo", "mod", "mod1", "mod12", "mdl", "comp_1"]) {
+    live.setFilter(q);
+    const fresh = new Palette(setup.renderer, { title: "t", items, onPick: () => {}, onClose: () => {} } as any, () => ({ top: 10, width: 80 }));
+    fresh.setFilter(q);
+    expect((live as any).matches.map((m: any) => m.value)).toEqual((fresh as any).matches.map((m: any) => m.value));
+    fresh.destroy();
+  }
+  live.destroy();
+  setup.renderer.destroy();
+});

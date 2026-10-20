@@ -1,3 +1,4 @@
+import { debugEvent } from "./core/debuglog.ts";
 import { join } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { CODEMAX_HOME, ensureDir, privateHome } from "./core/paths.ts";
@@ -10,6 +11,10 @@ export interface Config {
   debateRounds?: number | "auto";
   /** Feature tips in the empty prompt, a new one after each message (default on). */
   tips?: boolean;
+  /** The debug log of errors and odd behaviour, never the conversation (src/core/debuglog.ts). On unless false. */
+  debugLog?: boolean;
+  /** Set once codemax said the debug log is on (it is on by default). */
+  debugNotified?: boolean;
   /** Set once the old (overcounted) usage logs were cleared; see resetOldUsageOnce. */
   usageV2?: boolean;
   /** Ask agents other than Claude Code to say what they are doing and what they found (default on; see NARRATE). */
@@ -138,6 +143,9 @@ export function loadConfig(): Config {
 
 /** Write one setting back to config.json, leaving every other key as the user wrote it. */
 export function saveConfigKey<K extends keyof Config>(key: K, value: Config[K]) {
+  // Setting changes (debug log): simple values as they are; commands, routes and lists only as "set".
+  const simple = typeof value === "boolean" || typeof value === "number" || (typeof value === "string" && value.length < 30 && !/[\/\s]/.test(value));
+  debugEvent("setting", { key: String(key), value: simple ? value : value === undefined || value === null ? value : "<set>" });
   ensureDir(CODEMAX_HOME);
   let raw: Record<string, unknown> = {};
   try {

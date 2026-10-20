@@ -39,8 +39,45 @@ function colourFor(classes: string[], text: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Code is highlighted in pieces of PIECE_LINES lines, each cached by its text: while a reply
+ * streams, its code is styled again every 80 ms, and highlighting a long block whole each time
+ * (about 60 µs a line) blocked typing for tens of milliseconds. Now only the last, still
+ * growing piece is new work. A construct spanning a piece boundary (a long block comment) may
+ * be coloured as code after it; that is the price of smooth typing.
+ */
+const PIECE_LINES = 40;
+const CACHE_MAX = 3000;
+const cache = new Map<string, TextChunk[]>();
+
 /** Highlighted chunks for a block of code; line breaks are plain chunks (coloured ones are not laid out). */
 export function highlightCode(code: string, lang: string): TextChunk[] {
+  const lines = code.split("\n");
+  if (lines.length <= PIECE_LINES) return cached(code, lang);
+  const out: TextChunk[] = [];
+  for (let i = 0; i < lines.length; i += PIECE_LINES) {
+    if (i > 0) out.push(...stringToStyledText("\n").chunks);
+    out.push(...cached(lines.slice(i, i + PIECE_LINES).join("\n"), lang));
+  }
+  return out;
+}
+
+function cached(code: string, lang: string): TextChunk[] {
+  // The palette is part of the key: a theme switch must not reuse old colours.
+  const key = `${lang}\u0000${C.syntax.keyword}\u0000${code}`;
+  const hit = cache.get(key);
+  if (hit) {
+    cache.delete(key);
+    cache.set(key, hit); // most recently used last
+    return hit;
+  }
+  const chunks = highlightPiece(code, lang);
+  cache.set(key, chunks);
+  if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value!);
+  return chunks;
+}
+
+function highlightPiece(code: string, lang: string): TextChunk[] {
   const language = languageOf(lang);
   const out: TextChunk[] = [];
   const push = (text: string, colour: string | undefined) => {

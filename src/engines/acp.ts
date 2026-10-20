@@ -1,3 +1,4 @@
+import { debugEvent, debugOnce } from "../core/debuglog.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { insideDir, secretPlace } from "../core/paths.ts";
@@ -175,6 +176,24 @@ export class AcpEngine implements Engine {
     }
     this.cwd = o.cwd;
     this.canFork = !!this.opts.forkAtMessage && !!(init as any).agentCapabilities?.sessionCapabilities?.fork;
+    {
+      // What this agent says it supports (debug log): explains most "works for X, not Y" bugs.
+      const caps: any = (init as any).agentCapabilities ?? {};
+      debugEvent("acp-init", {
+        agent: this.agent,
+        protocol: (init as any).protocolVersion,
+        agentInfo: [(init as any).agentInfo?.name, (init as any).agentInfo?.version].filter(Boolean).join(" ") || undefined,
+        capabilities: Object.keys(caps).filter((k) => k !== "_meta"),
+        session: Object.keys(caps.sessionCapabilities ?? {}),
+        prompt: Object.keys(caps.promptCapabilities ?? {}).filter((k) => caps.promptCapabilities[k]),
+        auth: ((init as any).authMethods ?? []).map((m: any) => m.id),
+        resumed: !!o.resume && sessionId === o.resume.id,
+        resumeAsked: !!o.resume || undefined,
+        models: models?.availableModels?.length,
+        modes: (modes?.availableModes ?? []).map((m: any) => m.id),
+        configOptions: Array.isArray(config) ? config.map((c: any) => c?.id) : undefined,
+      });
+    }
     this.takesImages = !!(init as any).agentCapabilities?.promptCapabilities?.image;
     this.fresh = !o.resume || sessionId !== o.resume.id;
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
@@ -341,6 +360,8 @@ export class AcpEngine implements Engine {
         break;
       }
       default:
+        // Something this agent sends that codemax does not show (a new protocol feature?).
+        debugOnce(`acp:${this.agent}:${u.sessionUpdate}`, "acp-unknown-update", { agent: this.agent, type: String(u.sessionUpdate) });
         break;
     }
   }

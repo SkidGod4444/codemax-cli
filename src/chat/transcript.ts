@@ -1,3 +1,4 @@
+import { debugEvent } from "../core/debuglog.ts";
 import { BoxRenderable, ScrollBoxRenderable, StyledText, TextRenderable, bold, dim, fg, italic, strikethrough, stringToStyledText, type CliRenderer, type TextChunk } from "@opentui/core";
 import { C, G } from "./theme.ts";
 import { styleMarkdown, styleToolOutput } from "./markdown.ts";
@@ -127,6 +128,8 @@ export class Transcript {
   }
 
   error(text: string) {
+    // The error line you saw, scrubbed (debug log only when it is on).
+    debugEvent("shown-error", { text });
     this.nested(text, C.error);
   }
 

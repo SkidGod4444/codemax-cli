@@ -113,3 +113,13 @@ test("after /update codemax restarts with the same arguments, minus --fresh and 
   // Bun or the script gone (replaced by the update): `codemax` from PATH.
   expect(relaunchArgv(["bun", "/x/src/cli.ts", "start"], "/gone/bun", "/x/src/cli.ts", (p) => p !== "/gone/bun", () => "/usr/local/bin/codemax")).toEqual(["/usr/local/bin/codemax", "start"]);
 });
+
+test("every released version tells users what changed: package.json's version has a what's-new entry", async () => {
+  const pkg = await import("../package.json");
+  const { WHATS_NEW } = await import("../src/core/whatsnew.ts");
+  const lines = WHATS_NEW[pkg.version];
+  expect(lines, `add WHATS_NEW["${pkg.version}"] in src/core/whatsnew.ts`).toBeDefined();
+  expect(lines!.length).toBeGreaterThan(0);
+  expect(lines!.length).toBeLessThanOrEqual(4);
+  for (const l of lines!) expect(l.length).toBeLessThan(70);
+});

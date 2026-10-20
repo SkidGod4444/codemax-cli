@@ -23,6 +23,9 @@ import { PermissionDialog } from "./permission.ts";
 import { QuestionDialog } from "./question.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
 import { TaskPanel } from "./tasks.ts";
+import { styleMarkdown } from "./markdown.ts";
+import { PerfLog, perfEnabled } from "./perf.ts";
+import { debugEvent, debugLogOn, debugLogPath, errorFields, exportDebugLog, setDebugLog } from "../core/debuglog.ts";
 import { ThreadPicker } from "./threadpicker.ts";
 import { C, COLORS, COLOR_THEMES, DONE_VERBS, G, THEME, VERBS, applyTheme, fmtDuration, fmtTime, isColorTheme, modeLabel, pick } from "./theme.ts";
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
@@ -67,6 +70,24 @@ const NO_CYCLE = new Set(["bypassPermissions", "dontAsk", "yolo", "never"]);
  * Code already has it, so it is never sent there.
  */
 export const NARRATE = "codemax shows the user your messages, not your reasoning or raw tool output. Before your first tool call, say in one sentence what you are about to do. While working, add a one-sentence update when you find something important, change direction or hit a blocker. End with one or two sentences: what changed or what you found, and what is next.";
+
+/** What a turn did, for the debug log: counts and timings only, never content. */
+interface TurnStats {
+  firstAt?: number;
+  lastAt: number;
+  maxGapMs: number;
+  events: number;
+  textChunks: number;
+  thoughtChunks: number;
+  tools: Record<string, number>;
+  failedTools: number;
+  permissions: { asked: number; allowed: number; denied: number };
+  questions: number;
+  subagents: number;
+  inTokens: number;
+  outTokens: number;
+  costUsd: number;
+}
 
 /** How long the "what's new" box stays after /update. */
 const WHATS_NEW_MS = 5000;
@@ -119,7 +140,7 @@ interface Active {
   name: string;
   engine: Engine;
   /** `model`: the model the agent reported for this turn (usage), when it does. */
-  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string; edited?: boolean; step?: string } | null;
+  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string; edited?: boolean; step?: string; stats?: TurnStats } | null;
   replay: AgentBlock | null;
   unsubscribe: () => void;
   mode?: string;
@@ -316,8 +337,24 @@ export class ChatApp {
     renderer.on("focus", () => (this.term.focused = true));
     renderer.on("blur", () => (this.term.focused = false));
     renderer.keyInput.on("keypress", this.onKey);
+    if (debugLogOn()) this.startHealth();
+    if (perfEnabled() || debugLogOn()) {
+      this.perf = new PerfLog(renderer, () => ({
+        palette: this.palette ? this.paletteKind : undefined,
+        paletteItems: this.palette ? (this.palette as any).opts?.items?.length : undefined,
+        transcriptRows: this.transcript.box.getChildren().length,
+        working: !!this.active?.turn,
+        agent: this.active?.agent,
+        agentCommands: this.active?.commands.length,
+        promptChars: this.input.plainText.length,
+      }));
+    }
     renderer.keyInput.on("paste", this.onPaste);
     renderer.on("resize", () => this.safely("resize", () => {
+      if (Date.now() - this.lastResizeLog > 1000) {
+        this.lastResizeLog = Date.now();
+        debugEvent("resize", { cols: renderer.width, rows: renderer.height });
+      }
       this.fitInput();
       this.palette?.render();
       this.threadPicker?.render();
@@ -373,6 +410,17 @@ export class ChatApp {
       notes.push(updatedTo ? `updated to v${updatedTo} and restarted` : "updated and restarted");
       this.showWhatsNew(VERSION, from);
     }
+    debugEvent("app-start", this.debugInfo());
+    // The debug log is on by default: say so once, with what it can contain and how to stop it.
+    if (debugLogOn() && !this.config.debugNotified) {
+      notes.push("debug log on: errors and odd behaviour (never your messages or replies; error lines can name files and commands) · /debug export to send it · /debug off");
+      this.config.debugNotified = true;
+      try {
+        saveConfigKey("debugNotified", true);
+      } catch {
+        /* read-only home */
+      }
+    }
     if (process.env.CODEMAX_USAGE_RESET) {
       notes.push("usage history cleared once: earlier figures counted Claude twice or more · /usage counts from now");
       delete process.env.CODEMAX_USAGE_RESET;
@@ -388,6 +436,11 @@ export class ChatApp {
         .catch(() => {});
       this.scheduleUpdateCheck(this.updateRecheckMs);
     }
+    // Warm the markdown, code and diff styling while nothing is happening, so the first code
+    // block or diff of the session is not the one that pays for it (about 60 ms, once).
+    setTimeout(() => this.safely("warm-up", () => {
+      styleMarkdown("**a** `b`\n```ts\nconst a: number = 1;\n```\n```diff\n@@ -1 +1 @@\n-a\n+b\n```");
+    }), 1500);
     if (o.pickThread && this.openThreadPicker(first)) return this.done;
     if (o.pick && !fresh && this.openPicker(first)) return this.done;
     await this.launch(first, { fresh });
@@ -413,6 +466,7 @@ export class ChatApp {
       fn();
     } catch (e: any) {
       this.uiErrors++;
+      debugEvent("display-glitch", { where, ...errorFields(e) });
       if (this.uiErrors <= 5) {
         try {
           this.transcript.error(`display glitch in ${where}: ${String(e?.message ?? e).slice(0, 160)} (codemax keeps going)`);
@@ -423,7 +477,29 @@ export class ChatApp {
     }
   }
 
-  private onKey = (key: KeyEvent) => this.safely("key handling", () => this.handleKey(key));
+  private onKey = (key: KeyEvent) => {
+    const t0 = this.perf ? performance.now() : 0;
+    this.safely("key handling", () => this.handleKey(key));
+    this.perf?.key(key.name, performance.now() - t0);
+  };
+
+  private lastResizeLog = 0;
+  private bornAt = Date.now();
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** Once a minute while the debug log is on: memory and sizes, so leaks and slow growth show. */
+  private startHealth() {
+    if (this.healthTimer) return;
+    this.healthTimer = setInterval(() => this.safely("health", () => {
+      if (!debugLogOn()) return;
+      const m = process.memoryUsage();
+      debugEvent("health", { uptimeMin: Math.round((Date.now() - this.bornAt) / 60000), rssMB: Math.round(m.rss / 1e6), heapMB: Math.round(m.heapUsed / 1e6), transcriptRows: this.transcript.box.getChildren().length, queue: this.queue.length || undefined, checkpoints: this.checkpoints.length, pendingPermissions: this.permissionQueue.length || undefined, agent: this.active?.agent, working: !!this.active?.turn || undefined });
+    }), 60_000);
+    (this.healthTimer as any).unref?.();
+  }
+
+  /** CODEMAX_PERF=1: what made the UI slow, in ~/.codemax/perf.log (src/chat/perf.ts). */
+  private perf: PerfLog | null = null;
 
   /** The empty prompt's text: the welcome line, then a different feature tip after each message (tips.ts). */
   private placeholderText = 'Try "fix the failing test" · / for commands';
@@ -835,7 +911,12 @@ export class ChatApp {
   private async checkpoint(active: Active, text: string, message?: string): Promise<Checkpoint | null> {
     if (!this.config.checkpoints) return null;
     const point = active.engine.rewindPoint?.() ?? undefined;
-    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`, point && { agent: active.agent, ...point }, this.ledger.threadId).catch(() => null);
+    const t0 = Date.now();
+    const cp = await createCheckpoint(this.cwd, `before ${active.agent}: ${(message ?? text).slice(0, 60).replace(/\s+/g, " ")}`, point && { agent: active.agent, ...point }, this.ledger.threadId).catch((e) => {
+      debugEvent("checkpoint-failed", errorFields(e));
+      return null;
+    });
+    if (Date.now() - t0 > 1500) debugEvent("checkpoint-slow", { ms: Date.now() - t0 });
     if (cp) this.checkpoints.push({ ...cp, agent: active.agent, message, fork: point });
     return cp;
   }
@@ -913,6 +994,7 @@ export class ChatApp {
 
   private async rewindTo(c: Checkpoint & { agent: AgentId; text: string; fork?: RewindPoint }, edit: boolean) {
     if (this.active?.turn || this.verifying || this.debate) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
+    debugEvent("rewind", { agent: c.agent, active: this.active?.agent, conversation: !!this.conversationRewind(c) || undefined, edit: edit || undefined, ageMin: Math.round((Date.now() - c.ts) / 60000) });
     const short = c.text.replace(/\s+/g, " ").slice(0, 60);
     // The conversation first: when it cannot be cut, the agent is told instead.
     const convo = this.conversationRewind(c);
@@ -994,6 +1076,7 @@ export class ChatApp {
     }
     if (this.checkpoints.at(-1) === cp) this.checkpoints.pop();
     const r = await restoreCheckpoint(this.cwd, cp.sha);
+    debugEvent("undo", { restored: r.restored, removed: r.removed.length });
     this.transcript.note(`reverted to the snapshot ${cp.label}`, C.warn);
     for (const l of stat.split("\n")) this.transcript.note(l);
     if (r.removed.length) this.transcript.note(`removed ${r.removed.length} new file(s): ${r.removed.slice(0, 5).join(", ")}${r.removed.length > 5 ? "…" : ""}`);
@@ -1362,6 +1445,7 @@ export class ChatApp {
   private pendingOffer: { from: AgentId; reason: string; allAgents: boolean } | null = null;
 
   private offerHandoff(from: AgentId, reason: string, allAgents = false) {
+    debugEvent("handoff-offer", { from, reason, allAgents: allAgents || undefined, busy: !!this.active?.turn || undefined });
     // Never interrupt a running turn: show the offer when it ends.
     if (this.active?.turn || this.permission) {
       if (!this.pendingOffer) this.transcript.note(`${reason} · you'll be offered a handoff when this turn ends`, C.warn);
@@ -1663,6 +1747,8 @@ export class ChatApp {
       const res = await run.done;
       if (this.closed) return res;
       const ok = res.code === 0 && !res.stopped;
+      // The exit and timing, not the command or its output (both are the project's).
+      debugEvent("checks", { exit: res.code, ms: res.ms, stopped: res.stopped || undefined, timedOut: res.timedOut || undefined, outputLines: res.output.split("\n").length });
       const block = this.transcript.agent();
       const status = res.stopped ? `stopped after ${fmtDuration(res.ms)}` : res.timedOut ? `timed out after ${fmtDuration(res.ms)}` : ok ? `passed in ${fmtDuration(res.ms)}` : `failed (exit ${res.code}) after ${fmtDuration(res.ms)}`;
       block.tool(`checks-${t0}`, `Checks · $ ${cmd} · ${status}`, ok ? "completed" : "failed", ok ? undefined : tail(res.output, 15) || "(no output)");
@@ -1748,6 +1834,7 @@ export class ChatApp {
       { name: "/export", description: "Save this conversation as Markdown · /export <path> to choose where", run: (a) => this.exportThread(a) },
       { name: "/setup", description: "Go through every setting one by one, as on first run", run: () => void this.runOnboarding() },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
+      { name: "/debug", description: "Debug log of what codemax did not expect (never your chat): /debug on | off | export", run: (a) => this.debugCommand(a) },
       { name: "/theme", description: `Colours: /theme ${COLOR_THEMES.map((t) => t.id).join(" | ")}, or dark | light | auto (saved)`, run: (a) => this.setThemePref(a) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
@@ -1835,6 +1922,8 @@ export class ChatApp {
   private async command(line: string) {
     const [raw, ...rest] = line.split(/\s+/);
     const name = raw!.toLowerCase();
+    // The command's name only: what follows it can be the user's own words.
+    debugEvent("command", { name: name.slice(0, 40), builtin: this.builtins().some((x) => x.name === name) || undefined, args: rest.length || undefined });
     const b = this.builtins().find((x) => x.name === name || x.name === name.replace(/^\/(exit|q)$/, "/quit"));
     if (b) return b.run(rest.join(" "));
     // /<agent>:<cmd> runs the active agent's own command even when codemax has one of that name.
@@ -2273,6 +2362,57 @@ export class ChatApp {
     return best;
   }
 
+  /** /debug on | off | export [path]: the debug log (src/core/debuglog.ts). */
+  private debugCommand(arg: string) {
+    const [sub, ...rest] = arg.trim().split(/\s+/);
+    const v = (sub ?? "").toLowerCase();
+    if (v === "on" || v === "off") {
+      const on = v === "on";
+      this.config.debugLog = on;
+      try {
+        saveConfigKey("debugLog", on);
+      } catch {
+        /* read-only home: this run only */
+      }
+      setDebugLog(on);
+      if (on) {
+        debugEvent("debug-on", this.debugInfo());
+        this.startHealth();
+        if (!this.perf) this.perf = new PerfLog(this.renderer, () => ({ palette: this.palette ? this.paletteKind : undefined, transcriptRows: this.transcript.box.getChildren().length, working: !!this.active?.turn, agent: this.active?.agent }));
+      }
+      this.transcript.note(on ? `debug log on: errors and odd behaviour go to ${debugLogPath()} · never your messages or replies, but error lines can name files, paths and commands, or quote a line of code · /debug export makes a file to send` : "debug log off (what it has stays until /debug export or you delete it)", on ? C.accent : C.dim);
+      return;
+    }
+    if (v === "export") {
+      try {
+        const path = exportDebugLog(this.debugInfo(), rest.length ? resolve(this.cwd, rest.join(" ")) : undefined);
+        this.copyText(path);
+        this.transcript.note(`debug log saved to ${path} (path copied) · no messages or replies, but error lines in it can name your files and commands or quote a line of code: skim it before sending`, C.ok);
+      } catch (e: any) {
+        this.transcript.error(`could not export the debug log: ${e?.message ?? e}`);
+      }
+      return;
+    }
+    this.transcript.note(`debug log is ${debugLogOn() ? "on" : "off"} · /debug on, /debug off, /debug export [file]`);
+  }
+
+  /** What codemax and this machine are, for a debug report: versions and settings, never content. */
+  private debugInfo(): Record<string, unknown> {
+    const os = require("node:os") as typeof import("node:os");
+    const agents = Object.fromEntries([...this.detect.entries()].map(([id, d]) => [id, d.installed ? d.version ?? "installed" : "not installed"]));
+    const c = this.config;
+    return {
+      codemax: VERSION,
+      os: `${process.platform} ${os.release()} ${process.arch}`,
+      bun: process.versions.bun,
+      terminal: process.env.TERM_PROGRAM ? `${process.env.TERM_PROGRAM} ${process.env.TERM_PROGRAM_VERSION ?? ""}`.trim() : process.env.TERM ?? "unknown",
+      screen: `${this.renderer.width}x${this.renderer.height}`,
+      agents,
+      active: this.active ? `${this.active.agent} ${this.active.engine.info?.currentModel ?? ""}`.trim() : "none",
+      settings: { order: c.order, theme: c.theme, colors: c.colors, questions: c.questions, narrate: c.narrate, autoSwitch: c.autoSwitch, sideAgent: c.sideAgent?.agent ?? null, awake: c.awake, checkpoints: c.checkpoints },
+    };
+  }
+
   /** NARRATE for agents that lack it (everyone but Claude Code), unless /config turned it off. */
   private narration(agent: AgentId): string | undefined {
     return agent !== "claude" && this.config.narrate !== false ? NARRATE : undefined;
@@ -2321,7 +2461,9 @@ export class ChatApp {
     this.starting = true;
     this.setWorking(`${pick(G.spinner, 0)} Starting ${adapter.name}…`);
     try {
+      const startedAt = Date.now();
       const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
+      debugEvent("agent-start", { agent, ms: Date.now() - startedAt, resumed: !!resume && engine.session?.id === resume.id, resumeAsked: !!resume || undefined, handoffFrom: o.from, version: this.detect.get(agent)?.version ?? info.version, model: info.currentModel, models: info.models?.length, modes: info.modes?.map((m) => m.id), mode: info.currentMode, options: info.options?.map((x) => x.id) });
       active.mode = info.currentMode;
       if (engine.session) this.ledger.saveSession({ agent, id: engine.session.id, cwd: this.cwd, startedAt: engine.session.startedAt, lastUsedAt: Date.now() } as SessionRef);
       this.ledger.addEvent({ kind: o.from ? "switch" : "start", agent: o.from, to: agent, detail: o.reason });
@@ -2382,6 +2524,7 @@ export class ChatApp {
     } catch (e: any) {
       this.starting = false;
       this.setWorking(null);
+      debugEvent("agent-start-failed", { agent, version: this.detect.get(agent)?.version, ...errorFields(e) });
       this.transcript.error(`${adapter.name} failed to start: ${e?.message ?? e}`);
       if (this.active === active) {
         active.unsubscribe();
@@ -2397,7 +2540,8 @@ export class ChatApp {
     if (this.closed) return;
     const block = this.transcript.agent();
     const rec = o.journal === false ? undefined : (o.rec ?? new TurnRecorder(this.ledger.journal, active.agent));
-    active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS), rec };
+    active.turn = { block, tools: new Set(), startedAt: Date.now(), tokens: 0, chars: 0, verb: pick(VERBS), rec, stats: { lastAt: Date.now(), maxGapMs: 0, events: 0, textChunks: 0, thoughtChunks: 0, tools: {}, failedTools: 0, permissions: { asked: 0, allowed: 0, denied: 0 }, questions: 0, subagents: 0, inTokens: 0, outTokens: 0, costUsd: 0 } };
+    debugEvent("turn-start", { agent: active.agent, side: this.side.has(active) || undefined, handoff: o.record === false || undefined, images: o.images?.length || undefined, promptChars: text.length });
     this.startSpinner(active);
     this.setTitle(`✳ ${active.name} working`);
     const main = !this.side.has(active);
@@ -2427,6 +2571,31 @@ export class ChatApp {
     }
     if (main && turn) this.notePanel.setPaused(asksUser(turn.block.text()));
     if (turn && main) this.term.turnEnded({ reply: turn.block.text(), ms: Date.now() - turn.startedAt, error: stop === "error", longMs: this.config.bellAfterSeconds > 0 ? this.config.bellAfterSeconds * 1000 : Infinity });
+    // Turns that did not end normally, with how long and how many tools (never what was said).
+    if (turn) {
+      const st = turn.stats;
+      debugEvent("turn-end", {
+        agent: active.agent,
+        side: this.side.has(active) || undefined,
+        model: turn.model ?? active.engine.info?.currentModel,
+        stop,
+        ms: Date.now() - turn.startedAt,
+        firstReplyMs: st?.firstAt ? st.firstAt - turn.startedAt : undefined,
+        longestSilenceMs: st?.maxGapMs,
+        events: st?.events,
+        textChunks: st?.textChunks,
+        thoughtChunks: st?.thoughtChunks,
+        tools: st?.tools,
+        failedTools: st?.failedTools || undefined,
+        permissions: st?.permissions.asked ? st.permissions : undefined,
+        questions: st?.questions || undefined,
+        subagents: st?.subagents || undefined,
+        inTokens: st?.inTokens,
+        outTokens: st?.outTokens,
+        costUsd: st?.costUsd ? Math.round(st.costUsd * 10000) / 10000 : undefined,
+        edited: turn.edited || undefined,
+      });
+    }
     if (turn) {
       const dur = fmtDuration(Date.now() - turn.startedAt);
       const who = `${active.name} · ${this.modelName(active, turn.model)}`;
@@ -2474,7 +2643,33 @@ export class ChatApp {
   }
 
   private onEngineEvent(active: Active, e: EngineEvent) {
-    this.safely(`${active.name} event`, () => this.handleEngineEvent(active, e));
+    this.safely(`${active.name} event`, () => {
+      this.countEvent(active, e);
+      this.handleEngineEvent(active, e);
+    });
+  }
+
+  /** The turn's statistics for the debug log: when things arrived and what kind they were. */
+  private countEvent(active: Active, e: EngineEvent) {
+    const st = active.turn?.stats;
+    if (!st) return;
+    const now = Date.now();
+    if (e.type === "text_delta" || e.type === "thought_delta" || e.type === "tool_call") st.firstAt ??= now;
+    st.maxGapMs = Math.max(st.maxGapMs, now - st.lastAt);
+    st.lastAt = now;
+    st.events++;
+    if (e.type === "text_delta") st.textChunks++;
+    else if (e.type === "thought_delta") st.thoughtChunks++;
+    else if (e.type === "tool_call") st.tools[e.kind ?? "other"] = (st.tools[e.kind ?? "other"] ?? 0) + 1;
+    else if (e.type === "tool_update" && e.status === "failed") st.failedTools++;
+    else if (e.type === "permission_request") st.permissions.asked++;
+    else if (e.type === "question_request") st.questions++;
+    else if (e.type === "subagent" && e.status === "running") st.subagents++;
+    else if (e.type === "usage") {
+      st.inTokens += (e.inputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheWriteTokens ?? 0);
+      st.outTokens += e.outputTokens ?? 0;
+      st.costUsd += e.costUsd ?? 0;
+    }
   }
 
   private handleEngineEvent(active: Active, e: EngineEvent) {
@@ -2581,6 +2776,7 @@ export class ChatApp {
         this.ledger.saveSession({ agent: active.agent, id: e.ref.id, cwd: this.cwd, startedAt: e.ref.startedAt, lastUsedAt: Date.now() } as SessionRef);
         break;
       case "error":
+        debugEvent("agent-error", { agent: active.agent, errorKind: e.kind, message: e.message, side: this.side.has(active) || undefined });
         this.transcript.error(`${active.name}: ${e.message.slice(0, 500)}`);
         if (e.kind === "quota") active.turn?.rec?.markLimit(cleanError(e.message));
         else active.turn?.rec?.markError(cleanError(e.message));
@@ -2592,9 +2788,11 @@ export class ChatApp {
         }
         break;
       case "log":
+        if (e.level !== "info") debugEvent("agent-log", { agent: active.agent, level: e.level, message: e.message });
         if (e.level !== "info") this.transcript.note(`${active.name}: ${e.message}`, e.level === "error" ? C.error : C.dim);
         break;
       case "notice": {
+        debugEvent("agent-notice", { agent: active.agent, level: e.level, title: e.title });
         // What the agent would show in its own UI ("Retrying Claude, attempt 2 of 10", "Model fallback").
         const text = e.detail ? `${e.title}: ${e.detail}` : e.title;
         // Agents repeat some (Codex sends its config warning per thread): once a minute is enough.
@@ -2621,6 +2819,7 @@ export class ChatApp {
     const { request, engine } = next;
     const name = this.active?.engine === engine ? this.active.name : "the agent";
     this.term.waiting("permission", request.title, request.kind, request.detail ? { detail: request.detail } : undefined);
+    const shownAt = Date.now();
     this.permission = new PermissionDialog(this.renderer, request, name, (choice) => {
       this.permission?.destroy();
       this.permission = null;
@@ -2628,6 +2827,9 @@ export class ChatApp {
       const fallbackReject = request.options.find((o) => o.kind.startsWith("reject"))?.id ?? request.options[0]!.id;
       engine.answerPermission(request.id, choice.optionId ?? fallbackReject);
       const allowed = !!opt && opt.kind.startsWith("allow");
+      const st = this.active?.engine === engine ? this.active.turn?.stats : undefined;
+      if (st) st.permissions[allowed ? "allowed" : "denied"]++;
+      debugEvent("permission", { agent: this.active?.engine === engine ? this.active.agent : undefined, toolKind: request.kind, hasDiff: !!request.diff || undefined, options: request.options.map((o) => o.kind), answer: opt?.kind ?? "reject", waitedMs: Date.now() - shownAt });
       this.term.answered(allowed);
       if (!allowed) this.transcript.note(`declined: ${request.title.length > 70 ? request.title.slice(0, 67) + "…" : request.title}`, C.warn);
       if (choice.tellAgent) {
@@ -2913,6 +3115,7 @@ export class ChatApp {
       { key: "notifications", label: "Desktop notifications", value: c.notifications === false ? "off" : "on", choices: [{ value: "on", description: "when an agent waits for you or a long turn ends, while you are in another window" }, { value: "off" }], apply: (v) => { c.notifications = v === "on"; saveConfigKey("notifications", c.notifications); } },
       { key: "narrate", label: "Agents say what they are doing", value: c.narrate === false ? "off" : "on", choices: [{ value: "on", description: "a short note asks Codex, OpenCode, Cursor, Grok and Antigravity to explain each step, as Claude Code does (new sessions)" }, { value: "off", description: "they work as they would on their own" }], apply: (v) => { c.narrate = v === "on"; saveConfigKey("narrate", c.narrate); } },
       { key: "tips", label: "Tips in the prompt", value: c.tips === false ? "off" : "on", choices: [{ value: "on", description: "a different feature (and when it helps) in the empty prompt after each message" }, { value: "off" }], apply: (v) => { c.tips = v === "on"; saveConfigKey("tips", c.tips); this.rotateTip(); } },
+      { key: "debugLog", label: "Debug log", value: c.debugLog === false ? "off" : "on", choices: [{ value: "on", description: "records errors and odd behaviour, never your messages or replies; error lines can name files and commands · /debug export" }, { value: "off" }], apply: (v) => this.debugCommand(v) },
       { key: "updateCheck", label: "Check for codemax updates", value: c.updateCheck === false ? "off" : "on", choices: [{ value: "on", description: "asks npm at most every 12 hours" }, { value: "off" }], apply: (v) => { c.updateCheck = v === "on"; saveConfigKey("updateCheck", c.updateCheck); } },
       { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
     ];
@@ -2993,6 +3196,7 @@ export class ChatApp {
     return new Promise<void>((resolve) => {
       this.closePalette();
       const finish = (skipped: boolean, done = true) => {
+          debugEvent("setup-finished", { skipped, done });
           this.onboarding?.destroy();
           this.onboarding = null;
           if (done) {
@@ -3403,6 +3607,7 @@ export class ChatApp {
 
   private announceUpdate(version: string) {
     if (this.closed || this.updateAvailable === version) return;
+    debugEvent("update-available", { current: VERSION, latest: version });
     this.updateAvailable = version;
     this.transcript.note(`codemax ${version} is available (you have ${VERSION}) · run /update to install it`, C.accent);
     this.showUpdateBadge();
@@ -3460,6 +3665,7 @@ export class ChatApp {
     const plan = updatePlan();
     if (plan.manual) return this.transcript.note(plan.manual, C.warn);
     if (this.active?.turn) return this.transcript.note("an agent is working; /update when the turn ends", C.warn);
+    debugEvent("update-run", { from: VERSION, with: plan.label });
     this.transcript.note(`updating with ${plan.label}…`);
     let ok = true;
     await this.withTerminal(async () => {
@@ -3596,6 +3802,7 @@ export class ChatApp {
   // ---------- detection / switching / quit ----------
 
   private async refreshDetect() {
+    const t0 = Date.now();
     await Promise.all(
       listAdapters(this.config.order).map(async (a) => {
         const d = await a.detect();
@@ -3604,9 +3811,12 @@ export class ChatApp {
         this.detect.set(a.id, { installed: d.installed, version: d.version, engine, problem: d.problem });
       }),
     );
+    // Which agents were found, their versions and why one is not usable (debug log).
+    debugEvent("detect", { ms: Date.now() - t0, agents: Object.fromEntries([...this.detect.entries()].map(([id, d]) => [id, d.installed ? `${d.version ?? "?"}${d.engine ? "" : " (no engine)"}` : d.problem ? `missing: ${d.problem.slice(0, 80)}` : "missing"])) });
   }
 
   private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean; model?: string } = {}) {
+    debugEvent("switch", { from: this.active?.agent, to: agent, fresh: fresh || undefined, resumeTask: o.resumeTask || undefined, model: o.model });
     // Choosing an agent yourself means you fixed it (or want to try again).
     if (!o.resumeTask) this.broken.delete(agent);
     if (!hasEngine(agent)) return this.transcript.note(`${agent} has no protocol engine; run codemax --tui for it`, C.warn);
@@ -3657,6 +3867,9 @@ export class ChatApp {
   async quit() {
     if (this.closed) return;
     this.closed = true;
+    debugEvent("quit", { uptimeMin: Math.round((Date.now() - this.bornAt) / 60000), agent: this.active?.agent, glitches: this.uiErrors || undefined });
+    this.perf?.stop();
+    if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.updateTimer) clearTimeout(this.updateTimer);
     // Nothing codemax started keeps running: checks, ! commands, agents started to list models.
     this.verifying?.stop();
