@@ -77,6 +77,7 @@ export class CodexEngine implements Engine {
     this.notify("initialized", {});
 
     this.questions = o.questions !== false;
+    this.instructions = o.instructions?.trim() || undefined;
     let thread: any;
     if (o.resume) {
       try {
@@ -158,19 +159,26 @@ export class CodexEngine implements Engine {
   }
 
   /** Thread settings codemax adds: the question feature when questions are on. */
+  private instructions?: string;
+
   private threadConfig(): { config?: Record<string, unknown> } {
     return this.questions ? { config: { "features.default_mode_request_user_input": true, suppress_unstable_features_warning: true } } : {};
+  }
+
+  /** codemax's few lines, as Codex's own developer instructions (added to its prompt, not replacing it). */
+  private extra(): { developerInstructions?: string } {
+    return this.instructions ? { developerInstructions: this.instructions } : {};
   }
 
   /** thread/start, /resume or /fork with codemax's settings; without the question feature if Codex rejects it. */
   private async threadRequest(method: string, params: Record<string, unknown>): Promise<any> {
     try {
-      return await this.request(method, { ...params, ...this.threadConfig() });
+      return await this.request(method, { ...params, ...this.extra(), ...this.threadConfig() });
     } catch (e: any) {
       if (!this.questions || !/feature|config|default_mode_request_user_input/i.test(`${e?.message ?? ""} ${JSON.stringify(e?.data ?? "")}`)) throw e;
       this.questions = false;
       this.emit({ type: "log", level: "warn", message: `Codex refused its question feature (${e?.message ?? e}); it will not ask questions in this session` });
-      return this.request(method, params);
+      return this.request(method, { ...params, ...this.extra() });
     }
   }
 
@@ -309,7 +317,7 @@ export class CodexEngine implements Engine {
     const t = p.tokenUsage?.total;
     const main = thread === (this.threadId ?? "main");
     if (!t) {
-      if (typeof used === "number") this.emit({ type: "usage", usedPercent: used });
+      if (typeof used === "number" || rl) this.emit({ type: "usage", usedPercent: typeof used === "number" ? used : undefined, planLimits: codexWindows(rl) });
       return;
     }
     const zero = { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
@@ -334,6 +342,7 @@ export class CodexEngine implements Engine {
       outputTokens: d.outputTokens,
       model: main ? this.model : (p.tokenUsage?.model ?? this.model),
       usedPercent: typeof used === "number" ? used : undefined,
+      planLimits: main ? codexWindows(rl) : undefined,
       // Context fill is the main thread's; a helper's window says nothing about it.
       contextSize: main ? p.tokenUsage?.modelContextWindow : undefined,
     });
@@ -363,6 +372,20 @@ export class CodexEngine implements Engine {
     if (this.replacing && thread && thread !== this.threadId) return;
     if (thread && this.threadId && thread !== this.threadId) return this.onChildThread(method, p, thread);
     switch (method) {
+      case "account/rateLimits/updated": {
+        // The 5-hour and weekly windows, as Claude's arrive: they feed /usage, quota and the limit warning.
+        const planLimits = codexWindows(p.rateLimits);
+        if (planLimits.length) this.emit({ type: "usage", planLimits });
+        break;
+      }
+      case "warning":
+      case "guardianWarning":
+        this.emit({ type: "notice", level: "warn", title: String(p.message ?? "warning") });
+        break;
+      case "configWarning":
+      case "deprecationNotice":
+        this.emit({ type: "notice", level: "warn", title: String(p.summary ?? method), detail: p.details ? String(p.details) : p.path ? String(p.path) : undefined });
+        break;
       case "item/agentMessage/delta":
         this.emit({ type: "text_delta", text: p.delta ?? "" });
         break;
@@ -585,4 +608,19 @@ export function changeDiff(c: any): string {
   if (/^(---|\+\+\+|@@|diff --git)/m.test(body) && kind !== "add") return /^(---|diff --git)/.test(body) ? body : `--- ${path}\n+++ ${path}\n${body}`;
   if (kind === "delete") return [`--- ${path}`, `+++ /dev/null`, ...body.split("\n").filter((l, i, a) => l || i < a.length - 1).map((l) => `-${l}`)].join("\n");
   return [`--- /dev/null`, `+++ ${path}`, ...body.split("\n").filter((l, i, a) => l || i < a.length - 1).map((l) => `+${l}`)].join("\n");
+}
+
+/** Codex's rate-limit windows (primary is the 5-hour one, secondary the weekly) in codemax's PlanLimit form. */
+export function codexWindows(rl: any): import("./types.ts").PlanLimit[] {
+  if (!rl || typeof rl !== "object") return [];
+  const out: import("./types.ts").PlanLimit[] = [];
+  for (const w of [rl.primary, rl.secondary]) {
+    if (!w || typeof w.usedPercent !== "number") continue;
+    const mins = Number(w.windowDurationMins ?? 0);
+    const window = mins >= 7 * 24 * 60 - 60 ? "seven_day" : mins > 0 && mins <= 6 * 60 ? "five_hour" : mins ? `${Math.round(mins / 60)}h` : "plan";
+    const resetsAt = typeof w.resetsAt === "number" ? (w.resetsAt < 1e12 ? w.resetsAt * 1000 : w.resetsAt) : undefined;
+    const reached = w.usedPercent >= 100 || (rl.rateLimitReachedType && w === rl.primary);
+    out.push({ window, usedPercent: w.usedPercent, resetsAt, status: reached ? "rejected" : w.usedPercent >= 80 ? "allowed_warning" : "allowed" });
+  }
+  return out;
 }

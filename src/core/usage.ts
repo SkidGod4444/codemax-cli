@@ -12,8 +12,12 @@ export interface UsageRecord {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  /** Cost the agent itself reported (OpenCode, Grok do). */
+  /** Cost the agent itself reported (Claude, OpenCode, Grok do). */
   agentCostUsd?: number;
+  /** The agent's running total for the session when this was recorded (the baseline after a restart). */
+  agentTotalUsd?: number;
+  /** Tokens whose cost is in an agent-reported figure: counted at $0 here, so nothing is paid twice. */
+  costCovered?: boolean;
   /** USD frozen at record time so later price changes do not rewrite history. */
   costUsd?: number;
   /** Where that figure came from: "agent", "user", "openrouter@2026-10-18", "builtin@…", or "none". */
@@ -23,6 +27,7 @@ export interface UsageRecord {
 /** Price a fresh record now and freeze the result on it. */
 export function priceRecord(r: UsageRecord): UsageRecord {
   if (typeof r.agentCostUsd === "number") return { ...r, costUsd: r.agentCostUsd, priceSource: "agent" };
+  if (r.costCovered) return { ...r, costUsd: 0, priceSource: "agent-total" };
   const hit = priceFor(r.model);
   const est = estimateCost(r.model, r);
   if (hit && est !== null) {
@@ -115,4 +120,35 @@ export function renderUsageTable(records: UsageRecord[], opts: { title: string; 
 /** Display name for a recorded model id ("claude-opus-5-5" → "Opus 5.5"), as everywhere else. */
 export function shortModel(m: string): string {
   return displayModelName(m);
+}
+
+/**
+ * Usage logs written before the counting fix overcounted Claude: each restart re-counted the
+ * whole session's running cost, each message's tokens were logged twice, and both were added
+ * together. The owner chose to start fresh rather than repair them, so every project's
+ * usage.jsonl is removed once, the first time a codemax with this fix starts. Returns how many
+ * logs were removed; `usageV2` in config.json marks it done.
+ */
+export function resetOldUsageOnce(config: { usageV2?: boolean }, save: (key: "usageV2", v: true) => void): number {
+  if (config.usageV2 === true) return 0;
+  const { existsSync, readdirSync, rmSync } = require("node:fs") as typeof import("node:fs");
+  const { join } = require("node:path") as typeof import("node:path");
+  const { CODEMAX_HOME } = require("./paths.ts") as typeof import("./paths.ts");
+  let removed = 0;
+  const root = join(CODEMAX_HOME, "projects");
+  if (existsSync(root)) {
+    for (const d of readdirSync(root)) {
+      const f = join(root, d, "usage.jsonl");
+      if (!existsSync(f)) continue;
+      try {
+        rmSync(f);
+        removed++;
+      } catch {
+        /* read-only: left as it is */
+      }
+    }
+  }
+  config.usageV2 = true;
+  save("usageV2", true);
+  return removed;
 }

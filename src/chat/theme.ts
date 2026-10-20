@@ -91,10 +91,11 @@ const DARK: Palette = {
   selFg: "#3a0d25",
   diffAdd: "#50c850",
   diffDel: "#dc5a5a",
-  diffAddBg: "#225c2b",
-  diffDelBg: "#7a2936",
-  diffAddWord: "#38a660",
-  diffDelWord: "#b3596b",
+  // Darker than Claude Code's bands (#225c2b / #7a2936), so long diffs are easier on the eyes.
+  diffAddBg: "#163d1d",
+  diffDelBg: "#561c26",
+  diffAddWord: "#2a7d46",
+  diffDelWord: "#8c3d4d",
   code: "#b1b9f9",
   link: "#6cb6ff",
   userBg: "#373737",
@@ -142,13 +143,54 @@ const LIGHT: Palette = {
   text: undefined,
 };
 
+/**
+ * Colour themes (/config → Colours, /theme <name>, a setup step). Each changes only the brand
+ * colours over the dark or light base: the accent and what is drawn in it, the assistant dot,
+ * overlays and their selected row. Errors, warnings, success and diffs keep their own hues in
+ * every theme, so they never blur into the accent.
+ */
+export type ColorTheme = "codemax" | "claude" | "ocean" | "teal" | "mono";
+export const COLOR_THEMES: { id: ColorTheme; name: string; description: string }[] = [
+  { id: "codemax", name: "codemax", description: "pink accent, plum overlays (the codemax brand)" },
+  { id: "claude", name: "Claude Code", description: "Claude Code's own colours: orange accent, blue selection" },
+  { id: "ocean", name: "Ocean", description: "blue accent, navy overlays" },
+  { id: "teal", name: "Teal", description: "teal accent, deep green overlays" },
+  { id: "mono", name: "Mono", description: "greys only, no accent colour" },
+];
+type Brand = Partial<Palette>;
+const BRAND: Record<Exclude<ColorTheme, "codemax">, { dark: Brand; light: Brand }> = {
+  // From the Claude Code 2.1.303 bundle's dark and light themes (claude, suggestion, planMode, success, error, warning, inactive, subtle).
+  claude: {
+    dark: { accent: "#d77757", assistant: "#ffffff", tool: "#d77757", plan: "#48968c", ok: "#4eba65", error: "#ff6b80", warn: "#ffc107", dim: "#999999", dimmer: "#505050", panel: "#1f1f1f", panelText: "#ffffff", panelDim: "#999999", selBg: "#b1b9f9", selFg: "#000000", thought: "#999999" },
+    light: { accent: "#d77757", assistant: "#000000", tool: "#d77757", plan: "#006666", ok: "#2c7a39", error: "#ab2b3f", warn: "#966c1e", dim: "#666666", dimmer: "#afafaf", panel: "#f5f5f5", panelText: "#000000", panelDim: "#666666", selBg: "#5769f7", selFg: "#ffffff", thought: "#666666" },
+  },
+  ocean: {
+    dark: { accent: "#4f9dff", assistant: "#bcd9ff", tool: "#4f9dff", panel: "#0b1a2e", panelText: "#e3efff", panelDim: "#8aa4c4", selBg: "#4f9dff", selFg: "#06121f", thought: "#8aa4c4" },
+    light: { accent: "#1d63d8", assistant: "#0b2545", tool: "#1d63d8", panel: "#eef5ff", panelText: "#0b2545", panelDim: "#5b7393", selBg: "#bcd9ff", selFg: "#0b2545", thought: "#5b7393" },
+  },
+  teal: {
+    dark: { accent: "#2dd4bf", assistant: "#b8f2e9", tool: "#2dd4bf", plan: "#93c5fd", panel: "#0a1f1c", panelText: "#e0faf5", panelDim: "#86aba5", selBg: "#2dd4bf", selFg: "#04201c", thought: "#86aba5" },
+    light: { accent: "#0f9488", assistant: "#0b3b36", tool: "#0f9488", plan: "#1d4ed8", panel: "#effbf9", panelText: "#0b3b36", panelDim: "#5e807b", selBg: "#99f6e4", selFg: "#0b3b36", thought: "#5e807b" },
+  },
+  mono: {
+    dark: { accent: "#e5e5e5", assistant: "#ffffff", tool: "#d4d4d4", panel: "#1c1c1c", panelText: "#f5f5f5", panelDim: "#9a9a9a", selBg: "#e5e5e5", selFg: "#111111", thought: "#9a9a9a" },
+    light: { accent: "#262626", assistant: "#111111", tool: "#404040", panel: "#f4f4f4", panelText: "#111111", panelDim: "#6b6b6b", selBg: "#d4d4d4", selFg: "#111111", thought: "#6b6b6b" },
+  },
+};
+
 /** The live palette. Read at render time; `applyTheme` swaps it in place. */
 export const C: Palette = { ...DARK };
 export let THEME: ThemeName = "dark";
+export let COLORS: ColorTheme = "codemax";
 
-export function applyTheme(mode: ThemeName) {
-  Object.assign(C, mode === "light" ? LIGHT : DARK);
+export function isColorTheme(v: unknown): v is ColorTheme {
+  return COLOR_THEMES.some((t) => t.id === v);
+}
+
+export function applyTheme(mode: ThemeName, colors: ColorTheme = COLORS) {
+  Object.assign(C, mode === "light" ? LIGHT : DARK, colors === "codemax" ? {} : BRAND[colors][mode]);
   THEME = mode;
+  COLORS = colors;
 }
 
 export const VERBS = ["Thinking", "Pondering", "Brewing", "Weaving", "Crunching", "Sketching", "Tinkering", "Composing", "Mulling", "Noodling", "Percolating", "Assembling"];

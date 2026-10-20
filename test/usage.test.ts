@@ -97,3 +97,23 @@ test("live prices: OpenRouter ids normalize and win over built-ins; costs are fr
   const unknown = priceRecord({ ts: 1, agent: "grok", sessionId: "s", model: "nope-9000", input: 5, output: 5, cacheRead: 0, cacheWrite: 0 });
   expect(unknown.priceSource).toBe("none");
 });
+
+test("the old, overcounted usage logs are removed once, on the first start of the fixed version", async () => {
+  const { resetOldUsageOnce } = await import("../src/core/usage.ts");
+  const { CODEMAX_HOME } = await import("../src/core/paths.ts");
+  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const proj = join(CODEMAX_HOME, "projects", "-tmp-old-project");
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, "usage.jsonl"), '{"ts":1,"agent":"claude","agentCostUsd":5.7}\n');
+  writeFileSync(join(proj, "turns.jsonl"), "{}\n");
+  const cfg: { usageV2?: boolean } = {};
+  const saved: unknown[] = [];
+  expect(resetOldUsageOnce(cfg, (k, v) => saved.push([k, v]))).toBeGreaterThanOrEqual(1); // other tests may have left logs too
+  expect(existsSync(join(proj, "usage.jsonl"))).toBe(false);
+  expect(existsSync(join(proj, "turns.jsonl"))).toBe(true); // only usage, never the conversation
+  expect(saved).toEqual([["usageV2", true]]);
+  writeFileSync(join(proj, "usage.jsonl"), '{"ts":2,"agent":"claude","agentCostUsd":0.6}\n');
+  expect(resetOldUsageOnce(cfg, () => {})).toBe(0); // never again
+  expect(existsSync(join(proj, "usage.jsonl"))).toBe(true);
+});

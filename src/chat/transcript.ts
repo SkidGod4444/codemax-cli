@@ -146,7 +146,31 @@ export class Transcript {
     let thinking: { node: TextRenderable; c: Collapsible; id?: string } | null = null;
     let planNode: TextRenderable | null = null;
     let styleTimer: ReturnType<typeof setTimeout> | null = null;
-    const tools = new Map<string, { glyph: TextRenderable; title: TextRenderable; result?: Collapsible; name: string; status: string; kind?: string }>();
+    const tools = new Map<string, { glyph: TextRenderable; title: TextRenderable; result?: Collapsible; name: string; status: string; kind?: string; lastN?: number }>();
+    // A run of reads, searches and listings shares one line, as in Claude Code: "Read 3 files, searched for 2 patterns".
+    type Group = { glyph: TextRenderable; c: Collapsible; items: Map<string, { title: string; status: string; cls: ToolClass }> };
+    let group = null as Group | null;
+    const grouped = new Map<string, Group>();
+    const drawGroup = (g: Group) => {
+      const all = [...g.items.values()];
+      g.glyph.fg = all.some((i) => i.status === "failed") ? C.error : all.every((i) => i.status === "completed") ? C.ok : C.dim;
+      g.c.node.content = g.c.render("", self.expanded);
+    };
+    const addToGroup = (id: string, title: string, status: string, cls: ToolClass) => {
+      if (!group) {
+        const glyph = new TextRenderable(self.renderer, { id: `tg-${++self.n}`, content: `${G.bullet} `, width: 2, fg: C.dim, wrapMode: "none" });
+        const node = self.lineWithGlyph(glyph, "", { gap: true });
+        const items = new Map<string, { title: string; status: string; cls: ToolClass }>();
+        const c: Collapsible = { node, full: "", render: (_t, expanded) => groupText([...items.values()], expanded) };
+        self.collapsibles.push(c);
+        group = { glyph, c, items };
+      }
+      const g: Group = group;
+      g.items.set(id, { title, status, cls });
+      grouped.set(id, g);
+      drawGroup(g);
+      self.scrollToEnd();
+    };
     const paragraphs: string[] = [];
 
     const settle = () => {
@@ -178,6 +202,7 @@ export class Transcript {
 
     return {
       append(t, messageId) {
+        if (t.trim() || para) group = null;
         if (para && messageId && para.id && messageId !== para.id) {
           settle();
           para = null;
@@ -207,6 +232,7 @@ export class Transcript {
         self.scrollToEnd();
       },
       thought(t, messageId) {
+        group = null;
         if (thinking && messageId && thinking.id && messageId !== thinking.id) thinking = null;
         if (!thinking) {
           settle();
@@ -217,7 +243,8 @@ export class Transcript {
             render: (text, expanded) => {
               // Claude Code keeps reasoning out of the normal view; ctrl+o shows it.
               const body = text.trim();
-              if (!expanded) return new StyledText([fg(C.thought)(italic("Thinking…")), fg(C.dimmer)(body ? " (ctrl+o to expand)" : "")]);
+              // A short preview: some agents (OpenCode, Cursor) say what they are doing only here.
+              if (!expanded) return new StyledText([fg(C.thought)(italic(body ? "Thinking… " : "Thinking…")), fg(C.thought)(italic(clip(body, 2, 160)))]);
               return new StyledText([fg(C.thought)(italic("Thinking… ")), fg(C.thought)(italic(body))]);
             },
           };
@@ -231,6 +258,7 @@ export class Transcript {
       },
       plan(entries) {
         if (!entries.length) return;
+        group = null;
         settle();
         para = null;
         const chunks: TextChunk[] = [fg(C.assistant)("Plan")];
@@ -258,17 +286,37 @@ export class Transcript {
         para = null;
         thinking = null;
         if (self.gone) return;
+        const cls = toolClass(title, kind);
+        if (cls) return addToGroup(id, title, status, cls);
+        // A tool announced by its bare name ("bash", then its command) may still join the run.
+        if (!/^\s*[A-Za-z_-]+\s*$/.test(title)) group = null;
         const glyph = new TextRenderable(self.renderer, { id: `tg-${++self.n}`, content: `${G.bullet} `, width: 2, fg: toolColor(status), wrapMode: "none" });
         const title_ = self.lineWithGlyph(glyph, title, { gap: true });
         title_.content = toolTitle(title);
-        const entry = { glyph, title: title_, name: title, status, kind, result: undefined as Collapsible | undefined };
+        const entry = { glyph, title: title_, name: title, status, kind, result: undefined as Collapsible | undefined, lastN: undefined as number | undefined };
         tools.set(id, entry);
         if (detail) entry.result = toolResult(detail, status === "failed", kind);
+        entry.lastN = self.n;
         self.scrollToEnd();
       },
       toolUpdate(id, status, title, detail) {
+        const g = grouped.get(id);
+        if (g) {
+          const it = g.items.get(id)!;
+          if (title) it.title = title;
+          if (status) it.status = status;
+          drawGroup(g);
+          return;
+        }
         const e = tools.get(id);
         if (!e) return;
+        // "bash" became a read-only command and nothing came after it: it joins the run of reads.
+        const cls = title ? toolClass(title, e.kind) : null;
+        if (cls && e.lastN === self.n && !e.result) {
+          (e.title as any).parent?.destroyRecursively?.();
+          tools.delete(id);
+          return addToGroup(id, title!, status ?? e.status, cls);
+        }
         if (title) {
           e.name = title;
           e.title.content = toolTitle(title);
@@ -287,6 +335,7 @@ export class Transcript {
         }
       },
       tasksDone(entries) {
+        group = null;
         settle();
         para = null;
         thinking = null;
@@ -295,6 +344,7 @@ export class Transcript {
         self.scrollToEnd();
       },
       footer(text) {
+        group = null;
         settle();
         para = null;
         thinking = null;
@@ -389,6 +439,89 @@ export function displayCap(s: string): string {
 }
 
 /** "Read src/auth.ts" → **Read** src/auth.ts: the tool's name bold, its arguments normal (Claude Code's header). */
+type ToolClass = "read" | "search" | "list";
+
+/** Reads, searches and listings (the agent's own tools or read-only shell commands) are grouped; anything that may change something is not. */
+export function toolClass(title: string, kind?: string): ToolClass | null {
+  let t = title.trim().replace(/^`+|`+$/g, "").replace(/^(Bash|Shell|Terminal|Run)\((.*)\)$/s, "$2").replace(/^\$\s*/, "").trim();
+  // Codex and others wrap commands in a login shell: /bin/zsh -lc 'grep …'.
+  const wrapped = t.match(/^(?:\/\S+\/)?(?:ba|z|)sh\s+-l?c\s+(['"])([\s\S]*)\1$/);
+  if (wrapped) t = wrapped[2]!;
+  // The agent's own read and search tools.
+  if (kind === "read" || /^(Read|View|ReadFile|view_file|read_file)\b/.test(t)) return "read";
+  if (kind === "search" || /^(Grep|Glob|Search|Find|grep_search|find_by_name|codebase_search)\b/.test(t)) return "search";
+  if (/^(LS|List|list_dir|list_directory)\b/.test(t)) return "list";
+  // A shell command: every part of a chain or pipe must be read-only (a `cd` first is fine).
+  const clean = t.replace(/\s\d?>\s*\/dev\/null|\s2>&1/g, " ");
+  if (/[<>`]|\$\(/.test(clean)) return null; // redirections and substitutions may write or run anything
+  const parts = clean.split(/&&|\|\||;|\|/).map((x) => x.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  let cls: ToolClass | null = null;
+  const rank = { list: 0, read: 1, search: 2 } as const;
+  for (const part of parts) {
+    const c = shellClass(part);
+    if (c === undefined) return null;
+    if (c && (!cls || rank[c] > rank[cls])) cls = c;
+  }
+  return cls;
+}
+
+/** One command of a chain: its class, null for harmless helpers (cd, sort, head after a pipe…), undefined when it may change something. */
+function shellClass(cmd: string): ToolClass | null | undefined {
+  const [name, ...rest] = cmd.split(/\s+/);
+  const args = rest.join(" ");
+  switch (name) {
+    case "grep": case "rg": case "ag": case "ack": case "egrep": case "fgrep":
+      return "search";
+    case "find": case "fd":
+      return /-(exec|delete|ok)\b/.test(args) ? undefined : "search";
+    case "cat": case "bat": case "nl": case "less": case "head": case "tail": case "wc": case "file": case "stat": case "jq":
+      return "read";
+    case "sed":
+      return /(^|\s)-[a-zA-Z]*i/.test(args) ? undefined : "read";
+    case "awk":
+      return /system\(|>\s*"/.test(args) ? undefined : "read";
+    case "ls": case "tree": case "eza": case "exa": case "du": case "df": case "pwd": case "which": case "type":
+      return "list";
+    case "git":
+      return /^(status|log|diff|show|grep|branch|blame|ls-files|rev-parse|remote -v)\b/.test(args) ? (/^grep\b/.test(args) ? "search" : "read") : undefined;
+    case "cd": case "sort": case "uniq": case "cut": case "tr": case "echo": case "printf": case "true": case "column":
+      return null;
+    default:
+      return undefined;
+  }
+}
+
+/** "Read 3 files, searched for 2 patterns" (present tense while any is still running), each one listed when expanded. */
+function groupText(items: { title: string; status: string; cls: ToolClass }[], expanded: boolean): StyledText {
+  const running = items.some((i) => i.status !== "completed" && i.status !== "failed");
+  const n = (c: ToolClass) => items.filter((i) => i.cls === c).length;
+  const order = [...new Set(items.map((i) => i.cls))];
+  const words: Record<ToolClass, [string, string, string, string]> = {
+    read: ["read", "reading", "file", "files"],
+    search: ["searched for", "searching for", "pattern", "patterns"],
+    list: ["listed", "listing", "directory", "directories"],
+  };
+  const parts = order.map((c) => {
+    const [done, now, one, many] = words[c];
+    return `${running ? now : done} ${n(c)} ${n(c) === 1 ? one : many}`;
+  });
+  let text = parts.join(", ");
+  text = text.charAt(0).toUpperCase() + text.slice(1) + (running ? "…" : "");
+  const failed = items.filter((i) => i.status === "failed").length;
+  const chunks: TextChunk[] = [...stringToStyledText(text).chunks];
+  if (failed) chunks.push(fg(C.error)(` · ${failed} failed`));
+  if (!expanded) {
+    chunks.push(dim(" (ctrl+o to expand)"));
+    // The latest step, so a long run of reads still shows what it is doing.
+    const last = items.at(-1)!;
+    if (running) chunks.push(...stringToStyledText("\n").chunks, fg(C.dimmer)(`  ${G.nest}  `), dim(last.title.replace(/\s+/g, " ").slice(0, 120)));
+    return new StyledText(chunks);
+  }
+  for (const i of items) chunks.push(...stringToStyledText("\n").chunks, fg(C.dimmer)(`  ${G.nest}  `), i.status === "failed" ? fg(C.error)(i.title) : dim(i.title.replace(/\s+/g, " ")));
+  return new StyledText(chunks);
+}
+
 function toolTitle(title: string): StyledText {
   const m = title.match(/^([A-Za-z][\w.-]*)(\(.*\)|\s.*)?$/s);
   if (!m) return new StyledText(stringToStyledText(title).chunks);

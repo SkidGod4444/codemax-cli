@@ -29,6 +29,10 @@ export type EngineEvent =
       model?: string;
       /** Incremental cost the agent itself reported, in USD. */
       costUsd?: number;
+      /** The agent's own running total for this session (Claude's `cost.amount`), kept so a restart never counts it again. */
+      agentTotalUsd?: number;
+      /** These tokens' cost is already in the agent's own figure: count them, never price them again. */
+      costCovered?: boolean;
       /** Rate-limit window consumption, when the agent exposes it. */
       usedPercent?: number;
       /** Subscription plan limits the agent reported (Claude: 5-hour, weekly…), one entry per window. */
@@ -40,7 +44,9 @@ export type EngineEvent =
   | { type: "session"; ref: EngineSessionRef }
   | { type: "turn_end"; stopReason: StopReason }
   | { type: "error"; kind: ErrorKind; message: string }
-  | { type: "log"; level: "info" | "warn" | "error"; message: string };
+  | { type: "log"; level: "info" | "warn" | "error"; message: string }
+  /** A warning the agent shows its own users (ACP `notice`, Codex `warning`…): "Retrying Claude, attempt 2 of 10", "Model fallback". */
+  | { type: "notice"; level: "info" | "warn" | "error"; title: string; detail?: string };
 
 export interface PlanLimit {
   /** e.g. "five_hour", "seven_day", "seven_day_opus". */
@@ -127,11 +133,19 @@ export interface EngineMode {
 }
 
 export interface EngineStartOptions {
+  /** The agent's running cost total last recorded for the session being resumed: only what it adds after that is new. */
+  costBaseline?: number;
   /** Let the agent ask the user questions (form elicitation). Off: the agent decides on its own. */
   questions?: boolean;
   cwd: string;
   /** Resume a previous session instead of starting a new one. */
   resume?: EngineSessionRef;
+  /**
+   * A few lines for the agent's instructions (how to keep the user informed). Sent where the
+   * agent has a slot for them (ACP `systemPrompt` append, Codex `developerInstructions`);
+   * otherwise once, ahead of the first message of a new session, never again.
+   */
+  instructions?: string;
 }
 
 export interface EngineInfo {

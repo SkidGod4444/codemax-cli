@@ -21,6 +21,9 @@ const { DEFAULT_CONFIG } = await import("../src/config.ts");
 const { applyTheme } = await import("../src/chat/theme.ts");
 
 const out = resolve(process.argv[2] ?? "ui-preview");
+// Optional colour theme (codemax, claude, ocean, teal, mono): files are then named <theme>-<mode>-….
+const colors = (process.argv[3] ?? "codemax") as "codemax";
+const prefix = process.argv[3] ? `${colors}-` : "";
 mkdirSync(out, { recursive: true });
 
 function fakeAgent() {
@@ -57,7 +60,7 @@ function fakeAgent() {
 }
 
 async function shoot(mode: "dark" | "light") {
-  applyTheme(mode);
+  applyTheme(mode, colors);
   const setup = await createTestRenderer({ width: 100, height: 38 });
   const repo = mkdtempSync(join(tmpdir(), "codemax-preview-repo-"));
   Bun.spawnSync(["sh", "-c", "git init -q && echo x > a && git add -A && git -c user.email=a@b -c user.name=t commit -qm init"], { cwd: repo });
@@ -80,11 +83,11 @@ async function shoot(mode: "dark" | "light") {
   await until((f) => f.includes("still fails") && f.includes("for "));
   await Bun.sleep(120);
   await setup.renderOnce();
-  write(`${mode}-session`, setup.captureSpans(), mode);
+  write(`${prefix}${mode}-session`, setup.captureSpans(), mode);
   await setup.mockInput.typeText("/");
   await until((f) => f.includes("/agents"));
   await setup.renderOnce();
-  write(`${mode}-palette`, setup.captureSpans(), mode);
+  write(`${prefix}${mode}-palette`, setup.captureSpans(), mode);
   setup.mockInput.pressEscape();
   setup.mockInput.pressEscape();
   (app as any).addNote("codex", "Codex", "Heads up · The tests ran once, so a flaky pass would ship.\n\n**Thin evidence**\n- `bun test test/auth.test.ts` ran a single time\n- one unrelated snapshot still fails\n- **Consider running the suite twice before shipping.**");
@@ -92,7 +95,7 @@ async function shoot(mode: "dark" | "light") {
   setup.mockInput.pressEnter();
   await until((f) => f.includes("Keep awake"));
   await setup.renderOnce();
-  write(`${mode}-config`, setup.captureSpans(), mode);
+  write(`${prefix}${mode}-config`, setup.captureSpans(), mode);
   await app.quit();
   setup.renderer.destroy();
 }

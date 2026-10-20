@@ -15,7 +15,7 @@ import { quotaLabel } from "./core/quota.ts";
 import type { AgentId } from "./adapters/types.ts";
 import { describeBytes, findHotkey, parseHotkeys } from "./core/hotkey.ts";
 import { diagnose } from "./core/doctor.ts";
-import { renderUsageTable, sumCost } from "./core/usage.ts";
+import { renderUsageTable, resetOldUsageOnce, sumCost } from "./core/usage.ts";
 import { fmtUsd, priceFor, priceProvenance, resetPriceCache } from "./core/pricing.ts";
 import { fetchLivePrices, loadLivePrices, LIVE_PRICES_PATH } from "./core/prices-live.ts";
 import { fmtDateTime12 } from "./core/time.ts";
@@ -53,6 +53,13 @@ function flag(args: string[], name: string): string | undefined {
 
 async function main(argv: string[]) {
   const config = loadConfig();
+  // Once: older usage logs overcounted Claude, so /usage starts fresh with this version.
+  try {
+    const cleared = resetOldUsageOnce(config, (k, v) => saveConfigKey(k, v));
+    if (cleared) process.env.CODEMAX_USAGE_RESET = String(cleared);
+  } catch {
+    /* never blocks start */
+  }
   const cwd = canonicalCwd();
   const [cmdRaw, ...rest] = argv;
   const cmd = cmdRaw && !cmdRaw.startsWith("-") ? cmdRaw : "start";

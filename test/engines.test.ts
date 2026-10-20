@@ -432,3 +432,91 @@ test("codex bug fixes: a crashed app-server fails pending requests instead of ha
   await expect(e.close()).resolves.toBeUndefined(); // used to throw: the approval was answered after the transport was gone
   void exited; void exit; void sent;
 });
+
+test("instructions: an ACP agent that advertises systemPrompt gets them appended there (not in the message); Codex as developerInstructions", async () => {
+  const { clientStream, agentStream } = pipePair();
+  const got: any = {};
+  new AgentSideConnection((): Agent => ({
+    async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", version: "1" }, agentCapabilities: { sessionCapabilities: { systemPrompt: {} } }, authMethods: [] } as any; },
+    async newSession(p: any) { got.systemPrompt = p.systemPrompt; return { sessionId: "s1" } as any; },
+    async authenticate() { return {}; },
+    async prompt(p: any) { got.text = p.prompt[0].text; return { stopReason: "end_turn" }; },
+    async cancel() {},
+  }), agentStream);
+  const e = new AcpEngine({ agent: "fake", name: "Fake", cmd: [], stream: clientStream });
+  await e.start({ cwd: "/tmp", instructions: "Say what you do." });
+  await e.prompt("hi");
+  expect(got.systemPrompt).toEqual({ mode: "append", content: [{ type: "text", text: "Say what you do." }] });
+  expect(got.text).toBe("hi");
+  await e.close();
+
+  const { transport, sent } = codexFake((m, reply) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+  });
+  const c = new CodexEngine({ transport });
+  await c.start({ cwd: "/tmp", instructions: "Say what you do." });
+  expect(sent.find((m: any) => m.method === "thread/start").params.developerInstructions).toBe("Say what you do.");
+  await c.close();
+});
+
+test("codex rate limits: account/rateLimits/updated becomes 5-hour and weekly windows; warnings become notices", async () => {
+  const { codexWindows } = await import("../src/engines/codex.ts");
+  const w = codexWindows({ primary: { usedPercent: 85, windowDurationMins: 300, resetsAt: 1800000000 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 1800500000 } });
+  expect(w).toEqual([
+    { window: "five_hour", usedPercent: 85, resetsAt: 1800000000000, status: "allowed_warning" },
+    { window: "seven_day", usedPercent: 40, resetsAt: 1800500000000, status: "allowed" },
+  ]);
+  let note: any;
+  const { transport } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start") {
+      reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+      setTimeout(() => n("configWarning", { summary: "Unknown key in config.toml", path: "~/.codex/config.toml" }), 5);
+    }
+  });
+  const c = new CodexEngine({ transport });
+  c.onEvent((e) => e.type === "notice" && (note = e));
+  await c.start({ cwd: "/tmp" });
+  for (let i = 0; i < 40 && !note; i++) await Bun.sleep(5);
+  expect(note).toEqual({ type: "notice", level: "warn", title: "Unknown key in config.toml", detail: "~/.codex/config.toml" });
+  await c.close();
+});
+
+test("usage from the agent itself: a resumed session's running total counts only what it adds; its tokens are not priced again; Claude's repeated transcript lines count once", async () => {
+  const { clientStream, agentStream } = pipePair();
+  new AgentSideConnection((conn): Agent => ({
+    async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", version: "1" }, agentCapabilities: { loadSession: true }, authMethods: [] } as any; },
+    async newSession() { return { sessionId: "other" } as any; },
+    async loadSession() { return {} as any; },
+    async authenticate() { return {}; },
+    async prompt({ sessionId }) {
+      await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 9000, size: 200000, cost: { amount: 2.6, currency: "USD" } } as any });
+      return { stopReason: "end_turn", usage: { inputTokens: 10, outputTokens: 50, cachedReadTokens: 0 } } as any;
+    },
+    async cancel() {},
+  }), agentStream);
+  const e = new AcpEngine({ agent: "claude", name: "Claude Code", cmd: [], stream: clientStream });
+  const usage: any[] = [];
+  e.onEvent((x) => x.type === "usage" && usage.push(x));
+  await e.start({ cwd: "/tmp", resume: { agent: "claude", id: "s-old", cwd: "/tmp", startedAt: 0, lastUsedAt: 0 }, costBaseline: 2.0 });
+  await e.prompt("next");
+  const cost = usage.find((u) => typeof u.costUsd === "number");
+  expect(cost.costUsd).toBeCloseTo(0.6, 6); // not 2.6: that total includes the earlier runs
+  expect(cost.agentTotalUsd).toBe(2.6);
+  expect(usage.find((u) => u.outputTokens === 50).costCovered).toBe(true);
+  await e.close();
+
+  const { priceRecord } = await import("../src/core/usage.ts");
+  expect(priceRecord({ ts: 0, agent: "claude", sessionId: "s", model: "claude-opus-5-5", input: 10, output: 50, cacheRead: 0, cacheWrite: 65000, costCovered: true }).costUsd).toBe(0);
+
+  const { ClaudeUsageTail } = await import("../src/transcripts/claude-usage.ts");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "codemax-tail-"));
+  const tail = new ClaudeUsageTail(dir, "s");
+  (tail as any).path = join(dir, "s.jsonl");
+  const line = (id: string, out: number) => JSON.stringify({ type: "assistant", message: { id, model: "claude-opus-5-5", usage: { input_tokens: 2, output_tokens: out, cache_read_input_tokens: 0, cache_creation_input_tokens: 65058 } } });
+  writeFileSync((tail as any).path, [line("m1", 106), line("m1", 106), line("m2", 5), line("m2", 908), ""].join("\n"));
+  const got = tail.read();
+  expect(got.map((g) => [g.output, g.cacheWrite])).toEqual([[106, 65058], [5, 65058], [903, 0]]);
+});

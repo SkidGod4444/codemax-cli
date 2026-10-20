@@ -18,6 +18,8 @@ export interface UsageDelta {
 export class ClaudeUsageTail {
   private offset = 0;
   private partial = "";
+  /** Claude Code writes one line per content block (thinking, text, tool use), each with the whole message's usage: count each message once. */
+  private seen = new Map<string, number>();
   readonly path: string;
 
   constructor(cwd: string, sessionId: string) {
@@ -47,6 +49,21 @@ export class ClaudeUsageTail {
         const rec = JSON.parse(line);
         if (rec.type !== "assistant" || !rec.message?.usage) continue;
         const u = rec.message.usage;
+        const id = rec.message.id ?? rec.requestId;
+        if (id) {
+          // A later line of the same message can carry more output (it was still streaming): add only that.
+          const prev = this.seen.get(id);
+          const outNow = u.output_tokens ?? 0;
+          if (prev !== undefined) {
+            if (outNow > prev) {
+              this.seen.set(id, outNow);
+              out.push({ model: rec.message.model, input: 0, output: outNow - prev, cacheRead: 0, cacheWrite: 0 });
+            }
+            continue;
+          }
+          this.seen.set(id, outNow);
+          if (this.seen.size > 5000) this.seen = new Map([...this.seen].slice(-2500));
+        }
         out.push({
           model: rec.message.model,
           input: u.input_tokens ?? 0,

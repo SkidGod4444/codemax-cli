@@ -72,6 +72,8 @@ export class AcpEngine implements Engine {
   private turnActive = false;
   private tail: { read(): UsageSample[] } | null = null;
   private lastAgentCost = 0;
+  /** The agent reports its own cost (Claude, OpenCode): token records are then counted, not priced again. */
+  private reportsCost = false;
   /** Agents that expose model/mode as ACP config options (OpenCode) are switched through them. */
   private configIds: { model?: string; mode?: string } = {};
   /** Context fill from the latest usage_update this turn; a token fallback for agents with no usage. */
@@ -131,7 +133,8 @@ export class AcpEngine implements Engine {
       },
     };
     this.conn = new ClientSideConnection(() => client, stream);
-    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
+    this.instructions = o.instructions?.trim() || undefined;
+    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
 
     let sessionId: string;
     let modes: any;
@@ -139,21 +142,21 @@ export class AcpEngine implements Engine {
     let config: any;
     if (o.resume) {
       try {
-        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: [] }));
+        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
         sessionId = o.resume.id;
         modes = r?.modes;
         models = r?.models;
         config = r?.configOptions;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new session` });
-        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [] }));
+        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
         sessionId = s.sessionId;
         config = s.configOptions;
         modes = s.modes;
         models = s.models;
       }
     } else {
-      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [] }));
+      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: [], ...this.systemPrompt(init) } as any));
       sessionId = s.sessionId;
       modes = s.modes;
       models = s.models;
@@ -177,6 +180,7 @@ export class AcpEngine implements Engine {
     this.session = { agent: this.agent, id: sessionId, cwd: o.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.tail = this.opts.usageTail?.(this.session) ?? null;
     if (o.resume && this.tail) this.tail.read(); // skip history already accounted for
+    if (o.resume && sessionId === o.resume.id) this.lastAgentCost = Math.max(0, o.costBaseline ?? 0);
     this.info = {
       agent: this.agent,
       name: (init as any).agentInfo?.title ?? this.opts.name,
@@ -314,15 +318,26 @@ export class AcpEngine implements Engine {
       case "available_commands_update":
         this.emit({ type: "commands", commands: (u.availableCommands ?? []).map((c: any) => ({ name: c.name, description: c.description })) });
         break;
+      case "notice":
+        // Warnings the agent would show its own users (retries, model fallback); advertised so
+        // they arrive as notices instead of bold lines mixed into the reply.
+        this.emit({ type: "notice", level: u.severity === "error" ? "error" : u.severity === "info" ? "info" : "warn", title: String(u.title ?? "notice"), detail: u.description ? String(u.description) : undefined });
+        break;
       case "usage_update": {
         // ACP: `used`/`size` describe context fill; `cost` is the session's running total.
         const total = typeof u.cost?.amount === "number" ? u.cost.amount : undefined;
-        const delta = total !== undefined ? Math.max(0, total - this.lastAgentCost) : undefined;
-        if (total !== undefined) this.lastAgentCost = total;
+        // The total covers the whole session, earlier runs included: only what it added since the
+        // last figure (or since the one recorded before a restart) is new. A lower total means
+        // the agent started counting again.
+        const delta = total !== undefined ? (total >= this.lastAgentCost ? total - this.lastAgentCost : total) : undefined;
+        if (total !== undefined) {
+          this.lastAgentCost = total;
+          this.reportsCost = true;
+        }
         // `used` is how full the context window is, not tokens spent: it feeds the context meter.
         // Token counts come from the prompt response (or session files) at turn end.
         if (typeof u.used === "number") this.turnContext = u.used;
-        this.emit({ type: "usage", contextUsed: u.used, contextSize: u.size, costUsd: delta, model: this.currentModelName(), planLimits: planLimitsOf(u) });
+        this.emit({ type: "usage", contextUsed: u.used, contextSize: u.size, costUsd: delta, agentTotalUsd: total, model: this.currentModelName(), planLimits: planLimitsOf(u) });
         break;
       }
       default:
@@ -359,19 +374,33 @@ export class AcpEngine implements Engine {
     return { sessionId: this.session.id, messageId: this.lastMessageId };
   }
 
+  private instructions?: string;
+  /** The agent takes client instructions on session requests (ACP `sessionCapabilities.systemPrompt`). */
+  private systemPromptSlot = false;
+  private initResult: any;
+
+  /** `systemPrompt` for a session request: only to an agent that advertises it (the spec requires that). */
+  private systemPrompt(init: any): { systemPrompt?: unknown } {
+    this.initResult = init;
+    this.systemPromptSlot = !!init?.agentCapabilities?.sessionCapabilities?.systemPrompt;
+    if (!this.instructions || !this.systemPromptSlot) return {};
+    return { systemPrompt: { mode: "append", content: [{ type: "text", text: this.instructions }] } };
+  }
+
   async rewindConversation(point: RewindPoint) {
     if (!this.conn || !this.session || !this.canFork) throw new Error(`${this.opts.name} cannot rewind its conversation`);
     if (point.sessionId !== this.session.id) throw new Error("that message is in an earlier session");
     const old = this.session.id;
     const { currentModel, currentMode } = this.info ?? {};
     const r: any = point.messageId
-      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: [], _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
-      : await this.conn.newSession({ cwd: this.cwd, mcpServers: [] });
+      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: [], ...this.systemPrompt(this.initResult), _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
+      : await this.conn.newSession({ cwd: this.cwd, mcpServers: [], ...this.systemPrompt(this.initResult) } as any);
     this.session = { agent: this.agent, id: r.sessionId, cwd: this.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.lastMessageId = point.messageId;
     this.idStale = false;
     this.fresh = !point.messageId;
     // The copy's usage was counted in the original session.
+    this.lastAgentCost = 0;
     this.tail = this.opts.usageTail?.(this.session) ?? null;
     this.tail?.read();
     this.emit({ type: "session", ref: this.session });
@@ -385,6 +414,8 @@ export class AcpEngine implements Engine {
 
   async prompt(text: string, images: PromptImage[] = []): Promise<StopReason> {
     if (!this.conn || !this.session) throw new Error("engine not started");
+    // An agent with no instruction slot gets them once, ahead of a new session's first message.
+    if (this.fresh && this.instructions && !this.systemPromptSlot) text = `${this.instructions}\n\n${text}`;
     this.turnActive = true;
     this.idStale = true;
     this.fresh = false;
@@ -519,7 +550,7 @@ export class AcpEngine implements Engine {
       const input = Math.max(0, n(u.inputTokens) - cacheRead);
       const output = n(u.outputTokens) + n(u.thoughtTokens ?? u.reasoningTokens);
       if (input + output + cacheRead > 0) {
-        this.emit({ type: "usage", inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: n(u.cachedWriteTokens ?? u.cacheWriteTokens), model: this.currentModelName() });
+        this.emit({ type: "usage", inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: n(u.cachedWriteTokens ?? u.cacheWriteTokens), model: this.currentModelName(), costCovered: this.reportsCost || undefined });
         return;
       }
     }
@@ -530,7 +561,8 @@ export class AcpEngine implements Engine {
   flushUsage() {
     if (!this.tail) return;
     try {
-      for (const s of this.tail.read()) this.emit({ type: "usage", inputTokens: s.input, outputTokens: s.output, cacheReadTokens: s.cacheRead, cacheWriteTokens: s.cacheWrite, model: s.model, costUsd: s.costUsd });
+      // When the agent also reports cost over ACP, that figure counts and the file's is not added again.
+      for (const s of this.tail.read()) this.emit({ type: "usage", inputTokens: s.input, outputTokens: s.output, cacheReadTokens: s.cacheRead, cacheWriteTokens: s.cacheWrite, model: s.model, costUsd: this.reportsCost ? undefined : s.costUsd, costCovered: this.reportsCost || undefined });
     } catch {
       /* file mid-write; next turn picks it up */
     }

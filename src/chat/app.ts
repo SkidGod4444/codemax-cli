@@ -23,7 +23,8 @@ import { PermissionDialog } from "./permission.ts";
 import { QuestionDialog } from "./question.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
 import { TaskPanel } from "./tasks.ts";
-import { C, DONE_VERBS, G, VERBS, applyTheme, fmtDuration, fmtTime, modeLabel, pick } from "./theme.ts";
+import { ThreadPicker } from "./threadpicker.ts";
+import { C, COLORS, COLOR_THEMES, DONE_VERBS, G, THEME, VERBS, applyTheme, fmtDuration, fmtTime, isColorTheme, modeLabel, pick } from "./theme.ts";
 import { priceRecord, recordCost, renderUsageTable, sumCost } from "../core/usage.ts";
 import { fmtUsd, resetPriceCache } from "../core/pricing.ts";
 import { refreshLivePricesIfStale } from "../core/prices-live.ts";
@@ -41,9 +42,10 @@ import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
 import { critiquePrompt, debateCost, finalPlan, judgePrompt, parseSettled, proposalPrompt, roundsLabel, settledPrompt, UNTIL_SETTLED_MAX, type DebateRounds } from "../core/debate.ts";
 import { logoLines } from "./logo.ts";
-import { checkForUpdate, relaunch, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
+import { checkForUpdate, relaunch, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
+import { whatsNew } from "../core/whatsnew.ts";
 import { displayModelName, sortModels } from "./models.ts";
-import { fmtDateTime12 } from "../core/time.ts";
+import { fmtDateTime12, fmtTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
 import { NotePanel, splitNote } from "./notes.ts";
 import { Onboarding, type OnboardingStep } from "./onboarding.ts";
@@ -55,7 +57,56 @@ const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^"
 const VERSION = pkg.version;
 /** First re-check for a codemax update in a long session; each later one waits twice as long. */
 const UPDATE_RECHECK_FIRST_MS = 30 * 60_000;
-const MODE_CYCLE = ["default", "acceptEdits", "plan"];
+/** Shift+Tab's order (Claude Code's: default → accept edits → plan → auto); other agents' own modes follow. */
+const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
+/** Modes that skip every prompt stay out of Shift+Tab (pick them with /mode): one key press must never turn prompts off for good. */
+const NO_CYCLE = new Set(["bypassPermissions", "dontAsk", "yolo", "never"]);
+/**
+ * Claude Code's own rule for keeping the user informed, in as few words as it takes (it costs a
+ * few dozen tokens: once per new session, or per turn where the agent caches its prompt). Claude
+ * Code already has it, so it is never sent there.
+ */
+export const NARRATE = "codemax shows the user your messages, not your reasoning or raw tool output. Before your first tool call, say in one sentence what you are about to do. While working, add a one-sentence update when you find something important, change direction or hit a blocker. End with one or two sentences: what changed or what you found, and what is next.";
+
+/** How long the "what's new" box stays after /update. */
+const WHATS_NEW_MS = 5000;
+
+/** How long an agent's notice stays on the prompt's border (it stays in the transcript). */
+const NOTICE_MS = 8000;
+
+/** Claude Code's names for its windows; Codex's 5-hour and weekly windows use the same keys. */
+const WINDOW_NAMES: Record<string, string> = { five_hour: "session limit", seven_day: "weekly limit", seven_day_opus: "Opus limit", seven_day_sonnet: "Sonnet limit", seven_day_overage_included: "Fable limit", overage: "usage credit limit" };
+
+/** "warning" when a window is near its end: the agent says so (allowed_warning), or 80% is used. */
+function limitLevel(pl: { usedPercent?: number; status?: string }): "warning" | null {
+  return pl.status === "allowed_warning" || (typeof pl.usedPercent === "number" && pl.usedPercent >= 80) ? "warning" : null;
+}
+
+/** Claude Code's wording: "You've used 91% of your weekly limit · resets Fri 3:00 PM", "Approaching session limit", "Weekly limit reached". */
+export function limitText(pl: { window: string; usedPercent?: number; resetsAt?: number; status?: string }): string {
+  const name = WINDOW_NAMES[pl.window] ?? (pl.window === "plan" ? "usage limit" : `${pl.window} limit`);
+  const pct = typeof pl.usedPercent === "number" ? Math.min(100, Math.floor(pl.usedPercent)) : undefined;
+  const head = pl.status === "rejected" || pct === 100 ? `${name.charAt(0).toUpperCase()}${name.slice(1)} reached` : pct !== undefined ? `You've used ${pct}% of your ${name}` : `Approaching ${name}`;
+  return pl.resetsAt ? `${head} · resets ${fmtReset(pl.resetsAt)}` : head;
+}
+
+function fmtReset(ts: number): string {
+  if (ts - Date.now() < 20 * 3600_000) return fmtTime12(ts);
+  return `${new Date(ts).toLocaleDateString("en-US", { weekday: "short" })} ${fmtTime12(ts)}`;
+}
+
+/** The window to warn about on the prompt's border: a reached one first, else the fullest one near its end. */
+function limitWarning(m: Map<string, { usedPercent?: number; resetsAt?: number; status?: string; at: number }> | undefined): { text: string; reached: boolean } | null {
+  if (!m) return null;
+  const live = [...m.entries()].filter(([, v]) => !v.resetsAt || v.resetsAt > Date.now()).map(([window, v]) => ({ window, ...v }));
+  const reached = live.find((w) => w.status === "rejected" || (w.usedPercent ?? 0) >= 100);
+  if (reached) return { text: limitText(reached), reached: true };
+  const near = live.filter((w) => limitLevel(w)).sort((a, b) => (b.usedPercent ?? 0) - (a.usedPercent ?? 0))[0];
+  return near ? { text: limitText(near), reached: false } : null;
+}
+
+/** Built-in commands that start agent work or replace the session: they wait for the agent to finish. */
+const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup)\b/i;
 /** How long a lone 0 / 1 / 2 must sit in the prompt before it acts on the side agent's note. */
 const NOTE_ARM_MS = 800;
 /** A question left unanswered this long is skipped when `questions` is "timeout". */
@@ -68,7 +119,7 @@ interface Active {
   name: string;
   engine: Engine;
   /** `model`: the model the agent reported for this turn (usage), when it does. */
-  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string; edited?: boolean } | null;
+  turn: { block: AgentBlock; tools: Set<string>; startedAt: number; tokens: number; chars: number; verb: string; rec?: TurnRecorder; model?: string; edited?: boolean; step?: string } | null;
   replay: AgentBlock | null;
   unsubscribe: () => void;
   mode?: string;
@@ -250,6 +301,7 @@ export class ChatApp {
     footer.add(this.footerText);
     root.add(footer);
     renderer.root.add(root);
+    this.chatRoot = root;
     // Select text with the mouse to copy it (like a terminal's copy-on-select).
     renderer.on("selection", (sel: { getSelectedText(): string } | null) => {
       const text = sel?.getSelectedText?.() ?? "";
@@ -268,6 +320,7 @@ export class ChatApp {
     renderer.on("resize", () => this.safely("resize", () => {
       this.fitInput();
       this.palette?.render();
+      this.threadPicker?.render();
       if (this.permission instanceof PermissionDialog) this.permission.relayout();
       this.renderFooter();
     }));
@@ -314,8 +367,15 @@ export class ChatApp {
     }
     const updatedTo = process.env[UPDATED_TO_ENV];
     if (updatedTo !== undefined) {
+      const from = process.env[UPDATED_FROM_ENV];
       delete process.env[UPDATED_TO_ENV];
+      delete process.env[UPDATED_FROM_ENV];
       notes.push(updatedTo ? `updated to v${updatedTo} and restarted` : "updated and restarted");
+      this.showWhatsNew(VERSION, from);
+    }
+    if (process.env.CODEMAX_USAGE_RESET) {
+      notes.push("usage history cleared once: earlier figures counted Claude twice or more · /usage counts from now");
+      delete process.env.CODEMAX_USAGE_RESET;
     }
     const stripped = strippedKeys();
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
@@ -442,6 +502,12 @@ export class ChatApp {
     // The prompt always has the keyboard (a click elsewhere, like selecting text in the
     // transcript, must not leave typing going nowhere); dialogs take their keys below.
     if (!this.input.focused && !this.closed) this.input.focus();
+    if (this.threadPicker) {
+      key.stopPropagation();
+      if (key.name === "c" && key.ctrl) return void this.quit();
+      this.threadPicker.handleKey(key);
+      return;
+    }
     if (this.onboarding && !this.onboardingAside) {
       key.stopPropagation();
       // Ctrl+C leaves the setup and quits, as everywhere else.
@@ -453,7 +519,39 @@ export class ChatApp {
       this.onboarding.handleKey(key);
       return;
     }
-    if (this.permission) {
+    if (this.permission instanceof PermissionDialog) {
+      // The prompt stays usable while an agent asks: typing goes to the prompt, Enter on text
+      // sends it (a /command runs, a message queues). With the prompt empty, arrows, digits,
+      // Enter and Esc answer the dialog. Shift+Tab still cycles the mode.
+      const text = this.input.plainText;
+      const typed = text.length > 0;
+      // A digit is typed into the prompt like any text ("2 more tests please" must never pick
+      // "don't ask again"); a lone digit answers: Enter at once, or on its own after NOTE_ARM_MS.
+      if (/^[1-9]$/.test(text) && key.name === "return" && !key.shift) {
+        key.stopPropagation();
+        this.input.clear();
+        this.permission.handleKey({ name: text } as KeyEvent);
+        return;
+      }
+      const dialogKey = (key.ctrl && key.name === "o") || key.name === "pageup" || key.name === "pagedown" || (!typed && /^(up|down|tab|return|escape)$/.test(key.name) && !key.ctrl && !key.meta && !key.shift);
+      if (dialogKey) {
+        key.stopPropagation();
+        this.permission.handleKey(key);
+        return;
+      }
+      if (typed && key.name === "escape") {
+        // Esc with text clears the prompt; it never interrupts the agent while it is asking.
+        key.stopPropagation();
+        this.input.clear();
+        return;
+      }
+      if (this.isShiftTab(key)) {
+        key.stopPropagation();
+        void this.cycleMode();
+        return;
+      }
+      // Anything else: the prompt (and the usual keys below) get it.
+    } else if (this.permission) {
       key.stopPropagation();
       this.permission.handleKey(key);
       return;
@@ -636,9 +734,12 @@ export class ChatApp {
     const text = this.input.plainText;
     // "!" runs a shell command: the prompt says so in pink, as Claude Code's bash mode does.
     const shell = text.startsWith("!");
-    this.inputWrap.borderColor = shell ? C.accent : C.promptBorder;
-    this.promptGlyph.content = shell ? "! " : `${G.prompt} `;
-    this.promptGlyph.fg = shell ? C.accent : C.dim;
+    if (shell !== this.shellLook) {
+      this.shellLook = shell;
+      this.inputWrap.borderColor = shell ? C.accent : C.promptBorder;
+      this.promptGlyph.content = shell ? "! " : `${G.prompt} `;
+      this.promptGlyph.fg = shell ? C.accent : C.dim;
+    }
     this.armNote(text);
     if (this.historyIdx >= 0 && text !== this.history[this.historyIdx]) this.historyIdx = -1;
     const mention = text.match(MENTION_RE);
@@ -693,7 +794,11 @@ export class ChatApp {
     // Busy also while the agent is still starting or a message is on its way (its snapshot):
     // a second message then queues instead of reaching a half-started agent or racing the first.
     const busy = !!this.active?.turn || !!this.verifying || !!this.debate || this.starting || this.sending;
-    const immediate = /^\/(quit|exit|q|help|status|usage|cost|diff|clear|switch|agents)\b/.test(text);
+    // Built-in commands run at once, even mid-turn (/config, /model, /theme…); only those that
+    // start agent work wait. The agent's own commands are messages to it, so they queue.
+    const name = text.split(/\s+/)[0]!.toLowerCase();
+    const builtin = text.startsWith("/") && this.builtins().some((b) => b.name === name || b.name === name.replace(/^\/(exit|q)$/, "/quit"));
+    const immediate = builtin && !WAITS_FOR_AGENT.test(text);
     if (busy && !immediate && (text.startsWith("/") || text.startsWith("!"))) {
       this.enqueue(text);
       return;
@@ -937,7 +1042,7 @@ export class ChatApp {
     this.transcript.divider(`${why} · ${adapter.name}`);
     this.transcript.user(text);
     try {
-      await engine.start({ cwd: this.cwd, questions: this.config.questions !== "off" });
+      await engine.start({ cwd: this.cwd, questions: this.config.questions !== "off", instructions: this.narration(agent) });
       const brief = this.ledger.turns().length ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: agent, from: this.active?.agent, config: this.config, purpose: "context" }) : "";
       const body = this.withAttachments(text);
       await this.checkpoint(side, text);
@@ -1392,33 +1497,25 @@ export class ChatApp {
       return false;
     }
     const ok = (a?: AgentId) => !!a && !!this.detect.get(a)?.installed && !!this.detect.get(a)?.engine;
-    const name = (a?: AgentId) => (a ? (listAdapters(this.config.order).find((x) => x.id === a)?.name ?? a) : "");
-    const items: PaletteItem[] = threads.map((t, i) => ({
-      label: t.title!,
-      description: `${ago(t.updatedAt)}${t.agent ? ` · ${name(t.agent)}` : ""} · ${t.id}`,
-      value: t.id,
-      weight: threads.length - i + 1,
-    }));
-    items.push({ label: "New thread", description: `with ${name(defaultAgent)}`, value: "", weight: 0 });
-    this.paletteKind = "picker";
-    this.palette = new Palette(this.renderer, {
-      title: "Resume which thread? · type to filter · Enter to open · Esc for a new thread",
-      items,
-      maxRows: 10,
-      onPick: (it) => {
-        this.closePalette();
-        const t = threads.find((x) => x.id === it.value);
+    const name = (a?: string) => (a ? (listAdapters(this.config.order).find((x) => x.id === a)?.name ?? a) : "");
+    this.threadPicker = new ThreadPicker(this.renderer, {
+      threads,
+      agentName: name,
+      newWith: name(defaultAgent),
+      preview: (id) => Ledger.threadPreview(this.ledger.dir, id),
+      onPick: (id) => {
+        this.threadPicker?.destroy();
+        this.threadPicker = null;
+        this.chatRoot.visible = true;
+        this.input.focus();
+        const t = threads.find((x) => x.id === id);
         this.ledger = new Ledger(this.cwd, undefined, t ? t.id : "new");
         void this.launch(t && ok(t.agent) ? t.agent! : defaultAgent, { fresh: !t });
       },
-      onClose: () => {
-        this.closePalette();
-        this.ledger = new Ledger(this.cwd, undefined, "new");
-        void this.launch(defaultAgent, { fresh: true });
-      },
-    }, this.paletteAnchor);
-    this.paletteFiltered = true;
-    this.renderer.root.add(this.palette.box);
+    });
+    // Claude Code's resume list takes the whole screen; the chat comes back with the thread.
+    this.chatRoot.visible = false;
+    this.renderer.root.add(this.threadPicker.box);
     return true;
   }
 
@@ -1651,7 +1748,7 @@ export class ChatApp {
       { name: "/export", description: "Save this conversation as Markdown · /export <path> to choose where", run: (a) => this.exportThread(a) },
       { name: "/setup", description: "Go through every setting one by one, as on first run", run: () => void this.runOnboarding() },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
-      { name: "/theme", description: "Colour theme: /theme dark | light | auto (saved; restart to apply everywhere)", run: (a) => this.setThemePref(a) },
+      { name: "/theme", description: `Colours: /theme ${COLOR_THEMES.map((t) => t.id).join(" | ")}, or dark | light | auto (saved)`, run: (a) => this.setThemePref(a) },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
   }
@@ -1693,21 +1790,46 @@ export class ChatApp {
     this.renderFooter();
   }
 
+  /** /theme: dark | light | auto, or a colour theme (codemax, claude, ocean, teal, mono). Saved, and applied at once. */
   private setThemePref(arg: string) {
     const v = arg.trim().toLowerCase();
-    if (v !== "dark" && v !== "light" && v !== "auto") {
-      this.transcript.note(`theme is ${this.config.theme ?? "auto"} · use /theme dark, /theme light or /theme auto`);
+    const save = (k: "theme" | "colors", val: any) => {
+      try {
+        saveConfigKey(k, val);
+      } catch {
+        /* read-only home: still applies for this run */
+      }
+    };
+    if (isColorTheme(v)) {
+      this.config.colors = v;
+      save("colors", v);
+      applyTheme(THEME, v);
+    } else if (v === "dark" || v === "light" || v === "auto") {
+      this.config.theme = v;
+      save("theme", v);
+      if (v !== "auto") applyTheme(v, COLORS);
+    } else {
+      const now = COLOR_THEMES.find((t) => t.id === COLORS)!;
+      this.transcript.note(`colours: ${now.name} (${this.config.theme ?? "auto"}) · /theme ${COLOR_THEMES.map((t) => t.id).join(", ")} · or /theme dark, light, auto`);
       return;
     }
-    this.config.theme = v;
-    try {
-      saveConfigKey("theme", v);
-    } catch {
-      /* read-only home: still applies for this run */
-    }
-    if (v !== "auto") applyTheme(v);
-    this.transcript.note(`theme set to ${v}; new lines use it now, everything after a restart`, C.accent);
-    this.renderFooter();
+    this.recolor();
+    const name = COLOR_THEMES.find((t) => t.id === COLORS)!.name;
+    this.transcript.note(`colours: ${name}, ${THEME} · the prompt, footer and new lines use it now; earlier lines keep theirs until a restart`, C.accent);
+  }
+
+  /** Repaint what stays on screen (prompt, spinner, panels, footer) in the colours just applied. */
+  private recolor() {
+    this.safely("theme", () => {
+      this.inputWrap.borderColor = this.shellLook ? C.accent : C.promptBorder;
+      this.promptGlyph.fg = this.shellLook ? C.accent : C.dim;
+      (this.input as any).placeholderColor = C.dim;
+      this.working.fg = C.dim;
+      this.tasks.set(this.tasks.current);
+      this.renderQueue();
+      this.renderFooter();
+      this.showUpdateBadge();
+    });
   }
 
   private async command(line: string) {
@@ -1745,7 +1867,12 @@ export class ChatApp {
 
   private pendingShell: string[] = [];
   private tasks: TaskPanel;
+  private chatRoot!: BoxRenderable;
+  /** `codemax --resume`: the full-screen thread list (the chat is hidden meanwhile). */
+  private threadPicker: ThreadPicker | null = null;
   private promptGlyph: TextRenderable;
+  /** The prompt is drawn in "!" shell mode (changed only when that flips, not on every key). */
+  private shellLook = false;
   /** An agent is starting (launch), or a message is being prepared (send): new messages queue. */
   private starting = false;
   private sending = false;
@@ -2127,15 +2254,49 @@ export class ChatApp {
     this.input.focus();
   }
 
+  /**
+   * The running cost total an agent last reported for a session, so a resumed session's total
+   * counts only what it adds now. Older records kept only the figure (then the total itself, the
+   * bug this replaces), so the largest one is the best guess.
+   */
+  private costBaseline(agent: AgentId, sessionId: string): number | undefined {
+    let best: number | undefined;
+    try {
+      for (const r of this.ledger.usage()) {
+        if (r.agent !== agent || r.sessionId !== sessionId) continue;
+        const v = r.agentTotalUsd ?? r.agentCostUsd;
+        if (typeof v === "number" && (best === undefined || v > best)) best = v;
+      }
+    } catch {
+      /* no usage yet */
+    }
+    return best;
+  }
+
+  /** NARRATE for agents that lack it (everyone but Claude Code), unless /config turned it off. */
+  private narration(agent: AgentId): string | undefined {
+    return agent !== "claude" && this.config.narrate !== false ? NARRATE : undefined;
+  }
+
   private async cycleMode() {
     const a = this.active;
     if (!a?.engine.setMode) return this.setFlash("this agent has no permission modes");
     const ids = (a.engine.info?.modes ?? []).map((m) => m.id);
-    const cycle = MODE_CYCLE.filter((m) => ids.includes(m));
-    const order = cycle.length ? cycle : ids;
-    if (!order.length) return;
-    const next = order[(order.indexOf(a.mode ?? "") + 1) % order.length]!;
-    await a.engine.setMode(next);
+    // Claude Code's order first, then the agent's own modes (Antigravity's auto_edit, Codex's…).
+    const order = [...MODE_CYCLE.filter((m) => ids.includes(m)), ...ids.filter((m) => !MODE_CYCLE.includes(m) && !NO_CYCLE.has(m))];
+    if (order.length < 2) return this.setFlash(order.length ? "this agent has one permission mode here · /mode lists them" : "this agent has no permission modes");
+    const from = a.mode ?? "";
+    const next = order[(order.indexOf(from) + 1) % order.length]!;
+    // Shown at once: the next Shift+Tab moves on from here, not from the mode the agent last confirmed.
+    a.mode = next;
+    this.renderFooter();
+    try {
+      await a.engine.setMode(next);
+    } catch (e: any) {
+      if (a.mode === next) a.mode = from;
+      this.renderFooter();
+      this.setFlash(`could not switch mode: ${String(e?.message ?? e).slice(0, 80)}`);
+    }
   }
 
   // ---------- engine lifecycle ----------
@@ -2156,10 +2317,11 @@ export class ChatApp {
     active.unsubscribe = engine.onEvent((e) => this.onEngineEvent(active, safeDeep(e)));
     this.active = active;
     this.tasks.clear();
+    this.showUpdateBadge(); // limits are per agent
     this.starting = true;
     this.setWorking(`${pick(G.spinner, 0)} Starting ${adapter.name}…`);
     try {
-      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off" });
+      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
       active.mode = info.currentMode;
       if (engine.session) this.ledger.saveSession({ agent, id: engine.session.id, cwd: this.cwd, startedAt: engine.session.startedAt, lastUsedAt: Date.now() } as SessionRef);
       this.ledger.addEvent({ kind: o.from ? "switch" : "start", agent: o.from, to: agent, detail: o.reason });
@@ -2320,7 +2482,10 @@ export class ChatApp {
     const target = () => active.turn?.block ?? (active.replay ??= this.transcript.agent());
     switch (e.type) {
       case "text_delta":
-        if (active.turn) active.turn.chars += e.text.length;
+        if (active.turn) {
+          active.turn.chars += e.text.length;
+          active.turn.step = undefined; // it is talking, not on a tool
+        }
         active.turn?.rec?.textDelta(e.text, e.messageId);
         target().append(e.text, e.messageId);
         break;
@@ -2343,12 +2508,14 @@ export class ChatApp {
         if (active.turn && (/^(edit|delete|move|fileChange)$/.test(e.kind ?? "") || e.files?.length && e.kind !== "read" && e.kind !== "search")) active.turn.edited = true;
         active.turn?.rec?.tool(e.id, { title: e.title, kind: e.kind, status: e.status, input: e.input, output: e.output, files: e.files });
         target().tool(e.id, e.title, e.status, e.detail, e.kind);
+        if (active.turn) active.turn.step = e.title;
         if (e.status === "completed" && this.active === active) this.term.toolDone(e.title);
         break;
       case "tool_update":
         active.turn?.rec?.tool(e.id, { title: e.title, status: e.status, input: e.input, output: e.output, files: e.files });
         if (e.status === "completed" && this.active === active) this.term.toolDone(e.title ?? "tool");
         target().toolUpdate(e.id, e.status, e.title, e.detail);
+        if (active.turn && e.title && e.status !== "completed" && e.status !== "failed") active.turn.step = e.title;
         break;
       case "permission_request":
         // A debate only plans: whatever a debater asks to do is refused.
@@ -2396,7 +2563,15 @@ export class ChatApp {
           this.planLimits.set(active.agent, m);
           // A refused window is the plan running out: the handoff offer follows from onQuota.
           if (pl.status === "rejected" || pl.window === "five_hour") this.onQuota({ agent: active.agent, usedPercent: pl.usedPercent, exhausted: pl.status === "rejected", resetsAt: pl.resetsAt, source: "probe", at: Date.now() });
+          // Claude Code warns once a window nears its end; so does codemax, once per level, in the transcript too.
+          const level = pl.status === "rejected" ? "reached" : limitLevel(pl);
+          const key = `${active.agent}:${pl.window}`;
+          if (level && this.limitAnnounced.get(key) !== level && !this.side.has(active)) {
+            this.limitAnnounced.set(key, level);
+            this.transcript.note(`${active.name}: ${limitText(pl)}`, level === "reached" ? C.error : C.warn);
+          } else if (!level) this.limitAnnounced.delete(key);
         }
+        if (e.planLimits?.length && active === this.active) this.showUpdateBadge();
         if (typeof e.usedPercent === "number") this.onQuota({ agent: active.agent, usedPercent: e.usedPercent, exhausted: e.usedPercent >= 100, source: "probe", at: Date.now() });
         this.recordUsage(active.agent, active.engine, e);
         break;
@@ -2419,6 +2594,21 @@ export class ChatApp {
       case "log":
         if (e.level !== "info") this.transcript.note(`${active.name}: ${e.message}`, e.level === "error" ? C.error : C.dim);
         break;
+      case "notice": {
+        // What the agent would show in its own UI ("Retrying Claude, attempt 2 of 10", "Model fallback").
+        const text = e.detail ? `${e.title}: ${e.detail}` : e.title;
+        // Agents repeat some (Codex sends its config warning per thread): once a minute is enough.
+        const key = `${active.agent}:${text}`;
+        if ((this.noticeSeen.get(key) ?? 0) > Date.now() - 60_000) break;
+        this.noticeSeen.set(key, Date.now());
+        this.transcript.note(`${active.name}: ${text}`, e.level === "error" ? C.error : e.level === "warn" ? C.warn : C.dim);
+        if (e.level !== "info" && active === this.active) {
+          this.promptNotice = { text: `${active.name}: ${e.title}`, level: e.level, until: Date.now() + NOTICE_MS };
+          this.showUpdateBadge();
+          setTimeout(() => this.showUpdateBadge(), NOTICE_MS + 50);
+        }
+        break;
+      }
       default:
         break;
     }
@@ -2512,6 +2702,8 @@ export class ChatApp {
       cacheRead: e.cacheReadTokens ?? 0,
       cacheWrite: e.cacheWriteTokens ?? 0,
       agentCostUsd: typeof e.costUsd === "number" ? e.costUsd : undefined,
+      agentTotalUsd: typeof e.agentTotalUsd === "number" ? e.agentTotalUsd : undefined,
+      costCovered: e.costCovered || undefined,
     });
     this.ledger.addUsage(rec);
     this.sessionCost += recordCost(rec).usd;
@@ -2644,6 +2836,7 @@ export class ChatApp {
         },
       },
       { key: "theme", label: "Theme", value: c.theme ?? "auto", choices: [{ value: "auto", description: "follow the terminal's background" }, { value: "dark" }, { value: "light" }], apply: (v) => this.setThemePref(v) },
+      { key: "colors", label: "Colours", value: isColorTheme(c.colors) ? c.colors : "codemax", choices: COLOR_THEMES.map((t) => ({ value: t.id, description: `${t.name}: ${t.description}` })), apply: (v) => this.setThemePref(v) },
       { key: "awake", label: "Keep awake", value: c.awake ?? "off", choices: [{ value: "off", description: "sleep normally" }, { value: "on", description: "no sleep, screen saver or lock while codemax runs" }, { value: "lid", description: "also keep working with the lid closed" }], apply: (v) => this.setAwake(v) },
       { key: "side", label: "Side agent", value: side.agent ?? "off", choices: [{ value: "off" }, ...agents.map((a) => ({ value: a.id, label: a.name, description: a.id === this.active?.agent ? "same plan as the main agent: reviews count against its limit · pick its model next" : "its own subscription · pick its model next" }))], apply: (v) => (v === "off" ? this.disableSide() : this.enableSide(v as AgentId, { forward: side.forward, pickModel: true, samePlan: v === this.active?.agent })) },
       { key: "sideSamePlan", label: "Side agent on the main agent's plan", value: side.samePlan ? "allowed" : "never", choices: [{ value: "never", description: "reviews pause while the side agent's tool is also the main agent" }, { value: "allowed", description: "reviews count against the main agent's usage limit" }], apply: (v) => this.saveSide({ ...side, samePlan: v === "allowed" }) },
@@ -2718,6 +2911,7 @@ export class ChatApp {
       { key: "questions", label: "Agent questions", value: c.questions ?? "ask", choices: [{ value: "ask", description: "show the agent's question and wait for your answer" }, { value: "timeout", label: "ask, skip after 5 min", description: "for unattended runs (keep awake): an unanswered question is skipped and the agent carries on" }, { value: "off", description: "agents never ask; they decide themselves (new sessions)" }], apply: (v) => { c.questions = v as Config["questions"]; saveConfigKey("questions", c.questions); } },
       { key: "terminalStatus", label: "Terminal tab status", value: c.terminalStatus === false ? "off" : "on", choices: [{ value: "on", description: "Warp shows the agent's badge and running / waiting / done; other terminals get OSC 7501 status" }, { value: "off" }], apply: (v) => { c.terminalStatus = v === "on"; saveConfigKey("terminalStatus", c.terminalStatus); } },
       { key: "notifications", label: "Desktop notifications", value: c.notifications === false ? "off" : "on", choices: [{ value: "on", description: "when an agent waits for you or a long turn ends, while you are in another window" }, { value: "off" }], apply: (v) => { c.notifications = v === "on"; saveConfigKey("notifications", c.notifications); } },
+      { key: "narrate", label: "Agents say what they are doing", value: c.narrate === false ? "off" : "on", choices: [{ value: "on", description: "a short note asks Codex, OpenCode, Cursor, Grok and Antigravity to explain each step, as Claude Code does (new sessions)" }, { value: "off", description: "they work as they would on their own" }], apply: (v) => { c.narrate = v === "on"; saveConfigKey("narrate", c.narrate); } },
       { key: "tips", label: "Tips in the prompt", value: c.tips === false ? "off" : "on", choices: [{ value: "on", description: "a different feature (and when it helps) in the empty prompt after each message" }, { value: "off" }], apply: (v) => { c.tips = v === "on"; saveConfigKey("tips", c.tips); this.rotateTip(); } },
       { key: "updateCheck", label: "Check for codemax updates", value: c.updateCheck === false ? "off" : "on", choices: [{ value: "on", description: "asks npm at most every 12 hours" }, { value: "off" }], apply: (v) => { c.updateCheck = v === "on"; saveConfigKey("updateCheck", c.updateCheck); } },
       { key: "priceUpdates", label: "Weekly price list refresh", value: onOff(c.priceUpdates), choices: [{ value: "on" }, { value: "off", description: "stay fully offline" }], apply: bool("priceUpdates") },
@@ -2738,6 +2932,7 @@ export class ChatApp {
       autoSwitch: "When an agent hits its usage limit, the same task can continue in the next agent you pay for: offered (one Enter), automatic, or not at all.",
       budget: "A daily limit on the API-equivalent value of what you use (your subscription is never billed more). At the limit, codemax offers the next agent.",
       theme: "Colours for a dark or a light terminal. Auto reads your terminal's background.",
+      colors: "The accent colour codemax draws with: its pink, Claude Code's own colours, blue, teal or plain greys. /theme <name> changes it later.",
       hotkeys: "The keys that open the agent menu from anywhere. Warp keeps ctrl+/ for itself, so pick ctrl+^ there.",
       questions: "Agents like Claude and Codex can stop to ask you something (\"which approach?\") instead of guessing.",
       checkpoints: "A snapshot of your files before each message, so /undo and Esc Esc (rewind) can put them back. It never touches your git branches or index.",
@@ -2751,6 +2946,7 @@ export class ChatApp {
       bell: "A bell when a long turn finishes, so you can look away.",
       terminalStatus: "Show the agent and whether it is running, waiting or done in your terminal's tab (Warp shows the agent's badge).",
       notifications: "A desktop notification when an agent needs you while you are in another window.",
+      narrate: "Claude Code tells you what it is about to do and what it found; other agents often just call tools. This asks them to do the same, in a few dozen tokens.",
       tips: "Show a different codemax feature in the empty prompt after each message you send (like /debate, rewind, dropping screenshots), with when it helps.",
       updateCheck: "Tell you when a new codemax is out; /update installs it.",
       priceUpdates: "Refresh the public price list weekly, used to show what your subscription usage would cost on the API.",
@@ -3140,6 +3336,17 @@ export class ChatApp {
     if (this.noteArmTimer) clearTimeout(this.noteArmTimer);
     this.noteArmTimer = null;
     const k = text;
+    // The permission dialog's digits work the same way: alone in the prompt, they answer.
+    const dialog = this.permission;
+    if (dialog instanceof PermissionDialog && /^[1-9]$/.test(k)) {
+      this.noteArmTimer = setTimeout(() => this.safely("permission", () => {
+        this.noteArmTimer = null;
+        if (this.closed || this.permission !== dialog || this.input.plainText !== k) return;
+        this.input.clear();
+        dialog.handleKey({ name: k } as KeyEvent);
+      }), NOTE_ARM_MS);
+      return;
+    }
     if (!this.notePanel.count || this.notePanel.isPaused || !/^[012]$/.test(k)) return;
     this.noteArmTimer = setTimeout(() => this.safely("note", () => {
       this.noteArmTimer = null;
@@ -3202,11 +3409,51 @@ export class ChatApp {
     this.renderFooter();
   }
 
-  /** "↑ codemax 0.1.8 available · /update" on the prompt's top border, at the right, like Claude Code's update notice. */
+  /**
+   * The prompt's top border, at the right, as Claude Code uses that spot: a plan-limit warning
+   * first ("You've used 91% of your weekly limit · resets Fri 3:00 PM"), then a notice the
+   * agent just raised (for a few seconds), then "↑ codemax 0.1.8 available · /update".
+   */
   private showUpdateBadge() {
-    this.inputWrap.titleAlignment = "right";
-    this.inputWrap.title = this.updateAvailable ? ` ↑ codemax ${this.updateAvailable} available · /update ` : "";
+    this.safely("prompt title", () => {
+      this.inputWrap.titleAlignment = "right";
+      const limit = this.active ? limitWarning(this.planLimits.get(this.active.agent)) : null;
+      const notice = this.promptNotice && this.promptNotice.until > Date.now() ? this.promptNotice : null;
+      const text = limit?.text ?? notice?.text ?? (this.updateAvailable ? `↑ codemax ${this.updateAvailable} available · /update` : "");
+      const width = Math.max(10, this.renderer.width - 8);
+      this.inputWrap.title = text ? ` ${text.length > width ? text.slice(0, width - 1) + "…" : text} ` : "";
+      this.inputWrap.titleColor = limit ? (limit.reached ? C.error : C.warn) : notice ? (notice.level === "error" ? C.error : C.warn) : C.dim;
+    });
   }
+
+  private noticeSeen = new Map<string, number>();
+  /**
+   * After /update: what changed since the version that ran it, in a small box above the prompt
+   * for WHATS_NEW_MS, then gone. Never written to the transcript or the thread.
+   */
+  showWhatsNew(to: string, from?: string) {
+    const notes = whatsNew(to, from);
+    if (!notes.length) return;
+    this.safely("what's new", () => {
+      const box = new BoxRenderable(this.renderer, { id: "whats-new", width: "100%", flexShrink: 0, flexDirection: "column", border: true, borderStyle: "rounded", borderColor: C.accent, paddingX: 1, title: ` What's new in codemax v${to} `, titleAlignment: "left" } as any);
+      const lines = notes.flatMap((n, i) => [...(i > 0 || notes.length > 1 ? [`v${n.version}`] : []), ...n.lines.map((l) => `  • ${l}`)]);
+      for (const [i, l] of lines.entries()) box.add(new TextRenderable(this.renderer, { id: `wn-${i}`, content: l, fg: l.startsWith("v") ? C.dim : C.text ?? C.dim, wrapMode: "none", truncate: true, width: "100%" } as any));
+      this.chatRoot.insertBefore(box, this.inputWrap); // just above the prompt
+      this.whatsNewBox = box;
+      setTimeout(() => this.safely("what's new", () => {
+        if (this.whatsNewBox !== box) return;
+        box.destroyRecursively();
+        this.whatsNewBox = null;
+      }), WHATS_NEW_MS);
+    });
+  }
+
+  private whatsNewBox: BoxRenderable | null = null;
+
+  /** A notice an agent raised, shown on the prompt's border until `until`. */
+  private promptNotice: { text: string; level: string; until: number } | null = null;
+  /** Limit levels already announced in the transcript, per agent and window ("claude:seven_day" → "warning"). */
+  private limitAnnounced = new Map<string, string>();
 
   /** /update: update the way codemax was installed, with its output on the real terminal. */
   private async runUpdate() {
@@ -3253,7 +3500,9 @@ export class ChatApp {
       if (this.permission) this.setWorking(this.permission instanceof QuestionDialog ? `${glyph} Waiting for your answer (${secs}) · esc to skip` : `${glyph} Waiting for your approval (${secs}) · esc to say no`);
       else {
         // Tips live in the empty prompt only, never on this line above it.
-        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)}`);
+        // The step it is on, so a run of tool calls still says what is happening.
+        const step = t.step ? ` · ${t.step.replace(/\s+/g, " ").slice(0, 60)}` : "";
+        this.setWorking(`${glyph} ${t.verb}… (${secs}${tok}) · ${active.name} · ${this.modelName(active, t.model)}${step}`);
       }
     }, 120);
   }
@@ -3496,7 +3745,7 @@ function ago(ts: number): string {
 export async function runChat(config: Config, ledger: Ledger, cwd: string, agent: AgentId, fresh: boolean, pick = false, explicit = false, pickThread = false, onboard = false) {
   const renderer = await createCliRenderer({ exitOnCtrlC: false, exitSignals: ["SIGTERM", "SIGHUP"], useMouse: true, targetFps: 60 });
   const pref = config.theme ?? "auto";
-  applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref);
+  applyTheme(pref === "auto" ? ((await renderer.waitForThemeMode(250).catch(() => null)) ?? "dark") : pref, isColorTheme(config.colors) ? config.colors : "codemax");
   const app = new ChatApp(renderer, config, ledger, cwd);
   process.once("exit", () => app.awake.releaseSync());
   stopChildrenOnExit();
@@ -3520,7 +3769,7 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   }
   if (app.restartAfterQuit) {
     process.stdout.write("codemax: starting the new version…\n");
-    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version, app.threadId);
+    await relaunch(app.restartAfterQuit.agent, app.restartAfterQuit.version, app.threadId, VERSION);
   }
   process.stdout.write(app.threadUsed ? `codemax: to continue this thread, run: codemax --resume ${app.threadId}\n` : "codemax: bye\n");
 }

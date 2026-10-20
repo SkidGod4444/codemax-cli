@@ -27,6 +27,8 @@ export interface ThreadInfo {
   title?: string;
   /** The agent that last worked in it. */
   agent?: AgentId;
+  /** How many messages you sent in it. */
+  messages?: number;
 }
 
 /**
@@ -112,10 +114,24 @@ export class Ledger {
         /* none yet */
       }
       const latestSession = Object.values(sessions).sort((a, b) => (b?.lastUsedAt ?? 0) - (a?.lastUsedAt ?? 0))[0]?.agent;
-      out.push({ id, createdAt, updatedAt, title: title || undefined, agent: lastWork?.agent ?? latestSession ?? steps.at(-1)?.agent ?? turns.at(-1)?.agent });
+      // Your messages, counted without parsing the whole file (a long thread stays quick to list).
+      let messages = 0;
+      try {
+        const text = readFileSync(join(d, "turns.jsonl"), "utf8");
+        for (let i = text.indexOf('"role":"user"'); i >= 0; i = text.indexOf('"role":"user"', i + 1)) messages++;
+      } catch {
+        /* none yet */
+      }
+      out.push({ id, createdAt, updatedAt, messages, title: title || undefined, agent: lastWork?.agent ?? latestSession ?? steps.at(-1)?.agent ?? turns.at(-1)?.agent });
     }
     // Same instant (two threads touched within a millisecond): the newer thread first.
     return out.sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt);
+  }
+
+  /** The last messages of a thread, oldest first, for the resume picker's preview. */
+  static threadPreview(projectDirPath: string, id: string, n = 12): Turn[] {
+    const turns = jsonLines(readEnds(join(projectDirPath, "threads", id, "turns.jsonl"), "tail", 256 * 1024)) as Turn[];
+    return turns.filter((t) => t && (t.role === "user" || t.role === "assistant") && typeof t.text === "string").slice(-n);
   }
 
   /** The thread whose id is `id` or starts with it (when only one does). */

@@ -70,7 +70,7 @@ export class PermissionDialog {
       this.box.add(t);
       return t;
     });
-    this.box.add(new TextRenderable(renderer, { content: "1-3 or ↑/↓ then Enter · Esc to cancel", fg: C.dim }));
+    this.box.add(new TextRenderable(renderer, { content: `1-${this.choices.length} or ↑/↓ then Enter · Esc to cancel · the prompt below still works (/commands run, messages queue)`, fg: C.dim }));
     this.render();
   }
 

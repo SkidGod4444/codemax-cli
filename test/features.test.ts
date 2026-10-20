@@ -45,7 +45,7 @@ async function harness(agents: Partial<Record<"claude" | "codex" | "opencode", H
   const ledger = new Ledger(repo);
   prep?.(repo, ledger);
   const ids = Object.keys(agents) as ("claude" | "codex" | "opencode")[];
-  const app = new ChatApp(setup.renderer, { ...structuredClone(DEFAULT_CONFIG), order: ids, summarizeOnSwitch: false, priceUpdates: false, ...cfg }, ledger, repo);
+  const app = new ChatApp(setup.renderer, { ...structuredClone(DEFAULT_CONFIG), order: ids, summarizeOnSwitch: false, priceUpdates: false, narrate: false, ...cfg }, ledger, repo);
   const prompts: { agent: string; text: string }[] = [];
   const starts: { agent: string; resume?: string }[] = [];
   app.checkBlockers = () => [];
@@ -293,14 +293,13 @@ test("9. reasoning shows as a collapsed Thinking line and plans as a checklist",
     await h.send("plan it");
     const f = await h.frame((f) => f.includes("Done."));
     expect(f).toContain("Thinking");
-    expect(f).not.toContain("The user wants tests first."); // reasoning waits for ctrl+o, as in Claude Code
+    expect(f).toContain("Thinking… The user wants tests first."); // a short preview: some agents narrate only here
     // The plan is pinned above the prompt (Claude Code's task list), not in the transcript.
     expect(f).toContain("3 tasks (1 done, 1 in progress, 1 open)");
     expect(f).toContain("✔ write tests");
     expect(f).toContain("◼ fix theme");
     expect(f).toContain("◻ ship");
-    h.setup.mockInput.pressKey("o", { ctrl: true });
-    expect(await h.frame((f) => f.includes("The user wants tests first."))).toContain("Thinking…");
+
   } finally { await h.cleanup(); }
 }, 30000);
 
@@ -727,7 +726,7 @@ test("24. /config changes settings and saves them, and turns on the side agent w
     await h.frame((f) => f.includes("Theme · now"));
     await h.setup.mockInput.typeText("light");
     h.setup.mockInput.pressEnter();
-    await h.frame((f) => f.includes("theme set to light"));
+    await h.frame((f) => f.includes("colours: codemax, light"));
     expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).theme).toBe("light");
     await h.setup.mockInput.typeText("side agent");
     await h.frame((f) => f.includes("Side agent") && !f.includes("Keep awake"));
@@ -1191,5 +1190,173 @@ test("39. a message typed during /compact is queued and delivered when the summa
     await h.frame((f) => f.includes("❯ and lint"));
     release();
     await h.frame((f) => f.includes("did: and lint"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("44. while an agent asks: the prompt still works, a digit answers only alone; Shift+Tab reaches auto; built-in commands run mid-turn", async () => {
+  const configCalls: any[] = [];
+  const outcomes: string[] = [];
+  const modeOpt = { id: "mode", category: "mode", type: "select", currentValue: "default", options: ["default", "acceptEdits", "plan", "auto", "bypassPermissions"].map((v) => ({ value: v, name: v })) };
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text !== "edit a.ts") return ctx.say(`got: ${text}`);
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: "p1", title: "Edit src/a.ts", kind: "edit" }, options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] } as any);
+      outcomes.push(r.outcome.optionId);
+      await ctx.say("Edited.");
+    },
+  }, {}, undefined, { claude: { session: { configOptions: [modeOpt] }, configCalls } });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("edit a.ts");
+    await h.frame((f) => f.includes("Do you want to proceed?"));
+    // "2 more tests please" is a message, not option 2 ("don't ask again").
+    await h.setup.mockInput.typeText("2 more tests please");
+    await Bun.sleep(900);
+    expect(outcomes).toEqual([]);
+    let f = await h.frame((f) => f.includes("❯ 2 more tests please") && f.includes("Do you want to proceed?"));
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("2 more tests please") && f.includes("1 queued"));
+    // A built-in command runs at once, dialog or not.
+    await h.setup.mockInput.typeText("/status");
+    await Bun.sleep(50);
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Do you want to proceed?") && /thread|session/i.test(f));
+    expect((h.app as any).queue).toEqual(["2 more tests please"]);
+    // Shift+Tab cycles default → accept edits → plan → auto → default, never to bypass.
+    const seen: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      h.setup.mockInput.pressTab({ shift: true });
+      await Bun.sleep(30);
+      seen.push((h.app as any).active.mode);
+    }
+    expect(seen).toEqual(["acceptEdits", "plan", "auto", "default"]);
+    // A lone digit answers.
+    await h.setup.mockInput.typeText("1");
+    await Bun.sleep(30);
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Edited."));
+    expect(outcomes).toEqual(["allow"]);
+    f = await h.frame((f) => f.includes("got: 2 more tests please"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("45. a run of reads and searches is one line, like Claude Code; the spinner names the step", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "r1", title: "Read src/a.ts", kind: "read", status: "completed" });
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "r2", title: "Read src/b.ts", kind: "read", status: "completed" });
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "g1", title: "grep -n auth src/", kind: "execute", status: "completed" });
+      // OpenCode names a command "bash" first, then gives the command.
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "b1", title: "bash", kind: "execute", status: "pending" });
+      await upd(ctx, { sessionUpdate: "tool_call_update", toolCallId: "b1", title: "sed -n '1,40p' src/c.ts", status: "in_progress" });
+      await gate;
+      await upd(ctx, { sessionUpdate: "tool_call_update", toolCallId: "b1", status: "completed" });
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "w1", title: "bun test", kind: "execute", status: "completed" });
+      await ctx.say("All good.");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("look around");
+    let f = await h.frame((f) => f.includes("Reading 3 files, searching for 1 pattern…"));
+    expect(f).toContain("sed -n '1,40p' src/c.ts"); // the latest step, under the line and on the spinner
+    expect(f).not.toContain("Read src/a.ts");
+    release();
+    f = await h.frame((f) => f.includes("All good."));
+    expect(f).toContain("Read 3 files, searched for 1 pattern (ctrl+o to expand)");
+    expect(f).toContain("bun test"); // a command that may change things keeps its own row
+    h.setup.mockInput.pressKey("o", { ctrl: true });
+    f = await h.frame((f) => f.includes("Read src/a.ts") && f.includes("grep -n auth src/"));
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("46. agents without Claude Code's narration rule get it once: an ACP system prompt where offered, else ahead of a new session's first message; never Claude", async () => {
+  const { NARRATE } = await import("../src/chat/app.ts");
+  const h = await harness({
+    claude: async (text, ctx) => ctx.say(`claude got: ${text.slice(0, 20)}`),
+    opencode: async (text, ctx) => ctx.say(text.startsWith(NARRATE) ? "narrated" : `plain: ${text}`),
+  }, { narrate: true });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("hello");
+    await h.frame((f) => f.includes("claude got: hello"));
+    expect(h.prompts.filter((p) => p.agent === "claude").every((p) => !p.text.includes(NARRATE))).toBe(true);
+    await (h.app as any).switchTo("opencode", true);
+    await h.frame((f) => f.includes("narrated")); // the handoff, its first message
+    await h.send("second");
+    await h.frame((f) => f.includes("plain: second")); // only once
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("47. colour themes: /theme claude switches to Claude Code's colours at once and saves; dark/light keep the theme; every theme is in /config", async () => {
+  const theme = await import("../src/chat/theme.ts");
+  const { CONFIG_PATH } = await import("../src/config.ts");
+  theme.applyTheme("dark", "codemax");
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/theme claude");
+    await h.frame((f) => f.includes("colours: Claude Code, dark"));
+    expect(theme.C.accent).toBe("#d77757");
+    expect(JSON.parse(readFileSync(CONFIG_PATH, "utf8")).colors).toBe("claude");
+    await h.send("/theme light");
+    await h.frame((f) => f.includes("colours: Claude Code, light"));
+    expect(theme.C.selBg).toBe("#5769f7"); // Claude Code's light selection blue
+    expect(theme.C.error).toBe("#ab2b3f");
+    const row = (h.app as any).settings().find((r: any) => r.key === "colors");
+    expect(row.choices.map((c: any) => c.value)).toEqual(["codemax", "claude", "ocean", "teal", "mono"]);
+    await h.send("/theme pink-ish");
+    await h.frame((f) => f.includes("/theme codemax, claude, ocean, teal, mono"));
+  } finally {
+    theme.applyTheme("dark", "codemax");
+    await h.cleanup();
+  }
+}, 30000);
+
+test("48. plan-limit warnings and agent notices show as in Claude Code: on the prompt's top border, once in the transcript", async () => {
+  const resets = Date.now() + 3 * 3600_000;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text === "near") await upd(ctx, { sessionUpdate: "usage_update", used: 1000, size: 200000, _meta: { "_claude/rateLimit": { status: "allowed_warning", rateLimitType: "seven_day", utilization: 0.91, resetsAt: Math.floor(resets / 1000) } } });
+      if (text === "notice") await upd(ctx, { sessionUpdate: "notice", severity: "warning", title: "Retrying Claude, attempt 2 of 10." });
+      await ctx.say(`ok ${text}`);
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("near");
+    let f = await h.frame((f) => f.includes("ok near") && /─ You've used 91% of your weekly limit · resets \d+:\d\d [AP]M ─/.test(f));
+    expect(f.match(/You've used 91% of your weekly limit/g)!.length).toBe(2); // border + one transcript line
+    await h.send("near");
+    f = await h.frame((f) => f.match(/ok near/g)?.length === 2);
+    expect(f.match(/You've used 91% of your weekly limit/g)!.length).toBe(2); // not announced again
+    await h.send("notice");
+    f = await h.frame((f) => f.includes("Claude Code: Retrying Claude, attempt 2 of 10."));
+    expect(f).toContain("weekly limit"); // the limit keeps the border; the notice is in the transcript
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("49. after /update, what changed since the old version shows above the prompt for 5 seconds, never in the chat", async () => {
+  const { whatsNew } = await import("../src/core/whatsnew.ts");
+  expect(whatsNew("0.1.13", "0.1.11").map((n) => n.version)).toEqual(["0.1.13", "0.1.12"]);
+  expect(whatsNew("0.1.13").map((n) => n.version)).toEqual(["0.1.13"]); // an older codemax ran /update: no "from"
+  expect(whatsNew("0.1.13", "0.1.13")).toEqual([]);
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    (h.app as any).showWhatsNew("0.1.13", "0.1.12");
+    const f = await h.frame((f) => f.includes("What's new in codemax v0.1.13") && f.includes("Colour themes"));
+    expect(f).not.toContain("33 bug fixes"); // only what came after the old version
+    expect((h.app as any).transcript.box.getChildren().some((c: any) => JSON.stringify(c.content ?? "").includes("Colour themes"))).toBe(false);
+    await Bun.sleep(5200);
+    await h.frame((f) => !f.includes("What's new in codemax"));
   } finally { await h.cleanup(); }
 }, 30000);

@@ -56,7 +56,7 @@ async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?:
   const setup = await createTestRenderer({ width: 110, height: o.height ?? 30 });
   const repo = o.repo ?? newRepo();
   const ledger = new Ledger(repo, undefined, o.thread);
-  const app = new ChatApp(setup.renderer, { ...structuredClone(DEFAULT_CONFIG), order: ["claude"], summarizeOnSwitch: false, priceUpdates: false, ...(o.cfg ?? {}) }, ledger, repo);
+  const app = new ChatApp(setup.renderer, { ...structuredClone(DEFAULT_CONFIG), order: ["claude"], summarizeOnSwitch: false, priceUpdates: false, narrate: false, ...(o.cfg ?? {}) }, ledger, repo);
   const prompts: string[] = [];
   app.checkBlockers = () => [];
   app.engineFactory = (agent) => new AcpEngine({ agent, name: agent, cmd: [], forkAtMessage: !!o.fork, stream: fakeStream(async (text, ctx) => { prompts.push(text); return handler(text, { ...ctx, agent }); }, o.fork, o.models, agent) });
@@ -71,7 +71,7 @@ async function harness(handler: Handler, o: { cfg?: any; repo?: string; height?:
   o.prep?.(app);
   if (o.agent) (app as any).refreshDetect = async () => void (app as any).detect.set(o.agent, { installed: true, version: "t", engine: true });
   void app.start((o.agent ?? "claude") as any, !o.resume && !o.pickThread, { pickThread: o.pickThread, onboard: o.onboard });
-  await frame((f) => f.includes(o.onboard ? "Welcome to codemax" : o.pickThread ? "Resume which thread?" : o.resume ? "resumed" : "new session"));
+  await frame((f) => f.includes(o.onboard ? "Welcome to codemax" : o.pickThread ? "Resume thread" : o.resume ? "resumed" : "new session"));
   return { setup, app, repo, ledger, prompts, frame, send, cleanup };
 }
 
@@ -297,8 +297,21 @@ test("threads: --resume picks one of this folder's conversations; each keeps its
     expect(f).toContain("alpha task");
     expect(f).toContain("beta task");
     expect(f).toContain(alpha);
+    // Claude Code's resume screen: the whole screen, two lines per thread, newest first.
+    expect(f).toContain("Resume thread (1 of 2)");
+    expect(f).toMatch(/just now · Claude Code · 1 message · /);
+    expect(f.indexOf("beta task")).toBeLessThan(f.indexOf("alpha task"));
+    expect(f).not.toContain("? for shortcuts"); // the chat is hidden behind it
+    require("node:fs").writeFileSync(process.env.DUMP_FRAME ?? "/dev/null", f);
+    // Space previews the selected thread's messages.
+    await h.setup.mockInput.typeText(" ");
+    f = await h.frame((f) => f.includes("did beta task"));
+    expect(f).toContain("Space or Esc back to the list");
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => f.includes("Space preview")); // back on the list (Esc then a letter reads as alt+letter)
     await h.setup.mockInput.typeText("alpha");
-    await Bun.sleep(60);
+    f = await h.frame((f) => f.includes("⌕ alpha"));
+    expect(f).not.toContain("beta task");
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("resumed"));
     expect(h.app.threadId).toBe(alpha);
@@ -518,7 +531,7 @@ test("handoff order: agents and models first to last; at a limit the next one ta
   };
   try {
     await h.send("/config");
-    await h.frame((f) => f.includes("Handoff order"));
+    await h.frame((f) => f.includes("At a usage limit")); // the list is open (it scrolls past 30 rows)
     await pick("handoff order", "Edit the order");
     h.setup.mockInput.pressEnter();
     let f = await h.frame((f) => f.includes("Handoff order · when one agent hits its limit"));

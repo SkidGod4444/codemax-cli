@@ -10,6 +10,10 @@ export interface Config {
   debateRounds?: number | "auto";
   /** Feature tips in the empty prompt, a new one after each message (default on). */
   tips?: boolean;
+  /** Set once the old (overcounted) usage logs were cleared; see resetOldUsageOnce. */
+  usageV2?: boolean;
+  /** Ask agents other than Claude Code to say what they are doing and what they found (default on; see NARRATE). */
+  narrate?: boolean;
   /** The first-run setup was done (or skipped); /setup runs it again. */
   onboarded?: boolean;
   /**
@@ -72,6 +76,8 @@ export interface Config {
   verifyOnFail: "show" | "fix";
   /** Colour theme: "auto" follows the terminal's background, or force "dark" / "light". */
   theme: "auto" | "dark" | "light";
+  /** Colour theme over it: "codemax" (pink, default), "claude" (Claude Code's), "ocean", "teal", "mono". */
+  colors?: "codemax" | "claude" | "ocean" | "teal" | "mono";
   /**
    * Handoff size. `resumeChars` bounds the resume packet (task, plan, steps, code diff);
    * the others bound the older turn-summary brief used when there is no step journal.

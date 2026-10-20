@@ -94,6 +94,8 @@ export function updatePlan(install = installKind(), platform = process.platform)
 export const RESTART_AGENT_ENV = "CODEMAX_RESTART_AGENT";
 export const RESTART_THREAD_ENV = "CODEMAX_RESTART_THREAD";
 export const UPDATED_TO_ENV = "CODEMAX_UPDATED_TO";
+/** The version that ran /update, so the new one can say what changed since (whatsnew.ts). */
+export const UPDATED_FROM_ENV = "CODEMAX_UPDATED_FROM";
 
 /**
  * The command that starts this codemax again with the same arguments, minus the
@@ -125,9 +127,9 @@ export function relaunchArgv(argv = process.argv, execPath = process.execPath, s
 }
 
 /** Run the updated codemax in this terminal, resuming `agent`, and exit with its code. */
-export async function relaunch(agent: string | undefined, version: string | null, thread?: string): Promise<never> {
+export async function relaunch(agent: string | undefined, version: string | null, thread?: string, from?: string): Promise<never> {
   const argv = relaunchArgv();
-  const env: Record<string, string | undefined> = { ...process.env, [UPDATED_TO_ENV]: version ?? "" };
+  const env: Record<string, string | undefined> = { ...process.env, [UPDATED_TO_ENV]: version ?? "", ...(from ? { [UPDATED_FROM_ENV]: from } : {}) };
   if (thread) env[RESTART_THREAD_ENV] = thread;
   if (agent) env[RESTART_AGENT_ENV] = agent;
   else delete env[RESTART_AGENT_ENV];
