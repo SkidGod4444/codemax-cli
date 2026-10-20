@@ -160,7 +160,8 @@ test("restarting an npm install goes through its launcher (which picks the bundl
   const { relaunchArgv } = await import("../src/core/update.ts");
   const script = "/g/lib/node_modules/codemax-cli/src/cli.ts";
   const yes = () => true;
-  expect(relaunchArgv(["bun", script, "--theme", "dark"], "/g/lib/node_modules/bun/bin/bun.exe", script, yes, (b) => (b === "node" ? "/usr/bin/node" : null))).toEqual(["/usr/bin/node", "/g/lib/node_modules/codemax-cli/bin/codemax.cjs", "--theme", "dark"]);
+  const { resolve } = await import("node:path");
+  expect(relaunchArgv(["bun", script, "--theme", "dark"], "/g/lib/node_modules/bun/bin/bun.exe", script, yes, (b) => (b === "node" ? "/usr/bin/node" : null))).toEqual(["/usr/bin/node", resolve(script, "..", "..", "bin", "codemax.cjs"), "--theme", "dark"]);
   // A source checkout or an installer install restarts with the same Bun, as before.
   expect(relaunchArgv(["bun", "/x/src/cli.ts"], "/b/bun", "/x/src/cli.ts", yes, () => "/usr/bin/node")).toEqual(["/b/bun", "/x/src/cli.ts"]);
 });

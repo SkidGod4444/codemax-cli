@@ -43,7 +43,7 @@ test("share: every agent's MCP servers and skills are collected once, deduped by
   expect(sh.mcp.find((s) => s.name === "inspo")!.source).toBe("claude"); // Cursor's duplicate dropped
   expect(sh.mcp.find((s) => s.name === "off")).toBeUndefined();
   expect(sh.mcp.find((s) => s.name === "oclocal")!.transport).toEqual({ type: "stdio", command: "bun", args: ["x", "my-mcp"], env: { K: "v" } });
-  expect((sh.mcp.find((s) => s.name === "deployer")!.transport as any).command).toBe(join(home, ".claude", "plugins", "cache", "official", "deploy", "1.0.0", "bin", "deploy"));
+  expect((sh.mcp.find((s) => s.name === "deployer")!.transport as any).command).toBe(`${join(home, ".claude", "plugins", "cache", "official", "deploy", "1.0.0")}/bin/deploy`); // the root substituted as text, as Claude does
   expect((sh.mcp.find((s) => s.name === "figma")!.transport as any).url).toBe("https://figma.example/mcp");
   expect(sh.skills.map((s) => `${s.source}:${s.name}`).sort()).toEqual(["agents:anatomy", "claude:review", "codex:noname", "codex:tdd", "plugin:ship"]);
   expect(sh.skills.find((s) => s.name === "review")!.description).toBe("Review a PR the house way");

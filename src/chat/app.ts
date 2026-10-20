@@ -357,6 +357,7 @@ export class ChatApp {
     }
     renderer.keyInput.on("paste", this.onPaste);
     renderer.on("resize", () => this.safely("resize", () => {
+      if (this.closed) return;
       if (Date.now() - this.lastResizeLog > 1000) {
         this.lastResizeLog = Date.now();
         debugEvent("resize", { cols: renderer.width, rows: renderer.height });
@@ -523,7 +524,7 @@ export class ChatApp {
         working: !!this.active?.turn || undefined,
       });
     const expected = printable && open && !key.propagationStopped && !key.defaultPrevented;
-    queueMicrotask(() => this.safely("key check", () => perf.keyLanded(k, expected && this.input.focused, before, this.input.plainText.length)));
+    queueMicrotask(() => this.safely("key check", () => !this.closed && perf.keyLanded(k, expected && this.input.focused, before, this.input.plainText.length)));
   };
 
   private lastResizeLog = 0;
