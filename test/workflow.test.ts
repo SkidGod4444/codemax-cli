@@ -948,3 +948,29 @@ test("bug fixes: a message sent while the agent starts waits for it (no stuck ag
     try { s.setup.renderer.destroy(); } catch { /* already gone with the quit */ }
   }
 }, 30000);
+
+test("Cursor's 'Upgrade your plan to continue' mid-task hands the request to the next agent automatically, keeping the work done before it", async () => {
+  const h = await harness(async (text, ctx) => {
+    if (ctx.agent === "cursor") return ctx.say("I fixed the parser and ran half the tests.\n\nUpgrade your plan to continue");
+    await ctx.say(`${ctx.agent} did it: ${text.slice(0, 40)}`);
+  }, { cfg: { autoHandoff: true, order: ["cursor", "opencode"] }, agent: "cursor" });
+  (h.app as any).detect.set("opencode", { installed: true, version: "t", engine: true });
+  try {
+    await h.send("finish the parser");
+    const f = await h.frame((f) => f.includes("opencode did it"), 15000);
+    expect(f).toContain("handing off to OpenCode");
+    expect(h.prompts.at(-1)).toContain("finish the parser"); // the unfinished request went along
+    const saved = h.ledger.turns().filter((t: any) => t.role === "assistant" && t.agent === "cursor");
+    expect(saved.map((t: any) => t.text)).toEqual(["I fixed the parser and ran half the tests."]); // the work stays, the notice is not an answer
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("with the offer setting, Cursor's limit shows the handoff offer instead", async () => {
+  const h = await harness(async (_text, ctx) => (ctx.agent === "cursor" ? ctx.say("Upgrade your plan to continue") : ctx.say("ok")), { cfg: { autoHandoff: false, order: ["cursor", "opencode"] }, agent: "cursor" });
+  (h.app as any).detect.set("opencode", { installed: true, version: "t", engine: true });
+  try {
+    await h.send("do it");
+    const f = await h.frame((f) => f.includes("Enter to continue in OpenCode"), 15000);
+    expect(f).toContain("out of quota");
+  } finally { await h.cleanup(); }
+}, 30000);

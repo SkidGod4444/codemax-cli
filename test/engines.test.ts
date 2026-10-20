@@ -562,3 +562,59 @@ test("shared MCP servers: ACP agents get them on session requests (http/sse only
   expect(cfg["mcp_servers.events.url"]).toBe("https://ev.example/sse");
   await c.close();
 });
+
+test("/mcp over the protocols: Claude's answers are captured, never shown; a reload passes the servers still enabled; Codex lists, reloads and logs in", async () => {
+  const { clientStream, agentStream } = pipePair();
+  const loads: any[] = [];
+  new AgentSideConnection((conn): Agent => ({
+    async initialize() { return { protocolVersion: 1, agentInfo: { name: "claude", version: "1" }, agentCapabilities: { loadSession: true }, authMethods: [] } as any; },
+    async newSession() { return { sessionId: "s1" } as any; },
+    async loadSession(p: any) { loads.push(p.mcpServers.map((s: any) => s.name)); return {} as any; },
+    async authenticate() { return {}; },
+    async prompt({ sessionId, prompt }) {
+      const text = (prompt[0] as any).text as string;
+      const say = (t: string) => conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: t } } as any });
+      if (text === "/mcp") await say("**MCP servers:** 2 (1 connected, 1 failed)\n\n**Failed**\n- `freecad`: spawn uvx ENOENT; 0 tools\n\n**Connected**\n- `inspo`: 12 tools");
+      else if (text.startsWith("/mcp reconnect")) await say("Reconnected `freecad`.\n\n**MCP servers:** 2 (2 connected)");
+      else await say("a real reply");
+      return { stopReason: "end_turn" };
+    },
+    async cancel() {},
+  }), agentStream);
+  const e = new AcpEngine({ agent: "claude", name: "Claude Code", cmd: [], stream: clientStream });
+  const shown: string[] = [];
+  e.onEvent((x) => x.type === "text_delta" && shown.push(x.text));
+  const shared = [{ name: "gitk", source: "cursor", transport: { type: "stdio" as const, command: "npx", args: [], env: {} } }, { name: "ev", source: "codex", transport: { type: "stdio" as const, command: "ev", args: [], env: {} } }];
+  await e.start({ cwd: "/tmp", mcpServers: shared });
+  const st = await e.mcpStatus!();
+  expect(st!.map((s) => `${s.name}:${s.status}`)).toEqual(["freecad:failed", "inspo:connected"]);
+  expect(await e.mcpAction!("reconnect", "freecad")).toBe("Reconnected freecad.");
+  await e.reloadMcp!(shared, ["gitk"]);
+  expect(loads).toEqual([["ev"]]); // gitk disabled: not passed
+  await e.prompt("hello");
+  expect(shown.join("")).toBe("a real reply"); // the /mcp answers never reached the transcript
+  await e.close();
+
+  const notes: any[] = [];
+  const { transport, sent } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start" || m.method === "thread/resume") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+    else if (m.method === "mcpServerStatus/list") reply({ jsonrpc: "2.0", id: m.id, result: { data: [{ name: "playwright", runtimeStatus: "ready", authStatus: "unsupported", tools: { a: {}, b: {} } }, { name: "notion", runtimeStatus: "failed", authStatus: "notLoggedIn", error: "401" }, { name: "figma", runtimeStatus: "starting", authStatus: "unknown" }] } });
+    else if (m.method === "config/mcpServer/reload") reply({ jsonrpc: "2.0", id: m.id, result: {} });
+    else if (m.method === "mcpServer/oauth/login") reply({ jsonrpc: "2.0", id: m.id, result: {} });
+    if (m.method === "thread/start") setTimeout(() => n("mcpServer/startupStatus/updated", { name: "notion", status: "failed", failureReason: "reauthenticationRequired", threadId: "th" }), 5);
+  });
+  const c = new CodexEngine({ transport });
+  c.onEvent((x) => x.type === "notice" && notes.push(x.title));
+  await c.start({ cwd: "/tmp", mcpServers: shared });
+  const cs = await c.mcpStatus!();
+  expect(cs!.map((s) => `${s.name}:${s.status}:${s.tools ?? "-"}`)).toEqual(["playwright:connected:2", "notion:needs-auth:-", "figma:pending:-"]);
+  expect(await c.mcpAction!("reconnect", "notion")).toContain("reloaded");
+  expect(await c.mcpAction!("authenticate", "notion")).toContain("login started");
+  await c.reloadMcp!(shared, ["gitk"]);
+  const resume = sent.find((m: any) => m.method === "thread/resume").params.config;
+  expect(resume["mcp_servers.gitk.enabled"]).toBe(false);
+  expect(resume["mcp_servers.ev.command"]).toBe("ev");
+  for (let i = 0; i < 40 && !notes.length; i++) await Bun.sleep(5);
+  expect(notes[0]).toContain("MCP server notion failed to start: login needed");
+  await c.close();
+});

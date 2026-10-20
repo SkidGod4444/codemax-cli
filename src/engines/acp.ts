@@ -136,6 +136,7 @@ export class AcpEngine implements Engine {
     this.conn = new ClientSideConnection(() => client, stream);
     this.instructions = o.instructions?.trim() || undefined;
     this.shared = o.mcpServers ?? [];
+    this.mcpDisabled = new Set(o.mcpDisabled ?? []);
     const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
 
     let sessionId: string;
@@ -313,7 +314,8 @@ export class AcpEngine implements Engine {
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
         this.noteMessageId(u.messageId);
-        if (u.content?.type === "text") this.emit({ type: "text_delta", text: u.content.text, messageId: u.messageId });
+        if (this.capture && u.content?.type === "text") this.capture.push(u.content.text);
+        else if (u.content?.type === "text") this.emit({ type: "text_delta", text: u.content.text, messageId: u.messageId });
         break;
       case "agent_thought_chunk":
         this.noteMessageId(u.messageId);
@@ -425,11 +427,71 @@ export class AcpEngine implements Engine {
    * The shared MCP servers in ACP's shape, for session requests. Stdio servers always (every ACP
    * agent takes them); http / sse only when the agent's mcpCapabilities say so.
    */
+  private mcpDisabled = new Set<string>();
+  /** Text of a reply being captured instead of shown (the adapter's own `/mcp` answers). */
+  private capture: string[] | null = null;
+
+  /** This agent reports MCP status and takes MCP actions through the Claude ACP adapter's `/mcp` prompt. */
+  private get hasMcpCommand(): boolean {
+    return this.agent === "claude";
+  }
+
+  /**
+   * A prompt the agent answers itself, shown to nobody: the Claude adapter replies to `/mcp …`
+   * with status Markdown without calling the model. The reply text comes back here.
+   */
+  private async hiddenPrompt(text: string, timeoutMs = 40_000): Promise<string> {
+    if (!this.conn || !this.session) throw new Error("engine not started");
+    if (this.turnActive) throw new Error("the agent is working");
+    this.capture = [];
+    this.turnActive = true;
+    try {
+      await Promise.race([
+        this.conn.prompt({ sessionId: this.session.id, prompt: [{ type: "text", text }] }),
+        Bun.sleep(timeoutMs).then(() => {
+          throw new Error("no answer in time");
+        }),
+      ]);
+      return this.capture.join("").trim();
+    } finally {
+      this.turnActive = false;
+      this.capture = null;
+    }
+  }
+
+  async mcpStatus() {
+    if (!this.hasMcpCommand) return null;
+    const { parseClaudeMcpMarkdown } = await import("../core/mcpstatus.ts");
+    const text = await this.hiddenPrompt("/mcp", 15_000);
+    const parsed = parseClaudeMcpMarkdown(text);
+    if (!parsed) debugEvent("mcp-status-unparsed", { agent: this.agent, chars: text.length });
+    return parsed;
+  }
+
+  async mcpAction(action: import("./types.ts").McpAction, name: string): Promise<string> {
+    if (!this.hasMcpCommand) throw new Error(`${this.opts.name} has no MCP commands over its protocol`);
+    // Authentication is what a reconnect starts for a server that needs it (the adapter's rule).
+    const verb = action === "authenticate" ? "reconnect" : action;
+    const text = await this.hiddenPrompt(`/mcp ${verb} ${name}`);
+    return text.split(/\n\s*\n/)[0]!.replace(/\*\*/g, "").replace(/`/g, "").trim() || `${verb} sent`;
+  }
+
+  async reloadMcp(servers: import("../core/share.ts").SharedMcpServer[], disabled: string[]) {
+    if (!this.conn || !this.session) throw new Error("engine not started");
+    if (!(this.initResult as any)?.agentCapabilities?.loadSession) throw new Error(`${this.opts.name} cannot reload a session; /switch ${this.agent} restarts it`);
+    this.shared = servers;
+    this.mcpDisabled = new Set(disabled);
+    const t0 = Date.now();
+    await this.conn.loadSession({ sessionId: this.session.id, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult) } as any);
+    debugEvent("mcp-reload", { agent: this.agent, servers: servers.length, disabled: disabled.length || undefined, ms: Date.now() - t0 });
+  }
+
   private mcpServers(init: any): any[] {
     const caps = init?.agentCapabilities?.mcpCapabilities ?? {};
     const out: any[] = [];
     let dropped = 0;
     for (const s of this.shared) {
+      if (this.mcpDisabled.has(s.name)) continue;
       const t = s.transport;
       if (t.type === "stdio") out.push({ name: s.name, command: t.command, args: t.args, env: Object.entries(t.env).map(([name, value]) => ({ name, value })) });
       else if (caps[t.type]) out.push({ type: t.type, name: s.name, url: t.url, headers: Object.entries(t.headers).map(([name, value]) => ({ name, value })) });

@@ -82,6 +82,7 @@ export class CodexEngine implements Engine {
     this.questions = o.questions !== false;
     this.instructions = o.instructions?.trim() || undefined;
     this.shared = o.mcpServers ?? [];
+    this.mcpDisabled = new Set(o.mcpDisabled ?? []);
     let thread: any;
     if (o.resume) {
       try {
@@ -166,6 +167,46 @@ export class CodexEngine implements Engine {
   private instructions?: string;
 
   private shared: import("../core/share.ts").SharedMcpServer[] = [];
+  private mcpDisabled = new Set<string>();
+
+  /** mcpServerStatus/list, as /mcp shows it. */
+  async mcpStatus() {
+    const r = await Promise.race([this.request("mcpServerStatus/list", { threadId: this.threadId, detail: "toolsAndAuthOnly", limit: 200 }), Bun.sleep(20_000).then(() => null)]);
+    if (!r) {
+      debugEvent("mcp-status-timeout", { agent: "codex" });
+      return null;
+    }
+    const out: import("../core/mcpstatus.ts").McpStatus[] = [];
+    for (const s of r.data ?? []) {
+      const rt = String(s.runtimeStatus ?? "").toLowerCase();
+      const auth = String(s.authStatus ?? "");
+      const status = auth === "notLoggedIn" ? "needs-auth" : /fail|error|cancel/.test(rt) ? "failed" : /start|pending|connecting/.test(rt) ? "pending" : "connected";
+      out.push({ name: s.name, status, tools: s.tools && typeof s.tools === "object" ? Object.keys(s.tools).length : undefined, error: s.error ? String(s.error) : undefined, origin: s.pluginId ? "plugin" : undefined });
+    }
+    return out;
+  }
+
+  async mcpAction(action: import("./types.ts").McpAction, name: string): Promise<string> {
+    if (action === "reconnect") {
+      await Promise.race([this.request("config/mcpServer/reload", null), Bun.sleep(30_000).then(() => { throw new Error("no answer in time"); })]);
+      return "Codex reloaded its MCP servers";
+    }
+    if (action === "authenticate") {
+      await Promise.race([this.request("mcpServer/oauth/login", { name, threadId: this.threadId }), Bun.sleep(30_000).then(() => { throw new Error("no answer in time"); })]);
+      return `login started for ${name} (a browser may open)`;
+    }
+    throw new Error(`Codex has no API to ${action} one of its own servers; edit ~/.codex/config.toml`);
+  }
+
+  /** The shared list changed: the same thread continues with the new overrides (thread/resume takes config). */
+  async reloadMcp(servers: import("../core/share.ts").SharedMcpServer[], disabled: string[]) {
+    if (!this.threadId) throw new Error("engine not started");
+    this.shared = servers;
+    this.mcpDisabled = new Set(disabled);
+    const t0 = Date.now();
+    await this.threadRequest("thread/resume", { threadId: this.threadId, cwd: this.cwd, approvalPolicy: this.info?.currentMode === "never" ? "never" : "on-request" });
+    debugEvent("mcp-reload", { agent: "codex", servers: servers.length, disabled: disabled.length || undefined, ms: Date.now() - t0 });
+  }
 
   /** Codex's thread config: the question feature, and the shared MCP servers as `mcp_servers.<name>.*` overrides (what `codex -c` takes). */
   private threadConfig(): { config?: Record<string, unknown> } {
@@ -173,6 +214,10 @@ export class CodexEngine implements Engine {
     for (const s of this.shared) {
       const key = `mcp_servers.${s.name.replace(/[^A-Za-z0-9_-]+/g, "_")}`;
       const t = s.transport;
+      if (this.mcpDisabled.has(s.name)) {
+        config[`${key}.enabled`] = false; // turned off in /mcp for this session
+        continue;
+      }
       if (t.type === "stdio") {
         config[`${key}.command`] = t.command;
         config[`${key}.args`] = t.args;
@@ -413,6 +458,13 @@ export class CodexEngine implements Engine {
       case "guardianWarning":
         this.emit({ type: "notice", level: "warn", title: String(p.message ?? "warning") });
         break;
+      case "mcpServer/startupStatus/updated": {
+        // A server that failed to start (or needs a login) is worth a line; the others are noise.
+        const st = String(p.status ?? "");
+        debugEvent("codex-mcp-status", { name: String(p.name ?? ""), status: st, reason: p.failureReason ?? undefined });
+        if (st === "failed") this.emit({ type: "notice", level: "warn", title: `MCP server ${p.name} failed to start${p.failureReason === "reauthenticationRequired" ? ": login needed (/mcp)" : p.error ? `: ${String(p.error).slice(0, 120)}` : ""}` });
+        break;
+      }
       case "configWarning":
       case "deprecationNotice":
         this.emit({ type: "notice", level: "warn", title: String(p.summary ?? method), detail: p.details ? String(p.details) : p.path ? String(p.path) : undefined });

@@ -26,7 +26,7 @@ function fakeStream(handler: Handler, fo: FakeOpts = {}) {
     async newSession() { return { sessionId: `s-${++n}-${Math.random().toString(36).slice(2, 6)}`, ...(fo.session ?? {}) } as any; },
     async setSessionConfigOption(p: any) { fo.configCalls?.push(p); return {} as any; },
     async extMethod(method: string, params: any) { fo.configCalls?.push({ method, ...params }); return {}; },
-    async loadSession() { return {} as any; },
+    async loadSession(p: any) { fo.configCalls?.push({ method: "session/load", mcpServers: (p.mcpServers ?? []).map((x: any) => x.name) }); return {} as any; },
     async authenticate() { return {}; },
     async prompt({ sessionId, prompt }) {
       const text = (prompt[0] as any).text as string;
@@ -1748,6 +1748,58 @@ test("61. at start, one line says what the other agents' setups gave every agent
     const first = h.prompts.find((p) => p.agent === "claude")!.text;
     expect(first).toContain("- tdd: Red, green, refactor → ");
     expect(first).toContain("hi");
+  } finally {
+    process.env.CODEMAX_SHARE_HOME = prev;
+    await h.cleanup();
+  }
+}, 30000);
+
+test("62. /mcp lists the agent's servers with their status and the shared ones; Enter picks an action; disabling a shared server reloads the session without it", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "codemax-mcp-home-"));
+  mkdirSync(join(home, ".cursor"), { recursive: true });
+  writeFileSync(join(home, ".cursor", "mcp.json"), JSON.stringify({ mcpServers: { gitk: { command: "npx", args: ["gitkraken-mcp"] } } }));
+  const prev = process.env.CODEMAX_SHARE_HOME;
+  process.env.CODEMAX_SHARE_HOME = home;
+  const calls: any[] = [];
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text === "/mcp") return ctx.say("**MCP servers:** 2 (1 connected, 1 failed)\n\n**Failed**\n- `freecad`: spawn uvx ENOENT; 0 tools\n\n**Connected**\n- `gitk`: 3 tools");
+      if (text.startsWith("/mcp reconnect")) return ctx.say("Reconnected `freecad`.");
+      await ctx.say(`got: ${text}`);
+    },
+  }, {}, undefined, { claude: { session: {}, configCalls: calls } });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("/mcp");
+    let f = await h.frame((f) => f.includes("MCP servers · Claude Code"));
+    expect(f).toContain("freecad");
+    expect(f).toContain("✘ failed: spawn uvx ENOENT");
+    expect(f).toContain("✔ connected · 3 tools");
+    expect(f).toContain("shared from cursor");
+    expect(f).not.toContain("**MCP servers:**"); // the adapter's answer stays out of the chat
+    // ↓ to gitk (failed rows sort first), Enter → actions.
+    await h.setup.mockInput.pressArrow("down");
+    await Bun.sleep(30);
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("gitk · ✔ connected · 3 tools · shared from cursor"));
+    expect(f).toContain("Disable");
+    expect(f).toContain("Reconnect");
+    await h.setup.mockInput.typeText("disable");
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("MCP · gitk is off for Claude Code this run"));
+    expect(calls.some((c) => c.method === "session/load" && !c.mcpServers.includes("gitk"))).toBe(true); // reloaded without it
+    f = await h.frame((f) => f.includes("MCP servers · Claude Code")); // the list is back
+    expect(f).toMatch(/gitk\s+disabled/);
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => !f.includes("MCP servers · Claude Code"));
+    // The direct form on the agent's own server goes through the adapter's /mcp reconnect.
+    await h.send("/mcp reconnect freecad");
+    await h.frame((f) => f.includes("MCP · Reconnected freecad."));
+    expect(h.prompts.map((p) => p.text)).toContain("/mcp reconnect freecad");
+    expect(h.setup.captureCharFrame()).not.toContain("Reconnected `freecad`");
   } finally {
     process.env.CODEMAX_SHARE_HOME = prev;
     await h.cleanup();

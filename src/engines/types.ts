@@ -148,7 +148,11 @@ export interface EngineStartOptions {
   instructions?: string;
   /** MCP servers from the other agents' setups, to load alongside this agent's own (src/core/share.ts). */
   mcpServers?: import("../core/share.ts").SharedMcpServer[];
+  /** Names among `mcpServers` the user turned off for this session (/mcp). */
+  mcpDisabled?: string[];
 }
+
+export type McpAction = "reconnect" | "enable" | "disable" | "authenticate";
 
 export interface EngineInfo {
   agent: AgentId;
@@ -191,6 +195,12 @@ export interface Engine {
   answerQuestion?(requestId: string, answer: QuestionAnswer): void;
   cancel(): Promise<void>;
   setMode?(modeId: string): Promise<void>;
+  /** The agent's MCP servers and how they are doing (/mcp); null when the agent reports nothing. */
+  mcpStatus?(): Promise<import("../core/mcpstatus.ts").McpStatus[] | null>;
+  /** Reconnect, enable, disable or authenticate one of the agent's own servers; resolves to a line to show, rejects when the agent cannot. */
+  mcpAction?(action: McpAction, name: string): Promise<string>;
+  /** The shared servers changed (one disabled or enabled, or a reconnect): load the session again with the new list. */
+  reloadMcp?(servers: import("../core/share.ts").SharedMcpServer[], disabled: string[]): Promise<void>;
   setModel?(modelId: string): Promise<void>;
   /** Change one of `info.options` (e.g. reasoning effort). */
   setOption?(optionId: string, value: string): Promise<void>;

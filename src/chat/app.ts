@@ -48,7 +48,9 @@ import { logoLines } from "./logo.ts";
 import { checkForUpdate, relaunch, RESTARTED_ENV, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { whatsNew } from "../core/whatsnew.ts";
 import { MAKER, firstName, greeting } from "./greeting.ts";
-import { collectShared, sharedFor, skillsIndex, type Shared } from "../core/share.ts";
+import { collectShared, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
+import { describeStatus, type McpStatus } from "../core/mcpstatus.ts";
+import type { McpAction } from "../engines/types.ts";
 import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12, fmtTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
@@ -97,6 +99,15 @@ const QUIT_MAX_MS = 1200;
 /** How long the "what's new" box stays after /update. */
 const WHATS_NEW_MS = 5000;
 
+/** A row of /mcp: one server, its reported status, and whether codemax shares it with the agent. */
+interface McpRow {
+  name: string;
+  status?: McpStatus;
+  shared?: SharedMcpServer;
+  /** The agent's own (from its config), not one codemax passed. */
+  own: boolean;
+}
+
 /** How long an agent's notice stays on the prompt's border (it stays in the transcript). */
 const NOTICE_MS = 8000;
 
@@ -132,7 +143,7 @@ function limitWarning(m: Map<string, { usedPercent?: number; resetsAt?: number; 
 }
 
 /** Built-in commands that start agent work or replace the session: they wait for the agent to finish. */
-const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup|restart)\b/i;
+const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup|restart|mcp)\b/i;
 /** How long a lone 0 / 1 / 2 must sit in the prompt before it acts on the side agent's note. */
 const NOTE_ARM_MS = 800;
 /** A question left unanswered this long is skipped when `questions` is "timeout". */
@@ -1928,6 +1939,7 @@ export class ChatApp {
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/debug", description: "Debug log of what codemax did not expect (never your chat): /debug on | off | export", run: (a) => this.debugCommand(a) },
       { name: "/theme", description: `Colours: /theme ${COLOR_THEMES.map((t) => t.id).join(" | ")}, or dark | light | auto (saved)`, run: (a) => this.setThemePref(a) },
+      { name: "/mcp", description: "MCP servers of this agent: status, reconnect, enable, disable, authenticate (↑↓ then Enter) · /mcp reconnect <server>", run: (a) => this.safelyAsync("mcp", this.mcpCommand(a)) },
       { name: "/restart", description: "Restart codemax and come back to this thread and agent (picks up settings and a new Bun)", run: () => this.restart() },
       { name: "/quit", description: "Quit codemax", run: () => void this.quit() },
     ];
@@ -2578,8 +2590,154 @@ export class ChatApp {
   /** The MCP servers this agent does not load itself. */
   private sharedMcp(agent: AgentId) {
     const given = sharedFor(agent, this.shared);
-    debugEvent("shared-for-agent", { agent, mcp: given.mcp.length, skills: given.skills.length });
+    debugEvent("shared-for-agent", { agent, mcp: given.mcp.length, skills: given.skills.length, disabled: this.mcpDisabled.get(agent)?.size || undefined });
     return given.mcp;
+  }
+
+  /** Shared servers turned off in /mcp, per agent, for this run. */
+  private mcpDisabled = new Map<AgentId, Set<string>>();
+
+  // ---------- /mcp: the agent's MCP servers, as Claude Code's /mcp screen ----------
+
+  /** `/mcp` opens the list; `/mcp reconnect|enable|disable|authenticate <server>` acts at once. */
+  private async mcpCommand(arg: string) {
+    const a = this.active;
+    if (!a) return this.transcript.note("no agent running — /switch to start one", C.warn);
+    const [verb, ...rest] = arg.trim().split(/\s+/);
+    const name = rest.join(" ");
+    if (verb && /^(reconnect|enable|disable|authenticate)$/i.test(verb)) {
+      if (!name) return this.transcript.note(`/mcp ${verb.toLowerCase()} <server>`, C.warn);
+      const rows = await this.mcpRows(a);
+      const row = rows.find((r) => r.name.toLowerCase() === name.toLowerCase());
+      if (!row) return this.transcript.note(`no MCP server called "${name}" on ${a.name} (/mcp lists them)`, C.warn);
+      return this.mcpAct(a, row, verb.toLowerCase() as McpAction);
+    }
+    if (verb) return this.transcript.note("/mcp, or /mcp reconnect | enable | disable | authenticate <server>", C.warn);
+    await this.openMcp(a);
+  }
+
+  /** One row per server: the agent's own (with the status it reports) and the ones codemax shares with it. */
+  private async mcpRows(a: Active): Promise<McpRow[]> {
+    const t0 = Date.now();
+    this.setWorking(`${pick(G.spinner, 0)} Checking ${a.name}'s MCP servers…`);
+    this.sending = true;
+    let status: McpStatus[] | null = null;
+    let statusError: string | undefined;
+    try {
+      status = (await a.engine.mcpStatus?.()) ?? null;
+    } catch (e: any) {
+      statusError = String(e?.message ?? e).slice(0, 120);
+    } finally {
+      this.sending = false;
+      this.setWorking(null);
+    }
+    const shared = sharedFor(a.agent, this.shared).mcp;
+    const disabled = this.mcpDisabled.get(a.agent) ?? new Set<string>();
+    const rows: McpRow[] = [];
+    const seen = new Set<string>();
+    for (const s of status ?? []) {
+      const sh = shared.find((x) => x.name.toLowerCase() === s.name.toLowerCase());
+      rows.push({ name: s.name, status: disabled.has(s.name) ? { ...s, status: "disabled" } : s, shared: sh, own: !sh });
+      seen.add(s.name.toLowerCase());
+    }
+    for (const sh of shared) {
+      if (seen.has(sh.name.toLowerCase())) continue;
+      rows.push({ name: sh.name, status: disabled.has(sh.name) ? { name: sh.name, status: "disabled" } : undefined, shared: sh, own: false });
+    }
+    debugEvent("mcp-list", { agent: a.agent, ms: Date.now() - t0, reported: status ? status.length : null, shared: shared.length, disabled: disabled.size || undefined, error: statusError });
+    if (statusError) this.transcript.note(`${a.name} did not report its MCP servers: ${statusError}`, C.warn);
+    return rows;
+  }
+
+  private async openMcp(a: Active) {
+    const rows = await this.mcpRows(a);
+    if (this.closed || this.active !== a) return;
+    if (!rows.length) return this.transcript.note(`${a.name} has no MCP servers${a.engine.mcpStatus ? "" : " that it reports; it manages its own, and codemax shares none with it"}`, C.dim);
+    const items: PaletteItem[] = rows.map((r) => {
+      const d = r.status ? describeStatus(r.status) : { text: a.engine.mcpStatus ? "status not reported" : `status not reported by ${a.name}`, ok: null as boolean | null };
+      return { label: r.name, description: d.text, hint: r.own ? `${a.name}'s own` : `shared from ${r.shared!.source.replace(/^plugin:/, "plugin ")}`, value: r.name, weight: d.ok === false ? 2 : d.ok === null ? 1 : 0 };
+    });
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: `MCP servers · ${a.name} · ↑↓ choose · Enter for actions · type to filter · Esc`,
+      items,
+      maxRows: 12,
+      onPick: (it) => {
+        this.closePalette();
+        const row = rows.find((r) => r.name === it.value);
+        if (row) this.openMcpActions(a, row);
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.paletteFiltered = true;
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** What can be done with one server: it depends on who owns it and what the agent's protocol allows. */
+  private openMcpActions(a: Active, row: McpRow) {
+    const st = row.status?.status;
+    const items: PaletteItem[] = [];
+    const canAct = !!a.engine.mcpAction;
+    if (st === "needs-auth") items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: 5 });
+    if (st === "disabled") items.push({ label: "Enable", description: row.own ? (canAct ? `${a.name} turns it back on` : `edit it in ${a.name}'s own config`) : "codemax passes it to the agent again", value: "enable", disabled: row.own && !canAct, weight: 4 });
+    else items.push({ label: "Disable", description: row.own ? (canAct ? `${a.name} turns it off for this session` : `edit it in ${a.name}'s own config`) : "codemax stops passing it to the agent (this run)", value: "disable", disabled: row.own && !canAct, weight: 3 });
+    if (st !== "disabled") items.push({ label: "Reconnect", description: row.own ? (canAct ? `${a.name} restarts the server` : `restart ${a.name} to reconnect its own servers`) : a.engine.reloadMcp ? "the session is loaded again with this server" : `restart ${a.name}`, value: row.own && !canAct ? "restart-agent" : !row.own && !a.engine.reloadMcp ? "restart-agent" : "reconnect", weight: 4 });
+    items.push({ label: "Back", description: "to the list", value: "back", weight: 0 });
+    const where = row.own ? `${a.name}'s own` : `shared from ${row.shared!.source}`;
+    const how = row.shared?.transport.type === "stdio" ? `$ ${row.shared.transport.command} ${row.shared.transport.args.join(" ")}`.slice(0, 80) : row.shared ? row.shared.transport.url.slice(0, 80) : "";
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: `${row.name} · ${row.status ? describeStatus(row.status).text : "status not reported"} · ${where}${how ? ` · ${how}` : ""}`,
+      items,
+      onPick: (it) => {
+        this.closePalette();
+        if (it.value === "back") return void this.openMcp(a);
+        if (it.value === "restart-agent") {
+          this.transcript.note(`restarting ${a.name} to reconnect its MCP servers…`, C.dim);
+          return void this.switchTo(a.agent, false);
+        }
+        this.safelyAsync("mcp", this.mcpAct(a, row, it.value as McpAction).then(() => this.openMcp(a)));
+      },
+      onClose: () => void this.openMcp(a),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
+  /** Do one thing to one server and say what happened. */
+  private async mcpAct(a: Active, row: McpRow, action: McpAction) {
+    if (a.turn || this.busy()) return this.transcript.note(`${a.name} is busy; try /mcp when the turn ends`, C.warn);
+    const t0 = Date.now();
+    this.setWorking(`${pick(G.spinner, 0)} ${action === "authenticate" ? "Starting the login for" : action === "reconnect" ? "Reconnecting" : action === "disable" ? "Disabling" : "Enabling"} ${row.name}…`);
+    this.sending = true;
+    try {
+      let line: string;
+      if (row.own) {
+        if (!a.engine.mcpAction) throw new Error(`${a.name} offers no way to ${action} its own server from here`);
+        line = await a.engine.mcpAction(action, row.name);
+      } else {
+        // A shared server: codemax changes what it passes, and the session is loaded again.
+        const set = this.mcpDisabled.get(a.agent) ?? new Set<string>();
+        if (action === "disable") set.add(row.name);
+        else if (action === "enable") set.delete(row.name);
+        this.mcpDisabled.set(a.agent, set);
+        if (action === "authenticate") {
+          if (!a.engine.mcpAction) throw new Error(`${a.name} offers no login from here`);
+          line = await a.engine.mcpAction("authenticate", row.name);
+        } else {
+          if (!a.engine.reloadMcp) throw new Error(`${a.name} cannot reload its session; /switch ${a.agent} restarts it`);
+          await a.engine.reloadMcp(sharedFor(a.agent, this.shared).mcp, [...set]);
+          line = action === "disable" ? `${row.name} is off for ${a.name} this run` : action === "enable" ? `${row.name} is back on for ${a.name}` : `${a.name} reloaded its session with ${row.name}`;
+        }
+      }
+      debugEvent("mcp-action", { agent: a.agent, action, own: row.own, ms: Date.now() - t0 });
+      this.transcript.note(`MCP · ${line}`, C.ok);
+    } catch (e: any) {
+      debugEvent("mcp-action-failed", { agent: a.agent, action, own: row.own, ms: Date.now() - t0, ...errorFields(e) });
+      this.transcript.error(`MCP · could not ${action} ${row.name}: ${String(e?.message ?? e).slice(0, 200)}`);
+    } finally {
+      this.sending = false;
+      this.setWorking(null);
+    }
   }
 
   private modeCycleTold = new Set<AgentId>();
@@ -2636,7 +2794,7 @@ export class ChatApp {
     try {
       const startedAt = Date.now();
       this.refreshShared();
-      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), mcpServers: this.sharedMcp(agent), costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
+      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(agent), mcpServers: this.sharedMcp(agent), mcpDisabled: [...(this.mcpDisabled.get(agent) ?? [])], costBaseline: resume ? this.costBaseline(agent, resume.id) : undefined });
       debugEvent("agent-start", { agent, ms: Date.now() - startedAt, resumed: !!resume && engine.session?.id === resume.id, resumeAsked: !!resume || undefined, handoffFrom: o.from, version: this.detect.get(agent)?.version ?? info.version, model: info.currentModel, models: info.models?.length, modes: info.modes?.map((m) => m.id), mode: info.currentMode, options: info.options?.map((x) => x.id) });
       active.mode = info.currentMode;
       if (engine.session) this.ledger.saveSession({ agent, id: engine.session.id, cwd: this.cwd, startedAt: engine.session.startedAt, lastUsedAt: Date.now() } as SessionRef);
