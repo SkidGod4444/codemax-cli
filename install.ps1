@@ -54,8 +54,18 @@ if (-not $Bun) {
   $Bun = Join-Path $BunBin 'bun.exe'
   if (-not (Test-Path $Bun)) { Die 'Bun did not install. See https://bun.sh' }
 }
+function Test-OldBun($b) { try { $v = (& $b --version).Trim(); return ([version]($v -replace '[^0-9.].*$', '') -lt [version]'1.3.0') } catch { return $true } }
+# An older Bun is updated, never used: codemax needs 1.3+. `bun upgrade` first; else Bun's own build in ~/.bun.
+if (Test-OldBun $Bun) {
+  Step "Updating Bun $((& $Bun --version).Trim()) (codemax needs 1.3 or newer)"
+  try { & $Bun upgrade *> $null } catch { }
+  if (Test-OldBun $Bun) {
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex" | Out-Null
+    $Bun = Join-Path $BunBin 'bun.exe'
+  }
+  if (Test-OldBun $Bun) { Die 'codemax needs Bun 1.3 or newer. Update it (https://bun.sh), then run this again.' }
+}
 $version = (& $Bun --version).Trim()
-if ([version]($version -replace '[^0-9.].*$', '') -lt [version]'1.3.0') { Die "codemax needs Bun 1.3 or newer (found $version). Run: bun upgrade" }
 Ok "Bun $version"
 
 # ── which version: the newest release tag, so a work-in-progress push to main

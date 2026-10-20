@@ -1,6 +1,6 @@
 import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
 import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
-import { checkForUpdate, installKind, RESTART_AGENT_ENV, RESTART_THREAD_ENV, updatePlan } from "./core/update.ts";
+import { checkForUpdate, installKind, isNewer, RESTART_AGENT_ENV, RESTART_THREAD_ENV, updatePlan } from "./core/update.ts";
 import { platformArgv } from "./core/spawn.ts";
 import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
@@ -58,6 +58,11 @@ async function main(argv: string[]) {
   const config = loadConfig();
   // On unless turned off (/debug off, /config); CODEMAX_DEBUG=0 turns it off for one run.
   setDebugLog(process.env.CODEMAX_DEBUG === "0" ? false : config.debugLog !== false);
+  // codemax needs Bun 1.3+; the launchers make sure of it, so this only shows when Bun is run by hand.
+  if (!isNewer(process.versions.bun ?? "0", "1.2.999")) {
+    debugEvent("old-bun", { bun: process.versions.bun });
+    console.error(`codemax: running on Bun ${process.versions.bun}, but it needs 1.3 or newer (some things, typing among them, may misbehave). Update Bun: bun upgrade`);
+  }
   // Crashes are recorded (debug log on) without changing how codemax reacts to them.
   process.on("uncaughtExceptionMonitor", (e, origin) => debugEvent("crash", { origin, ...errorFields(e) }));
   // Once: older usage logs overcounted Claude, so /usage starts fresh with this version.

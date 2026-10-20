@@ -123,3 +123,35 @@ test("every released version tells users what changed: package.json's version ha
   expect(lines!.length).toBeLessThanOrEqual(4);
   for (const l of lines!) expect(l.length).toBeLessThan(70);
 });
+
+test.skipIf(process.platform === "win32")("npm launcher: without a Bun 1.3+ on PATH, the bundled Bun becomes the global `bun` once, never replacing one", async () => {
+  const { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, symlinkSync, existsSync, readFileSync, lstatSync, readlinkSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const T = mkdtempSync(join(tmpdir(), "codemax-launcher-"));
+  const P = join(T, "lib", "node_modules", "codemax-cli");
+  mkdirSync(join(P, "bin"), { recursive: true });
+  mkdirSync(join(P, "src"));
+  copyFileSync(join(import.meta.dir, "..", "bin", "codemax.cjs"), join(P, "bin", "codemax.cjs"));
+  writeFileSync(join(P, "src", "cli.ts"), 'console.log("ran on", process.versions.bun);\n');
+  // A stand-in for the @oven platform package: this Bun.
+  const plat = `bun-${process.platform}-${process.arch === "arm64" ? "aarch64" : "x64"}`;
+  const pkgDir = join(P, "node_modules", "@oven", plat);
+  mkdirSync(join(pkgDir, "bin"), { recursive: true });
+  writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: `@oven/${plat}`, version: Bun.version }));
+  symlinkSync(process.execPath, join(pkgDir, "bin", "bun"));
+  const home = join(T, "home");
+  mkdirSync(home);
+  const node = Bun.which("node");
+  if (!node) return; // the launcher is a Node script
+  const run = () => Bun.spawnSync([node, join(P, "bin", "codemax.cjs")], { env: { HOME: home, SHELL: "/bin/zsh", PATH: "/usr/bin:/bin" } });
+  const first = run();
+  expect(first.stdout.toString()).toContain(`ran on ${Bun.version}`);
+  expect(first.stderr.toString()).toContain("~/.bun/bin/bun is now Bun");
+  expect(lstatSync(join(home, ".bun", "bin", "bun")).isSymbolicLink()).toBe(true);
+  expect(readFileSync(join(home, ".zshrc"), "utf8")).toContain(`export PATH="${join(home, ".bun", "bin")}:$PATH"`);
+  const second = run();
+  expect(second.stderr.toString()).not.toContain("is now Bun"); // once
+  expect(existsSync(join(home, ".codemax", "global-bun.json"))).toBe(true);
+  void readlinkSync;
+});

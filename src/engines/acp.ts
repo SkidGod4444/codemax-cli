@@ -628,7 +628,8 @@ export class AcpEngine implements Engine {
     this.conn = null;
     for (const resolve of this.pendingPermissions.values()) resolve(null);
     for (const resolve of this.pendingQuestions.values()) resolve({ action: "cancel" });
-    if (conn && this.session) await conn.closeSession?.({ sessionId: this.session.id }).catch(() => {});
+    // The agent may take its time to close a session: half a second, then it is stopped anyway.
+    if (conn && this.session) await Promise.race([conn.closeSession?.({ sessionId: this.session.id }).catch(() => {}), Bun.sleep(500)]);
     if (this.proc) {
       try {
         // End of input first: an agent behind plain pipes (and its `cat`s) exits on EOF.

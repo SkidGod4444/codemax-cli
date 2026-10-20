@@ -40,6 +40,16 @@ function fakeAgent() {
   }), ndJsonStream(a2c.writable, c2a.readable));
   return ndJsonStream(c2a.writable, a2c.readable);
 }
+// Never outlive the benchmark: a PTY child whose parent is gone exits (it used to keep running at a third of a core).
+const parent = process.ppid;
+setInterval(() => {
+  try {
+    process.kill(parent, 0);
+  } catch {
+    process.exit(0);
+  }
+}, 500).unref();
+setTimeout(() => process.exit(0), 10 * 60_000).unref(); // and never longer than 10 minutes
 const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true, targetFps: Number(process.env.FPS ?? 60) });
 applyTheme("dark");
 const repo = mkdtempSync(join(tmpdir(), "codemax-pty-repo-"));

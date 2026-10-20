@@ -22,7 +22,21 @@ const term = new Bun.Terminal({ cols: 120, rows: 40, data: (t, c) => {
   const w = waiters.shift();
   w?.(last);
 } });
-const proc = Bun.spawn(["bun", join(import.meta.dir, "pty-app.ts")], { terminal: term, env: { ...process.env, TERM: "xterm-256color", ROWS: process.env.ROWS ?? "600" } });
+const proc = Bun.spawn([process.env.BUN_BIN ?? "bun", join(import.meta.dir, "pty-app.ts")], { terminal: term, env: { ...process.env, TERM: "xterm-256color", ROWS: process.env.ROWS ?? "600" } });
+// Whatever happens (a timeout, an error), the app in the PTY is stopped with us.
+const stop = () => {
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    /* gone */
+  }
+};
+process.on("exit", stop);
+process.on("uncaughtException", (e) => {
+  console.error(e);
+  stop();
+  process.exit(1);
+});
 const strip = (s: string) => s.replace(/\x1b\[[0-9;?<>=]*[ -/]*[@-~]/g, "\n").replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, "").replace(/\x1b[P_][^\x1b]*\x1b\\/g, "");
 const until = async (re: RegExp, ms = 60000) => {
   const t0 = Date.now();
@@ -149,5 +163,5 @@ console.log(`streaming with the / palette open: output ${((bytes - b0) / 1024 / 
   }
   console.log(`streaming with the / palette open, key → screen: ${stats(out)}`);
 }
-proc.kill();
+stop();
 process.exit(0);

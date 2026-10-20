@@ -24,7 +24,7 @@ import { QuestionDialog } from "./question.ts";
 import { Palette, type PaletteItem } from "./palette.ts";
 import { TaskPanel } from "./tasks.ts";
 import { styleMarkdown } from "./markdown.ts";
-import { PerfLog, perfEnabled } from "./perf.ts";
+import { PerfLog, keyKind, perfEnabled } from "./perf.ts";
 import { debugEvent, debugLogOn, debugLogPath, errorFields, exportDebugLog, setDebugLog } from "../core/debuglog.ts";
 import { ThreadPicker } from "./threadpicker.ts";
 import { C, COLORS, COLOR_THEMES, DONE_VERBS, G, THEME, VERBS, applyTheme, fmtDuration, fmtTime, isColorTheme, modeLabel, pick } from "./theme.ts";
@@ -47,6 +47,7 @@ import { critiquePrompt, debateCost, finalPlan, judgePrompt, parseSettled, propo
 import { logoLines } from "./logo.ts";
 import { checkForUpdate, relaunch, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { whatsNew } from "../core/whatsnew.ts";
+import { MAKER, firstName, greeting } from "./greeting.ts";
 import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12, fmtTime12 } from "../core/time.ts";
 import { TerminalStatus } from "../core/termstatus.ts";
@@ -88,6 +89,9 @@ interface TurnStats {
   outTokens: number;
   costUsd: number;
 }
+
+/** Quitting waits at most this long for agents to close (the screen is already gone). */
+const QUIT_MAX_MS = 1200;
 
 /** How long the "what's new" box stays after /update. */
 const WHATS_NEW_MS = 5000;
@@ -428,7 +432,9 @@ export class ChatApp {
     const stripped = strippedKeys();
     if (stripped.length) notes.push(`${stripped.join(", ")} unset for agents · subscription logins only`);
     // Card border (2) + padding (2) + transcript padding (2): the logo must fit inside without wrapping.
-    this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes, logo: logoLines(this.renderer.width - 6) });
+    const news = whatsNew(VERSION)[0]?.lines[0];
+    this.transcript.header({ title: `codemax v${VERSION}`, subtitle: "one terminal, every coding agent", path: this.cwd, notes, logo: logoLines(this.renderer.width - 6), greeting: greeting(new Date(), firstName()), news: news ? `new in v${VERSION}: ${news}` : undefined, maker: MAKER });
+    debugEvent("start-card", { notes: notes.length, news: !!news });
     if ((this.config as any).priceUpdates !== false) void refreshLivePricesIfStale().then((l) => l && resetPriceCache());
     if (this.config.updateCheck !== false) {
       void this.updateChecker(VERSION)
@@ -478,9 +484,30 @@ export class ChatApp {
   }
 
   private onKey = (key: KeyEvent) => {
-    const t0 = this.perf ? performance.now() : 0;
+    const perf = this.perf;
+    if (!perf || key.eventType === "release") return this.safely("key handling", () => this.handleKey(key));
+    const t0 = performance.now();
+    const k = perf.keyIn(key);
+    const before = this.input.plainText.length;
+    // A printable key that nothing else takes should land in the prompt (checked once the
+    // textarea, which handles keys after this listener, has had it).
+    const printable = !!key.sequence && key.sequence.length === 1 && key.sequence >= " " && !key.ctrl && !key.meta;
+    const open = !this.threadPicker && !(this.onboarding && !this.onboardingAside) && !(this.permission && !(this.permission instanceof PermissionDialog));
     this.safely("key handling", () => this.handleKey(key));
-    this.perf?.key(key.name, performance.now() - t0);
+    perf.key(key.name, performance.now() - t0);
+    // Shortcuts (never typed text): which one, whether codemax acted on it, and what was open.
+    const shortcut = key.ctrl || key.meta || /^(escape|f\d+|pageup|pagedown)$/.test(key.name ?? "") || (key.name === "tab" && key.shift) || (key.sequence === "?" && before === 0);
+    if (shortcut)
+      debugEvent("hotkey", {
+        key: key.sequence === "?" && !key.ctrl && !key.meta ? "?" : keyKind(key),
+        shift: key.shift || undefined,
+        acted: key.propagationStopped || key.defaultPrevented || undefined,
+        palette: this.palette ? this.paletteKind : undefined,
+        dialog: this.permission ? (this.permission instanceof PermissionDialog ? "permission" : "question") : undefined,
+        working: !!this.active?.turn || undefined,
+      });
+    const expected = printable && open && !key.propagationStopped && !key.defaultPrevented;
+    queueMicrotask(() => this.safely("key check", () => perf.keyLanded(k, expected && this.input.focused, before, this.input.plainText.length)));
   };
 
   private lastResizeLog = 0;
@@ -719,6 +746,9 @@ export class ChatApp {
     if (key.name === "c" && key.ctrl) {
       key.stopPropagation();
       const now = Date.now();
+      // What Ctrl+C did (debug log): interrupt, clear the prompt, arm the quit, or quit.
+      const action = this.active?.turn ? "interrupt" : this.input.plainText ? "clear-prompt" : now - this.lastCtrlC < 2000 ? "quit" : "arm-quit";
+      debugEvent("ctrl-c", { action, sinceLastMs: this.lastCtrlC ? now - this.lastCtrlC : undefined });
       if (this.active?.turn) {
         void this.active.engine.cancel();
         this.setFlash("interrupting… (ctrl+c again to quit)");
@@ -869,7 +899,7 @@ export class ChatApp {
     this.rotateTip();
     // Busy also while the agent is still starting or a message is on its way (its snapshot):
     // a second message then queues instead of reaching a half-started agent or racing the first.
-    const busy = !!this.active?.turn || !!this.verifying || !!this.debate || this.starting || this.sending;
+    const busy = this.busy();
     // Built-in commands run at once, even mid-turn (/config, /model, /theme…); only those that
     // start agent work wait. The agent's own commands are messages to it, so they queue.
     const name = text.split(/\s+/)[0]!.toLowerCase();
@@ -887,7 +917,8 @@ export class ChatApp {
     }
     const route = this.routeFor(text);
     if (route && route !== this.active.agent && !this.active.turn) return this.askAgent(route, text, `routed to ${route} by rule`);
-    if (this.active.turn || this.verifying || this.debate || this.starting || this.sending) {
+    // Busy, or earlier messages still waiting: this one goes behind them, never ahead.
+    if (this.busy() || this.queue.length) {
       this.enqueue(text);
       return;
     }
@@ -1605,6 +1636,7 @@ export class ChatApp {
 
   /** Queue a message (or command) until the agent's turn ends; it shows above the prompt. */
   private enqueue(text: string) {
+    debugEvent("queue-add", { kind: text.startsWith("/") ? "command" : text.startsWith("!") ? "shell" : isForwardedNote(text) ? "note" : "message", size: this.queue.length + 1, working: !!this.active?.turn || undefined, sending: this.sending || undefined, draining: this.draining || undefined });
     // An edited queued message goes back to the place it came from.
     if (this.queueEdit) {
       this.queue.splice(Math.min(this.queueEdit.index, this.queue.length), 0, text);
@@ -1668,13 +1700,41 @@ export class ChatApp {
     return this.send(active, text);
   }
 
+  /**
+   * Working on something, or sending the queue: a new message (yours or a forwarded note)
+   * then joins the queue. Between two queued messages the agent looks idle for a moment (the
+   * snapshot), and a note sent straight away there reached the agent as a second prompt at
+   * once, so one of them was lost.
+   */
+  private busy(): boolean {
+    return !!this.active?.turn || !!this.verifying || !!this.debate || this.starting || this.sending || this.switching || this.draining;
+  }
+
+  private draining = false;
+
+  /** Send the queued messages in order, one at a time. Only one drain runs; an error skips that message, never the rest. */
   private async drainQueue(active: Active) {
-    while (this.queue.length && this.active === active && !active.turn) {
-      const next = this.queue.shift()!;
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      while (this.queue.length && this.active === active && !active.turn && !this.closed) {
+        const next = this.queue.shift()!;
+        this.renderQueue();
+        debugEvent("queue-send", { kind: next.startsWith("/") ? "command" : next.startsWith("!") ? "shell" : "message", left: this.queue.length });
+        try {
+          await this.dispatch(active, next);
+        } catch (e) {
+          debugEvent("queue-error", errorFields(e));
+          this.transcript.error(`a queued message could not be sent: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        }
+      }
+    } finally {
+      this.draining = false;
       this.renderQueue();
-      await this.dispatch(active, next);
+      this.renderFooter();
     }
-    this.renderFooter();
+    // Something queued while the last one was being sent (and the agent is free again).
+    if (this.queue.length && this.active === active && !active.turn && !this.closed) void this.drainQueue(active);
   }
 
   private async send(active: Active, text: string, o: { shown?: string; verifyFix?: boolean } = {}): Promise<void> {
@@ -1762,6 +1822,8 @@ export class ChatApp {
       this.verifying = null;
       this.setWorking(null);
       this.renderFooter();
+      // Messages typed while the checks ran (after a turn the turn's own send drains them).
+      if (this.active && !this.active.turn) setTimeout(() => this.active && void this.drainQueue(this.active), 0);
     }
   }
 
@@ -2520,9 +2582,11 @@ export class ChatApp {
       }
       // Ready: what you typed meanwhile goes now, in order.
       this.starting = false;
+      this.whatsNewArm?.();
       await this.drainQueue(active);
     } catch (e: any) {
       this.starting = false;
+      this.whatsNewArm?.();
       this.setWorking(null);
       debugEvent("agent-start-failed", { agent, version: this.detect.get(agent)?.version, ...errorFields(e) });
       this.transcript.error(`${adapter.name} failed to start: ${e?.message ?? e}`);
@@ -3579,7 +3643,8 @@ export class ChatApp {
     if (!n) return this.transcript.note("no side-agent notes yet");
     if (!a) return this.transcript.note("no main agent to forward to", C.warn);
     const msg = forwardMessage(n.text, n.name);
-    if (a.turn || this.switching || this.verifying) {
+    if (this.busy() || this.queue.length) {
+      debugEvent("note-queued", { busy: this.busy(), queued: this.queue.length });
       this.enqueue(msg);
       return;
     }
@@ -3645,13 +3710,23 @@ export class ChatApp {
       for (const [i, l] of lines.entries()) box.add(new TextRenderable(this.renderer, { id: `wn-${i}`, content: l, fg: l.startsWith("v") ? C.dim : C.text ?? C.dim, wrapMode: "none", truncate: true, width: "100%" } as any));
       this.chatRoot.insertBefore(box, this.inputWrap); // just above the prompt
       this.whatsNewBox = box;
-      setTimeout(() => this.safely("what's new", () => {
-        if (this.whatsNewBox !== box) return;
-        box.destroyRecursively();
-        this.whatsNewBox = null;
-      }), WHATS_NEW_MS);
+      debugEvent("whats-new", { from, to, lines: lines.length });
+      // The 5 seconds start once the agent is ready (you are looking at the prompt then; an
+      // agent can take seconds to start), or after 15 s if it never gets there.
+      this.whatsNewArm = () => {
+        this.whatsNewArm = null;
+        setTimeout(() => this.safely("what's new", () => {
+          if (this.whatsNewBox !== box) return;
+          box.destroyRecursively();
+          this.whatsNewBox = null;
+        }), WHATS_NEW_MS);
+      };
+      setTimeout(() => this.whatsNewArm?.(), 15_000);
     });
   }
+
+  /** Starts the "what's new" box's countdown (once the agent is ready). */
+  private whatsNewArm: (() => void) | null = null;
 
   private whatsNewBox: BoxRenderable | null = null;
 
@@ -3867,7 +3942,7 @@ export class ChatApp {
   async quit() {
     if (this.closed) return;
     this.closed = true;
-    debugEvent("quit", { uptimeMin: Math.round((Date.now() - this.bornAt) / 60000), agent: this.active?.agent, glitches: this.uiErrors || undefined });
+    debugEvent("quit", { uptimeMin: Math.round((Date.now() - this.bornAt) / 60000), agent: this.active?.agent, working: !!this.active?.turn || undefined, queued: this.queue.length || undefined, glitches: this.uiErrors || undefined });
     this.perf?.stop();
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.updateTimer) clearTimeout(this.updateTimer);
@@ -3878,23 +3953,41 @@ export class ChatApp {
     if (this.noteArmTimer) clearTimeout(this.noteArmTimer);
     this.term.close();
     this.subagents.destroy();
-    await this.awake.release().catch(() => []);
-    await this.closeReviewer();
     this.switching = true;
     const a = this.active;
     this.closePalette();
     this.permission?.destroy();
     this.permission = null;
     this.stopSpinner();
-    if (a) {
-      this.active = null;
-      a.unsubscribe();
-      if (a.turn) await a.engine.cancel().catch(() => {});
-      await a.engine.close().catch(() => {});
-      this.ledger.addEvent({ kind: "exit", agent: a.agent, detail: "codemax quit", diffStat: await diffStat(this.cwd) });
-    }
     this.renderer.keyInput.off("keypress", this.onKey);
     this.renderer.keyInput.off("paste", this.onPaste);
+    // The screen goes at once (Ctrl+C twice used to leave it up while every agent closed in turn).
+    try {
+      this.renderer.destroy();
+    } catch {
+      /* already gone */
+    }
+    // Then everything closes side by side, 1.2 s at most; what still runs is stopped on exit.
+    const t0 = Date.now();
+    const work = (async () => {
+      const jobs: Promise<unknown>[] = [this.awake.release().catch(() => []), this.closeReviewer()];
+      if (a) {
+        this.active = null;
+        a.unsubscribe();
+        jobs.push((async () => {
+          if (a.turn) await a.engine.cancel().catch(() => {});
+          await a.engine.close().catch(() => {});
+        })());
+        jobs.push(
+          Promise.race([diffStat(this.cwd), Bun.sleep(800).then(() => undefined)])
+            .then((d) => this.ledger.addEvent({ kind: "exit", agent: a.agent, detail: "codemax quit", diffStat: d }))
+            .catch(() => {}),
+        );
+      }
+      await Promise.all(jobs);
+    })();
+    const done = await Promise.race([work.then(() => true), Bun.sleep(QUIT_MAX_MS).then(() => false)]);
+    debugEvent("quit-closed", { ms: Date.now() - t0, allClosed: done });
     this.resolveDone();
   }
 }
@@ -3967,13 +4060,18 @@ export async function runChat(config: Config, ledger: Ledger, cwd: string, agent
   // sessions saved), then exit even if something hangs.
   for (const sig of ["SIGTERM", "SIGHUP"] as const)
     process.once(sig, () => {
+      debugEvent("quit-signal", { signal: sig }); // the terminal closed (SIGHUP) or a kill (SIGTERM)
       setTimeout(() => process.exit(0), 5000).unref?.();
       void app.quit().finally(() => setTimeout(() => process.exit(0), 50));
     });
   try {
     await app.start(agent, fresh, { pick, explicit, pickThread, onboard });
   } finally {
-    renderer.destroy();
+    try {
+      renderer.destroy(); // usually already done by quit()
+    } catch {
+      /* already gone */
+    }
     try {
       await renderer.closed;
     } catch {

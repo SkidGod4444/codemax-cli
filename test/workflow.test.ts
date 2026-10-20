@@ -545,7 +545,8 @@ test("handoff order: agents and models first to last; at a limit the next one ta
     await pick("1.", "Move down");
     await pick("move down", "2. Codex · Small 4");
     h.setup.mockInput.pressEscape(); // done: back in /config
-    await h.frame((f) => f.includes("handoff order: Claude Code → Codex · Small 4") && f.includes("Settings ·"));
+    // Back in /config with the order saved (the confirmation line can sit under the open list).
+    await h.frame((f) => f.includes("Settings ·") && (h.app as any).config.handoffChain?.length === 2);
     await Bun.sleep(120);
     h.setup.mockInput.pressEscape();
     await h.frame((f) => !f.includes("Settings ·"));

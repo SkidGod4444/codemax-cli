@@ -77,7 +77,12 @@ export class Transcript {
   }
 
   /** Startup card: brand mark, what codemax is, the project, and any notes. */
-  header(lines: { title: string; subtitle: string; path: string; notes: string[]; logo?: string[] }) {
+  /**
+   * Startup card: brand mark, what codemax is, the project, a greeting, one line of news and
+   * who makes it (a link). Notices (keep-awake, updated, debug log…) go under the card, dim,
+   * so the card stays a hello.
+   */
+  header(lines: { title: string; subtitle: string; path: string; notes: string[]; logo?: string[]; greeting?: string; news?: string; maker?: { name: string; url: string; label: string } }) {
     if (this.gone) return;
     const card = new BoxRenderable(this.renderer, {
       id: `header-${++this.n}`,
@@ -100,8 +105,16 @@ export class Transcript {
     }
     card.add(new TextRenderable(this.renderer, { id: `h-gap-${this.n}`, content: "", height: 1 }));
     card.add(new TextRenderable(this.renderer, { id: `h-p-${this.n}`, content: `cwd: ${lines.path}`, fg: C.dim, wrapMode: "char" } as any));
-    for (const [i, note] of lines.notes.entries()) card.add(new TextRenderable(this.renderer, { id: `h-n-${this.n}-${i}`, content: note, fg: C.dim, wrapMode: "word" } as any));
+    if (lines.greeting || lines.news || lines.maker) card.add(new TextRenderable(this.renderer, { id: `h-gap2-${this.n}`, content: "", height: 1 }));
+    if (lines.greeting) card.add(new TextRenderable(this.renderer, { id: `h-g-${this.n}`, content: lines.greeting, fg: C.text ?? C.dim, wrapMode: "word" } as any));
+    if (lines.news) card.add(new TextRenderable(this.renderer, { id: `h-nw-${this.n}`, content: new StyledText([fg(C.accent)("✦ "), fg(C.dim)(lines.news)]), wrapMode: "word" } as any));
+    if (lines.maker) {
+      const m = lines.maker;
+      card.add(new TextRenderable(this.renderer, { id: `h-m-${this.n}`, content: new StyledText([fg(C.dim)(`made by ${m.name} · `), { ...fg(C.link)(m.label), link: { url: m.url } }]), wrapMode: "word" } as any));
+    }
     this.box.add(card);
+    // Notices under the card: still there to read, no longer crowding the hello.
+    for (const note of lines.notes) this.line(`  ${G.nest}  `, note, { fg: C.dim, glyphFg: C.dimmer });
   }
 
   /** A side agent's note: a bordered card that stands apart from the conversation. */

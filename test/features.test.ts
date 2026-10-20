@@ -1354,6 +1354,9 @@ test("49. after /update, what changed since the old version shows above the prom
     await h.frame((f) => f.includes("new session"));
     (h.app as any).showWhatsNew("0.1.13", "0.1.12");
     const f = await h.frame((f) => f.includes("What's new in codemax v0.1.13") && f.includes("Colour themes"));
+    await Bun.sleep(5200);
+    expect(h.setup.captureCharFrame()).toContain("What's new in codemax"); // still there: the agent was ready before, so it waits for the next ready (or 15 s)
+    (h.app as any).whatsNewArm?.(); // the agent is ready
     expect(f).not.toContain("33 bug fixes"); // only what came after the old version
     expect((h.app as any).transcript.box.getChildren().some((c: any) => JSON.stringify(c.content ?? "").includes("Colour themes"))).toBe(false);
     await Bun.sleep(5200);
@@ -1428,5 +1431,193 @@ test("51. the debug log is on by default and says so once at start, with what it
     } finally { await h.cleanup(); }
   } finally {
     d.setDebugLog(false);
+  }
+}, 30000);
+
+test("52. the debug log catches a lost key and a slow screen without recording what was typed", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { existsSync, rmSync } = await import("node:fs");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  const events = () => (existsSync(d.debugLogPath()) ? readFileSync(d.debugLogPath(), "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    // Normal typing: every key lands, none is reported.
+    await h.setup.mockInput.typeText("hello world");
+    await h.frame((f) => f.includes("hello world"));
+    for (let i = 0; i < 30; i++) await h.setup.renderOnce();
+    expect(events().filter((e) => e.kind === "ui-key-missed")).toEqual([]);
+    // A key the prompt never gets (as if dropped on the way): reported by its kind only.
+    const real = app.input.handleKeyPress.bind(app.input);
+    app.input.handleKeyPress = (key: any) => (key.sequence === "Q" ? false : real(key));
+    await h.setup.mockInput.typeText("Q");
+    await Bun.sleep(20);
+    app.input.handleKeyPress = real;
+    const missed = events().filter((e) => e.kind === "ui-key-missed");
+    expect(missed.length).toBe(1);
+    expect(missed[0]).toMatchObject({ keyKind: "letter", promptChars: 11 });
+    // A key that waits long for the screen.
+    const k = app.perf.keyIn({ sequence: "x", name: "x" });
+    k.at -= 120;
+    app.perf.keyLanded(k, true, 0, 1);
+    await h.setup.mockInput.typeText("!");
+    for (let i = 0; i < 5; i++) await h.setup.renderOnce();
+    expect(events().some((e) => e.kind === "ui-slow-key-to-screen" && e.keyKind === "letter" && e.ms >= 120)).toBe(true);
+    // Selecting text in the transcript: a fast selection is not reported, a slow one is.
+    await h.send("say something");
+    await h.frame((f) => f.includes("ok"));
+    await h.setup.mockMouse.drag(2, 3, 40, 6);
+    for (let i = 0; i < 5; i++) await h.setup.renderOnce();
+    expect(events().filter((e) => e.kind === "ui-slow-selection")).toEqual([]);
+    (app.perf as any).pendingSelection = performance.now() - 200;
+    await h.setup.renderOnce();
+    await h.setup.mockInput.typeText("z");
+    for (let i = 0; i < 5; i++) await h.setup.renderOnce();
+    expect(events().some((e) => e.kind === "ui-slow-selection" && e.ms >= 200)).toBe(true);
+    const all = readFileSync(d.debugLogPath(), "utf8");
+    for (const typed of ["hello", "world", "say something", '"Q"', '"x"', '"z"']) expect(all).not.toContain(typed);
+  } finally {
+    d.setDebugLog(false);
+    await h.cleanup();
+  }
+}, 30000);
+
+test("53. after /update with a slow-starting agent, the what's-new box stays until 5 s after the agent is ready", async () => {
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  const app: any = h.app;
+  const make = app.engineFactory;
+  app.engineFactory = (a: string) => {
+    const e = make(a);
+    const start = e.start.bind(e);
+    e.start = async (o: any) => (await Bun.sleep(3000), start(o)); // an agent that takes 3 s, like Claude on a busy Mac
+    return e;
+  };
+  process.env.CODEMAX_UPDATED_TO = "0.1.14";
+  process.env.CODEMAX_UPDATED_FROM = "0.1.13";
+  try {
+    const t0 = Date.now();
+    void app.start("claude", true);
+    await h.frame((f) => f.includes("What's new in codemax"));
+    await h.frame((f) => f.includes("new session"), 10000); // the agent is ready (~3 s)
+    await Bun.sleep(Math.max(0, 5000 - (Date.now() - t0)));
+    for (let i = 0; i < 3; i++) await h.setup.renderOnce();
+    expect(h.setup.captureCharFrame()).toContain("What's new in codemax"); // 5 s after start, still shown
+    await h.frame((f) => !f.includes("What's new in codemax"), 10000); // and gone 5 s after ready
+    expect(Date.now() - t0).toBeGreaterThan(7500);
+  } finally {
+    delete process.env.CODEMAX_UPDATED_TO;
+    delete process.env.CODEMAX_UPDATED_FROM;
+    await h.cleanup();
+  }
+}, 30000);
+
+test("54. the start card says hello (time of day, first name), one line of news and who makes codemax; notices sit under it", async () => {
+  const { greeting } = await import("../src/chat/greeting.ts");
+  expect(greeting(new Date("2026-10-20T08:00:00"), "Saidev")).toStartWith("☀ Good morning, Saidev · ");
+  expect(greeting(new Date("2026-10-20T20:00:00"))).toStartWith("☾ Good evening · ");
+  expect(greeting(new Date("2026-10-20T02:00:00"), "A")).toStartWith("☾ Up late, A · ");
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") }, { awake: "off" });
+  try {
+    void h.app.start("claude", true);
+    const f = await h.frame((f) => f.includes("new session"));
+    expect(f).toContain("made by Saidev Dhal · saidev.codes");
+    expect(f).toMatch(/[☀☾] (Good (morning|afternoon|evening)|Up late)/);
+    expect(f).toMatch(/✦ new in v\d+\.\d+\.\d+: /);
+    const card = f.slice(f.indexOf("╭"), f.indexOf("╰"));
+    expect(card).not.toContain("debug log on"); // notices are below the card now
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("55. queued messages all reach the agent in order, one at a time, even with a side-agent note arriving between them", async () => {
+  const got: string[] = [];
+  let inflight = 0, maxInflight = 0;
+  const h = await harness({
+    claude: async (text, ctx) => {
+      inflight++;
+      maxInflight = Math.max(maxInflight, inflight);
+      got.push(text.startsWith("A side agent (") ? "note" : text);
+      await Bun.sleep(300);
+      await ctx.say(`answered`);
+      inflight--;
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    await h.send("m1");
+    await Bun.sleep(50);
+    for (const m of ["m2", "m3"]) await h.send(m);
+    // The moment a queued message is being prepared (the agent looks idle), a note is forwarded.
+    const t0 = Date.now();
+    while (!app.sending && Date.now() - t0 < 3000) await Bun.sleep(1);
+    app.addNote("codex", "Codex", "Heads up · Check the null case.\n\n**Null case**\n- **Consider a test.**");
+    app.forwardNote();
+    // And a message typed in the gap between two turns.
+    while (!(app.draining && !app.active.turn) && Date.now() - t0 < 3000) await Bun.sleep(1);
+    await h.send("m4");
+    const t1 = Date.now();
+    while (got.length < 5 && Date.now() - t1 < 8000) await Bun.sleep(50);
+    await Bun.sleep(500);
+    expect(maxInflight).toBe(1); // never two prompts at once
+    expect(got.filter((g) => g !== "note")).toEqual(["m1", "m2", "m3", "m4"]);
+    expect(got).toContain("note");
+    expect(app.queue).toEqual([]);
+  } finally { await h.cleanup(); }
+}, 30000);
+
+test("56. Ctrl+C twice quits at once: the screen goes first, slow agents get at most 1.2 s", async () => {
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    app.active.engine.close = () => Bun.sleep(3000); // an agent slow to close (Claude's session, Cursor…)
+    const destroy = h.setup.renderer.destroy.bind(h.setup.renderer);
+    let screenGoneAt = 0;
+    h.setup.renderer.destroy = () => ((screenGoneAt ||= Date.now()), destroy());
+    const t0 = Date.now();
+    h.setup.mockInput.pressKey("c", { ctrl: true });
+    h.setup.mockInput.pressKey("c", { ctrl: true });
+    await app.done;
+    expect(screenGoneAt - t0).toBeLessThan(200);
+    expect(Date.now() - t0).toBeLessThan(1700);
+  } finally {
+    try { h.setup.renderer.destroy(); } catch { /* gone */ }
+  }
+}, 30000);
+
+test("57. shortcuts and quitting are in the debug log: which key, what it did, never typed text", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { existsSync, rmSync } = await import("node:fs");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const h = await harness({ claude: async (_t, ctx) => ctx.say("ok") });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    h.setup.mockInput.pressKey("o", { ctrl: true });
+    h.setup.mockInput.pressTab({ shift: true });
+    await h.setup.mockInput.typeText("?");
+    await Bun.sleep(50);
+    await h.setup.mockInput.typeText("secret words");
+    h.setup.mockInput.pressKey("c", { ctrl: true }); // clears the prompt
+    h.setup.mockInput.pressKey("c", { ctrl: true }); // "again to quit": quits
+    await (h.app as any).done;
+    const events = readFileSync(d.debugLogPath(), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const keys = events.filter((e) => e.kind === "ui-hotkey" || e.kind === "hotkey").map((e) => e.key);
+    expect(keys).toContain("ctrl+o");
+    expect(keys).toContain("tab");
+    expect(keys).toContain("?");
+    expect(events.filter((e) => e.kind === "ctrl-c").map((e) => e.action)).toEqual(["clear-prompt", "quit"]);
+    expect(events.some((e) => e.kind === "quit")).toBe(true);
+    expect(events.some((e) => e.kind === "quit-closed")).toBe(true);
+    expect(readFileSync(d.debugLogPath(), "utf8")).not.toContain("secret");
+  } finally {
+    d.setDebugLog(false);
+    try { h.setup.renderer.destroy(); } catch { /* gone */ }
   }
 }, 30000);

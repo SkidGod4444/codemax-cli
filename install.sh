@@ -77,11 +77,23 @@ if [ "$need_bun" = 1 ]; then
   [ -x "$BUN" ] || die "Bun did not install. See https://bun.sh"
 fi
 
-version="$("$BUN" --version)"
-major="${version%%.*}"; rest="${version#*.}"; minor="${rest%%.*}"
-if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 3 ]; }; then
-  die "codemax needs Bun 1.3 or newer (found $version). Run: bun upgrade"
+bun_old() {
+  v="$("$1" --version 2>/dev/null)" || return 0
+  major="${v%%.*}"; rest="${v#*.}"; minor="${rest%%.*}"
+  [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 3 ]; }
+}
+# An older Bun is updated, never used: codemax needs 1.3+. `bun upgrade` first; a Bun that
+# cannot upgrade itself (Homebrew, npm) is left alone and Bun's own build goes in ~/.bun.
+if bun_old "$BUN"; then
+  step "Updating Bun $("$BUN" --version) (codemax needs 1.3 or newer)"
+  "$BUN" upgrade >/dev/null 2>&1 || true
+  if bun_old "$BUN"; then
+    curl -fsSL https://bun.sh/install | bash >/dev/null || die "Could not update Bun. Update it (https://bun.sh), then run this again."
+    BUN="$BUN_HOME/bin/bun"
+  fi
+  bun_old "$BUN" && die "codemax needs Bun 1.3 or newer (found $("$BUN" --version)). Update it (https://bun.sh), then run this again."
 fi
+version="$("$BUN" --version)"
 ok "Bun $version"
 
 # ── which version: the newest release tag, so a work-in-progress push to main
@@ -119,8 +131,11 @@ ok "done"
 
 # ── command on PATH
 mkdir -p "$BUN_HOME/bin"
-chmod +x "$DIR/bin/codemax"
-ln -sf "$DIR/bin/codemax" "$BUN_HOME/bin/codemax"
+# The command runs codemax with the Bun checked above, not whatever `bun` is first on PATH
+# (an older one there would otherwise be used).
+rm -f "$BUN_HOME/bin/codemax"
+printf '#!/bin/sh\nexec "%s" "%s" "$@"\n' "$(command -v "$BUN" || echo "$BUN")" "$DIR/src/cli.ts" > "$BUN_HOME/bin/codemax"
+chmod +x "$BUN_HOME/bin/codemax"
 ok "codemax → $BUN_HOME/bin/codemax"
 
 # ── agents already on this machine
