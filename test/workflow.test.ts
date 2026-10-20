@@ -302,7 +302,6 @@ test("threads: --resume picks one of this folder's conversations; each keeps its
     expect(f).toMatch(/just now · Claude Code · 1 message · /);
     expect(f.indexOf("beta task")).toBeLessThan(f.indexOf("alpha task"));
     expect(f).not.toContain("? for shortcuts"); // the chat is hidden behind it
-    require("node:fs").writeFileSync(process.env.DUMP_FRAME ?? "/dev/null", f);
     // Space previews the selected thread's messages.
     await h.setup.mockInput.typeText(" ");
     f = await h.frame((f) => f.includes("did beta task"));
