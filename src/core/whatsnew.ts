@@ -7,7 +7,7 @@ import { isNewer } from "./update.ts";
  */
 export const WHATS_NEW: Record<string, string[]> = {
   "0.1.17": [
-    "/mcp: your servers with status; ↑↓ then Enter to reconnect, enable, disable, log in",
+    "/mcp: servers with status; ↑↓ + Enter to reconnect, disable, log in",
     "Cursor's plan limit mid-task hands off automatically, keeping the work",
   ],
   "0.1.16": [
