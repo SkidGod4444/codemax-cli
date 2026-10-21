@@ -6,6 +6,10 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.19": [
+    "/mcp mid-turn still lists the agent's own servers; Authenticate works",
+    "A clear line when the agent is busy: Esc stops the turn, then /mcp",
+  ],
   "0.1.18": [
     "MCP sign-in opens the browser (/mcp → Authenticate), Claude and Codex",
     "Tables drawn as boxes; code spans in your own messages",
