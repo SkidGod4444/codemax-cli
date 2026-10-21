@@ -1881,3 +1881,66 @@ test("64. an agent's own todo tool (OpenCode todowrite, Cursor updateTodos) is s
     expect(todoPlan({ tasks: [{ title: "x", status: "DONE" }] }, "task_list")).toEqual([{ content: "x", status: "completed", priority: undefined }]);
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("65. /mcp while the agent is mid-turn still lists its own servers (from its config) and offers Authenticate; the login runs once the turn is stopped", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "codemax-mcp-busy-home-"));
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { agentmail: { type: "stdio", command: "agentmail-mcp", args: [] } } }));
+  const prev = process.env.CODEMAX_SHARE_HOME;
+  process.env.CODEMAX_SHARE_HOME = home;
+  const calls: any[] = [];
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text === "slow") {
+        for (let i = 0; i < 80 && !ctx.cancelled(); i++) await Bun.sleep(100);
+        return ctx.say("slow done");
+      }
+      if (text === "/mcp") return ctx.say("**MCP servers:** 1 (1 needs authentication)\n\n**Needs authentication**\n- `agentmail`");
+      await ctx.say(`got: ${text}`);
+    },
+  }, {}, undefined, { claude: { session: {}, configCalls: calls } });
+  const opened: string[] = [];
+  h.app.openUrl = (u) => (opened.push(u), true);
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    const engine: any = app.active.engine;
+    const realReload = engine.reloadMcp.bind(engine);
+    engine.reloadMcp = async (servers: any[], disabled: string[]) => {
+      await realReload(servers, disabled);
+      if (servers.some((s) => s.name === "agentmail")) {
+        const r = await engine.onElicitation({ mode: "url", sessionId: "s", message: "Authenticate with MCP server agentmail", url: "https://auth.example/authorize", elicitationId: "e1" });
+        if (r.action === "accept") engine.emit({ type: "url_done", id: "e1", server: "agentmail", ok: true });
+      }
+    };
+    await h.send("slow");
+    await h.frame((f) => f.includes("esc to interrupt"));
+    // Mid-turn: the adapter cannot answer the hidden /mcp prompt, but the agent's own server is still listed.
+    await h.send("/mcp");
+    let f = await h.frame((f) => f.includes("MCP servers · Claude Code"));
+    expect(f).toContain("agentmail");
+    expect(f).toContain("status unknown while Claude Code works");
+    expect(f).toContain("Claude Code's own");
+    expect(f).toContain("Claude Code is working, so its MCP servers' status is unknown");
+    h.setup.mockInput.pressEnter(); // the one row → its actions
+    f = await h.frame((f) => f.includes("agentmail · status unknown while Claude Code works"));
+    expect(f).toContain("Authenticate");
+    await h.setup.mockInput.typeText("auth");
+    await Bun.sleep(60);
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("Claude Code is working; Esc stops the turn, then /mcp authenticate agentmail again"));
+    expect(opened).toEqual([]);
+    h.setup.mockInput.pressEscape(); // closes the list that came back
+    await h.frame((f) => !f.includes("MCP servers · Claude Code"));
+    h.setup.mockInput.pressEscape(); // stops the turn
+    await h.frame((f) => !f.includes("esc to interrupt") && !f.includes("Checking"));
+    await h.send("/mcp authenticate agentmail");
+    f = await h.frame((f) => f.includes("agentmail signed in"));
+    expect(opened).toEqual(["https://auth.example/authorize"]);
+    expect(calls.some((c) => c.method === "session/load" && c.mcpServers.includes("agentmail"))).toBe(true);
+  } finally {
+    process.env.CODEMAX_SHARE_HOME = prev;
+    await h.cleanup();
+  }
+}, 40000);

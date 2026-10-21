@@ -48,7 +48,7 @@ import { logoLines } from "./logo.ts";
 import { checkForUpdate, relaunch, RESTARTED_ENV, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { whatsNew } from "../core/whatsnew.ts";
 import { MAKER, firstName, greeting } from "./greeting.ts";
-import { collectShared, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
+import { collectShared, nativeMcpSource, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
 import { describeStatus, type McpStatus } from "../core/mcpstatus.ts";
 import { openInBrowser } from "../core/openurl.ts";
 import type { McpAction } from "../engines/types.ts";
@@ -2620,6 +2620,8 @@ export class ChatApp {
 
   /** Shared servers turned off in /mcp, per agent, for this run. */
   private mcpDisabled = new Map<AgentId, Set<string>>();
+  /** Why the last /mcp list has no statuses (the agent was working, or reports none), for the rows. */
+  private mcpNoStatus?: string;
 
   // ---------- /mcp: the agent's MCP servers, as Claude Code's /mcp screen ----------
 
@@ -2664,12 +2666,25 @@ export class ChatApp {
       rows.push({ name: s.name, status: disabled.has(s.name) ? { ...s, status: "disabled" } : s, shared: sh, own: !sh });
       seen.add(s.name.toLowerCase());
     }
+    // No report (the agent is mid-turn, or its protocol has none): its own servers still come from the
+    // config codemax read, so they can be seen and signed in to (a user saw only the shared ones and thought
+    // the agent's were gone).
+    const working = /working/i.test(statusError ?? "");
+    const ownSource = nativeMcpSource(a.agent);
+    const own = status ? [] : this.shared.mcp.filter((s) => s.source === ownSource || (a.agent === "claude" && s.source.startsWith("plugin:")));
+    for (const s of own) {
+      if (seen.has(s.name.toLowerCase())) continue;
+      seen.add(s.name.toLowerCase());
+      rows.push({ name: s.name, status: undefined, own: true });
+    }
     for (const sh of shared) {
       if (seen.has(sh.name.toLowerCase())) continue;
       rows.push({ name: sh.name, status: disabled.has(sh.name) ? { name: sh.name, status: "disabled" } : undefined, shared: sh, own: false });
     }
-    debugEvent("mcp-list", { agent: a.agent, ms: Date.now() - t0, reported: status ? status.length : null, shared: shared.length, disabled: disabled.size || undefined, error: statusError });
-    if (statusError) this.transcript.note(`${a.name} did not report its MCP servers: ${statusError}`, C.warn);
+    this.mcpNoStatus = status ? undefined : working ? `status unknown while ${a.name} works` : a.engine.mcpStatus ? "status not reported" : `status not reported by ${a.name}`;
+    debugEvent("mcp-list", { agent: a.agent, ms: Date.now() - t0, reported: status ? status.length : null, shared: shared.length, own: own.length || undefined, disabled: disabled.size || undefined, error: statusError });
+    if (working) this.transcript.note(`${a.name} is working, so its MCP servers' status is unknown · Esc stops the turn, then /mcp shows it`, C.warn);
+    else if (statusError) this.transcript.note(`${a.name} did not report its MCP servers: ${statusError}`, C.warn);
     return rows;
   }
 
@@ -2678,7 +2693,7 @@ export class ChatApp {
     if (this.closed || this.active !== a) return;
     if (!rows.length) return this.transcript.note(`${a.name} has no MCP servers${a.engine.mcpStatus ? "" : " that it reports; it manages its own, and codemax shares none with it"}`, C.dim);
     const items: PaletteItem[] = rows.map((r) => {
-      const d = r.status ? describeStatus(r.status) : { text: a.engine.mcpStatus ? "status not reported" : `status not reported by ${a.name}`, ok: null as boolean | null };
+      const d = r.status ? describeStatus(r.status) : { text: this.mcpNoStatus ?? "status not reported", ok: null as boolean | null };
       return { label: r.name, description: d.text, hint: r.own ? `${a.name}'s own` : `shared from ${r.shared!.source.replace(/^plugin:/, "plugin ")}`, value: r.name, weight: d.ok === false ? 2 : d.ok === null ? 1 : 0 };
     });
     this.paletteKind = "picker";
@@ -2702,7 +2717,8 @@ export class ChatApp {
     const st = row.status?.status;
     const items: PaletteItem[] = [];
     const canAct = !!a.engine.mcpAction;
-    if (st === "needs-auth") items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: 5 });
+    // Offered when the server needs it, and when nothing is known (the agent was working): the login is harmless on a server that is already signed in.
+    if (st === "needs-auth" || (st === undefined && canAct)) items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: st === "needs-auth" ? 5 : 2 });
     if (st === "disabled") items.push({ label: "Enable", description: row.own ? (canAct ? `${a.name} turns it back on` : `edit it in ${a.name}'s own config`) : "codemax passes it to the agent again", value: "enable", disabled: row.own && !canAct, weight: 4 });
     else items.push({ label: "Disable", description: row.own ? (canAct ? `${a.name} turns it off for this session` : `edit it in ${a.name}'s own config`) : "codemax stops passing it to the agent (this run)", value: "disable", disabled: row.own && !canAct, weight: 3 });
     if (st !== "disabled") items.push({ label: "Reconnect", description: row.own ? (canAct ? `${a.name} restarts the server` : `restart ${a.name} to reconnect its own servers`) : a.engine.reloadMcp ? "the session is loaded again with this server" : `restart ${a.name}`, value: row.own && !canAct ? "restart-agent" : !row.own && !a.engine.reloadMcp ? "restart-agent" : "reconnect", weight: 4 });
@@ -2711,7 +2727,7 @@ export class ChatApp {
     const how = row.shared?.transport.type === "stdio" ? `$ ${row.shared.transport.command} ${row.shared.transport.args.join(" ")}`.slice(0, 80) : row.shared ? row.shared.transport.url.slice(0, 80) : "";
     this.paletteKind = "picker";
     this.palette = new Palette(this.renderer, {
-      title: `${row.name} · ${row.status ? describeStatus(row.status).text : "status not reported"} · ${where}${how ? ` · ${how}` : ""}`,
+      title: `${row.name} · ${row.status ? describeStatus(row.status).text : this.mcpNoStatus ?? "status not reported"} · ${where}${how ? ` · ${how}` : ""}`,
       items,
       onPick: (it) => {
         this.closePalette();
@@ -2729,7 +2745,7 @@ export class ChatApp {
 
   /** Do one thing to one server and say what happened. */
   private async mcpAct(a: Active, row: McpRow, action: McpAction) {
-    if (a.turn || this.busy()) return this.transcript.note(`${a.name} is busy; try /mcp when the turn ends`, C.warn);
+    if (a.turn || this.busy()) return this.transcript.note(`${a.name} is working; Esc stops the turn, then /mcp ${action} ${row.name} again`, C.warn);
     const t0 = Date.now();
     this.setWorking(`${pick(G.spinner, 0)} ${action === "authenticate" ? "Starting the login for" : action === "reconnect" ? "Reconnecting" : action === "disable" ? "Disabling" : "Enabling"} ${row.name}…`);
     this.sending = true;
