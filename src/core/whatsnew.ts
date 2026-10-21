@@ -6,6 +6,12 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.18": [
+    "MCP sign-in opens the browser (/mcp → Authenticate), Claude and Codex",
+    "Tables drawn as boxes; code spans in your own messages",
+    "Quieter start: the model on the session line, fewer notes",
+    "OpenCode and Cursor todo lists land in the pinned task list",
+  ],
   "0.1.17": [
     "/mcp: servers with status; ↑↓ + Enter to reconnect or disable",
     "Cursor's plan limit mid-task hands off; the work done is kept",

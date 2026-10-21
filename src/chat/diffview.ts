@@ -38,9 +38,14 @@ function langOfPath(path: string): string | undefined {
 
 export function diffRows(text: string): DiffRow[] {
   const lines = text.replace(/\r\n?/g, "\n").replace(/\n+$/, "").split("\n");
+  // A diff inside a code fence (a shell's `git diff` output): the fence lines are not part of it.
+  if (/^\s*```/.test(lines[0] ?? "") && /^\s*```\s*$/.test(lines.at(-1) ?? "")) lines.splice(0, 1) && lines.splice(-1, 1);
   type File = { name: string; created: boolean; deleted: boolean; lines: string[]; binary?: boolean };
   const files: File[] = [];
   let cur: File | null = null;
+  // What comes before the first file header (a command echo, a fence) is shown as is, never as a file.
+  const headed = lines.some((l, i) => /^diff --git /.test(l) || (l.startsWith("--- ") && lines[i + 1]?.startsWith("+++ ")));
+  const preamble: DiffRow[] = [];
   // A hunk with counts ("@@ -1,2 +1,2 @@") says how many lines follow: inside them "--- x" /
   // "+++ y" are a removed "-- x" and an added "++ y" (SQL or Lua comments), not a file header.
   let left = { old: 0, new: 0 };
@@ -74,6 +79,11 @@ export function diffRows(text: string): DiffRow[] {
       continue;
     }
     if (!cur) {
+      // Not a diff line yet, with a file header still to come: a command echo or other output.
+      if (headed && !/^(@@|[-+ \\])/.test(l)) {
+        if (l.trim()) preamble.push({ kind: "note", text: l });
+        continue;
+      }
       cur = { name: "", created: false, deleted: false, lines: [] };
       files.push(cur);
     }
@@ -84,7 +94,7 @@ export function diffRows(text: string): DiffRow[] {
     const m = l.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/) ?? l.match(/^@@ line (\d+) @@/);
     if (m) width = Math.max(width, String(Number(m[3] ?? m[1]) + Number(m[4] ?? m[2] ?? 0) + f.lines.length).length);
   }
-  const out: DiffRow[] = [];
+  const out: DiffRow[] = [...preamble];
   for (const f of files) {
     const adds = f.lines.filter((l) => l.startsWith("+")).length;
     const dels = f.lines.filter((l) => l.startsWith("-")).length;

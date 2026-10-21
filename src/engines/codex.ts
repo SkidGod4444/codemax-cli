@@ -192,8 +192,10 @@ export class CodexEngine implements Engine {
       return "Codex reloaded its MCP servers";
     }
     if (action === "authenticate") {
-      await Promise.race([this.request("mcpServer/oauth/login", { name, threadId: this.threadId }), Bun.sleep(30_000).then(() => { throw new Error("no answer in time"); })]);
-      return `login started for ${name} (a browser may open)`;
+      const r = await Promise.race([this.request("mcpServer/oauth/login", { name, threadId: this.threadId }), Bun.sleep(30_000).then(() => { throw new Error("no answer in time"); })]);
+      const url = typeof r?.authorizationUrl === "string" ? r.authorizationUrl : undefined;
+      if (url) this.emit({ type: "open_url", id: `codex-oauth-${name}`, url, message: `Authenticate with MCP server ${name}`, server: name, auto: true });
+      return url ? `sign-in started for ${name}: finish it in your browser` : `login started for ${name}`;
     }
     throw new Error(`Codex has no API to ${action} one of its own servers; edit ~/.codex/config.toml`);
   }
@@ -457,6 +459,9 @@ export class CodexEngine implements Engine {
       case "warning":
       case "guardianWarning":
         this.emit({ type: "notice", level: "warn", title: String(p.message ?? "warning") });
+        break;
+      case "mcpServer/oauthLogin/completed":
+        this.emit({ type: "url_done", id: `codex-oauth-${p.name}`, server: String(p.name ?? ""), ok: p.success !== false, error: p.error ? String(p.error) : undefined });
         break;
       case "mcpServer/startupStatus/updated": {
         // A server that failed to start (or needs a login) is worth a line; the others are noise.

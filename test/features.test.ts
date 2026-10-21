@@ -1269,7 +1269,8 @@ test("45. a run of reads and searches is one line, like Claude Code; the spinner
     expect(f).not.toContain("Read src/a.ts");
     release();
     f = await h.frame((f) => f.includes("All good."));
-    expect(f).toContain("Read 3 files, searched for 1 pattern (ctrl+o to expand)");
+    expect(f).toContain("Read 3 files, searched for 1 pattern");
+    expect(f).not.toContain("searched for 1 pattern (ctrl+o"); // Claude Code's look: a dim line, no hint
     expect(f).toContain("bun test"); // a command that may change things keeps its own row
     h.setup.mockInput.pressKey("o", { ctrl: true });
     f = await h.frame((f) => f.includes("Read src/a.ts") && f.includes("grep -n auth src/"));
@@ -1741,7 +1742,7 @@ test("61. at start, one line says what the other agents' setups gave every agent
   try {
     void h.app.start("claude", true);
     const f = await h.frame((f) => f.includes("new session"));
-    expect(f).toContain("every agent gets the others' setup: 2 MCP servers (claude 1, cursor 1) and 1 skill");
+    expect(f).toContain("shared across agents: 2 MCP servers (claude 1, cursor 1), 1 skill");
     await h.send("hi");
     await h.frame((f) => f.includes("got: "));
     // Claude (no systemPrompt slot in the fake) gets Codex's skill in its first message, not its own freecad server.
@@ -1804,4 +1805,79 @@ test("62. /mcp lists the agent's servers with their status and the shared ones; 
     process.env.CODEMAX_SHARE_HOME = prev;
     await h.cleanup();
   }
+}, 30000);
+
+test("63. /mcp → Authenticate on a server that needs it opens the sign-in page in the browser and reports when it is done", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const home = mkdtempSync(join(tmpdir(), "codemax-mcp-auth-home-"));
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({ mcpServers: { agentmail: { type: "stdio", command: "agentmail-mcp", args: [] } } })); // stdio: the fake agent advertises no http
+  const prev = process.env.CODEMAX_SHARE_HOME;
+  process.env.CODEMAX_SHARE_HOME = home;
+  const calls: any[] = [];
+  const h = await harness({
+    claude: async (text, ctx) => {
+      if (text === "/mcp") return ctx.say("**MCP servers:** 1 (1 needs authentication)\n\n**Needs authentication**\n- `agentmail`");
+      await ctx.say(`got: ${text}`);
+    },
+  }, {}, undefined, { claude: { session: {}, configCalls: calls } });
+  const opened: string[] = [];
+  h.app.openUrl = (u) => (opened.push(u), true);
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    const app: any = h.app;
+    // Stand in for the adapter: once the server is passed over ACP, it sends the sign-in URL, then the completion.
+    const engine: any = app.active.engine;
+    const realReload = engine.reloadMcp.bind(engine);
+    engine.reloadMcp = async (servers: any[], disabled: string[]) => {
+      await realReload(servers, disabled);
+      if (servers.some((s) => s.name === "agentmail")) {
+        const r = await engine.onElicitation({ mode: "url", sessionId: "s", message: "Authenticate with MCP server agentmail", url: "https://auth.example/authorize", elicitationId: "e1" });
+        if (r.action === "accept") engine.emit({ type: "url_done", id: "e1", server: "agentmail", ok: true });
+      }
+    };
+    await h.send("/mcp authenticate agentmail");
+    const f = await h.frame((f) => f.includes("agentmail signed in"));
+    expect(opened).toEqual(["https://auth.example/authorize"]);
+    expect(f).toContain("sign in to agentmail in the browser that just opened");
+    expect(calls.some((c) => c.method === "session/load" && c.mcpServers.includes("agentmail"))).toBe(true); // its own config passed over ACP
+  } finally {
+    process.env.CODEMAX_SHARE_HOME = prev;
+    await h.cleanup();
+  }
+}, 30000);
+
+test("64. an agent's own todo tool (OpenCode todowrite, Cursor updateTodos) is shown as the task list, never as a tool row", async () => {
+  const h = await harness({
+    claude: async (_t, ctx) => {
+      // The live order: the first call carries no list (Cursor's `{_toolName}`, OpenCode's `{}`), the update brings it.
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "td1", title: "Update TODOs", kind: "other", status: "in_progress", rawInput: { _toolName: "updateTodos" } });
+      await upd(ctx, { sessionUpdate: "tool_call_update", toolCallId: "td1", title: "Update TODOs: Read phone code", status: "completed", rawInput: { _toolName: "updateTodos", todos: [{ id: "a", content: "Read phone code", status: "TODO_STATUS_COMPLETED" }, { id: "b", content: "Wire the server", status: "TODO_STATUS_IN_PROGRESS" }, { id: "c", content: "Ship it", status: "TODO_STATUS_PENDING" }] } });
+      await ctx.say("Working through it.");
+      await Bun.sleep(250); // long enough for a frame with the first list
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "td2", title: "todowrite", kind: "other", status: "in_progress", rawInput: {} });
+      await upd(ctx, { sessionUpdate: "tool_call_update", toolCallId: "td2", title: "3 todos", status: "completed", rawInput: { todos: [{ content: "Read phone code", status: "completed", priority: "high" }, { content: "Wire the server", status: "completed", priority: "high" }, { content: "Ship it", status: "in_progress", priority: "low" }] } });
+      // A real tool call with `items` keeps its row.
+      await upd(ctx, { sessionUpdate: "tool_call", toolCallId: "li1", title: "linear_create_issues", kind: "other", status: "completed", rawInput: { items: [{ title: "Bug 1", status: "open" }] } });
+      await ctx.say("Nearly there.");
+    },
+  });
+  try {
+    void h.app.start("claude", true);
+    await h.frame((f) => f.includes("new session"));
+    await h.send("do the todo");
+    let f = await h.frame((f) => f.includes("Working through it."));
+    expect(f).toContain("3 tasks (1 done, 1 in progress, 1 open)");
+    expect(f).toContain("◼ Wire the server");
+    expect(f).not.toContain("Update TODOs"); // no tool row, not even for the empty first call
+    f = await h.frame((f) => f.includes("Nearly there."));
+    expect(f).toContain("3 tasks (2 done, 1 in progress, 0 open)");
+    expect(f).not.toContain("todowrite");
+    expect(f).toContain("linear_create_issues");
+    const { todoPlan } = await import("../src/engines/acp.ts");
+    expect(todoPlan({ command: "ls" })).toBeNull();
+    expect(todoPlan({ todos: [] })).toBeNull();
+    expect(todoPlan({ items: [{ title: "x", status: "DONE" }] }, "create_issues")).toBeNull(); // `items` only on a todo tool
+    expect(todoPlan({ tasks: [{ title: "x", status: "DONE" }] }, "task_list")).toEqual([{ content: "x", status: "completed", priority: undefined }]);
+  } finally { await h.cleanup(); }
 }, 30000);

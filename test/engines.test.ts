@@ -618,3 +618,57 @@ test("/mcp over the protocols: Claude's answers are captured, never shown; a rel
   expect(notes[0]).toContain("MCP server notion failed to start: login needed");
   await c.close();
 });
+
+test("MCP sign-in: a URL elicitation is declined unless you asked; /mcp authenticate passes the server, accepts the URL and reports the browser; completion is an event", async () => {
+  const { clientStream, agentStream } = pipePair();
+  let agentConn!: AgentSideConnection;
+  const loads: any[] = [];
+  let elicit = 0;
+  new AgentSideConnection((conn): Agent => {
+    agentConn = conn;
+    return {
+      async initialize() { return { protocolVersion: 1, agentInfo: { name: "claude", version: "1" }, agentCapabilities: { loadSession: true, mcpCapabilities: { http: true, sse: true } }, authMethods: [] } as any; },
+      async newSession() { return { sessionId: "s1" } as any; },
+      async loadSession(p: any) {
+        loads.push(p.mcpServers.map((s: any) => s.name));
+        // Like the adapter: a server needing auth, passed over ACP, gets an OAuth URL elicitation at setup.
+        if (p.mcpServers.some((s: any) => s.name === "agentmail")) setTimeout(() => void conn.createElicitation({ mode: "url", sessionId: "s1", message: "Authenticate with MCP server agentmail", url: "https://auth.example/authorize?x=1", elicitationId: `e${++elicit}` } as any).then((r: any) => void (r.action === "accept" && setTimeout(() => conn.completeElicitation({ elicitationId: `e${elicit}` } as any), 20))), 5);
+        return {} as any;
+      },
+      async authenticate() { return {}; },
+      async prompt() { return { stopReason: "end_turn" }; },
+      async cancel() {},
+    };
+  }, agentStream);
+  const e = new AcpEngine({ agent: "claude", name: "Claude Code", cmd: [], stream: clientStream });
+  const events: any[] = [];
+  e.onEvent((x) => (x.type === "open_url" || x.type === "url_done") && events.push(x));
+  await e.start({ cwd: "/tmp" });
+  // Unasked: the agent offers a sign-in URL (e.g. at start): mentioned, not opened, declined.
+  const r1 = await agentConn.createElicitation({ mode: "url", sessionId: "s1", message: "Authenticate with MCP server other", url: "https://auth.example/o", elicitationId: "e0" } as any);
+  expect((r1 as any).action).toBe("decline");
+  expect(events.pop()).toMatchObject({ type: "open_url", server: "other", auto: false });
+  // Asked: Claude's own server goes over ACP with its own config; the URL is accepted; completion arrives.
+  const own = { name: "agentmail", source: "claude", transport: { type: "http" as const, url: "https://mcp.agentmail.example", headers: {} } };
+  const line = await e.mcpAction!("authenticate", "agentmail", own);
+  expect(line).toContain("finish it in your browser");
+  expect(loads).toEqual([["agentmail"]]);
+  for (let i = 0; i < 100 && events.length < 2; i++) await Bun.sleep(5);
+  expect(events[0]).toMatchObject({ type: "open_url", server: "agentmail", auto: true, url: "https://auth.example/authorize?x=1" });
+  expect(events[1]).toMatchObject({ type: "url_done", server: "agentmail", ok: true });
+  await e.close();
+
+  const { transport } = codexFake((m, reply, n) => {
+    if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "th" } } });
+    else if (m.method === "mcpServer/oauth/login") { reply({ jsonrpc: "2.0", id: m.id, result: { authorizationUrl: "https://codex-auth.example/a" } }); setTimeout(() => n("mcpServer/oauthLogin/completed", { name: m.params.name, success: true, threadId: "th" }), 10); }
+  });
+  const c = new CodexEngine({ transport });
+  const cev: any[] = [];
+  c.onEvent((x) => (x.type === "open_url" || x.type === "url_done") && cev.push(x));
+  await c.start({ cwd: "/tmp" });
+  expect(await c.mcpAction!("authenticate", "notion")).toContain("finish it in your browser");
+  for (let i = 0; i < 100 && cev.length < 2; i++) await Bun.sleep(5);
+  expect(cev[0]).toMatchObject({ type: "open_url", server: "notion", auto: true, url: "https://codex-auth.example/a" });
+  expect(cev[1]).toMatchObject({ type: "url_done", server: "notion", ok: true });
+  await c.close();
+});

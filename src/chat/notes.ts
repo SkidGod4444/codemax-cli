@@ -85,7 +85,7 @@ export class NotePanel {
     if (this.expanded && body) {
       // At most half the screen; the rest of a very long note is cut (it is in the ledger).
       const room = Math.max(3, Math.floor(this.renderer.height / 2) - 4);
-      this.box.add(new TextRenderable(this.renderer, { content: styleMarkdown(body), wrapMode: "word", width: "100%", height: Math.min(room, body.split("\n").length + Math.ceil(body.length / Math.max(20, this.renderer.width - 6))), truncate: true } as any));
+      this.box.add(new TextRenderable(this.renderer, { content: styleMarkdown(body, Math.max(20, this.renderer.width - 6)), wrapMode: "word", width: "100%", height: Math.min(room, body.split("\n").length + Math.ceil(body.length / Math.max(20, this.renderer.width - 6))), truncate: true } as any));
     }
     const expand = body ? (this.expanded ? "1 collapse" : "1 expand") : null;
     if (this.paused) this.box.add(new TextRenderable(this.renderer, { content: `${this.mainName()} asked you something, so 1 · 2 · 0 are your answer for now; the note keys come back after you reply`, fg: C.dim, wrapMode: "word", width: "100%" }));

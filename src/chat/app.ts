@@ -50,6 +50,7 @@ import { whatsNew } from "../core/whatsnew.ts";
 import { MAKER, firstName, greeting } from "./greeting.ts";
 import { collectShared, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
 import { describeStatus, type McpStatus } from "../core/mcpstatus.ts";
+import { openInBrowser } from "../core/openurl.ts";
 import type { McpAction } from "../engines/types.ts";
 import { displayModelName, sortModels } from "./models.ts";
 import { fmtDateTime12, fmtTime12 } from "../core/time.ts";
@@ -265,6 +266,27 @@ export class ChatApp {
   checkBlockers: (agent: AgentId) => ReturnType<typeof blockers> = blockers;
   /** Copy-on-select target (tests swap it to keep the real clipboard untouched). */
   copyText: (text: string) => Promise<boolean> = (text) => copyToClipboard(this.renderer, text);
+  /** Opens a web page for an agent (an MCP sign-in); swapped in tests. */
+  openUrl: (url: string) => boolean = (url) => openInBrowser(url);
+  private signinSaid = new Set<string>();
+  private signinPending = new Set<string>();
+  private signinTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Servers that offered a sign-in you did not ask for: one dim line, once per server, all of them together. */
+  private mentionSignin(server: string) {
+    if (this.signinSaid.has(server)) return;
+    this.signinSaid.add(server);
+    this.signinPending.add(server);
+    if (this.signinTimer) return;
+    this.signinTimer = setTimeout(() => {
+      this.signinTimer = null;
+      const names = [...this.signinPending];
+      this.signinPending.clear();
+      if (!names.length) return;
+      const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0]!;
+      this.safely("signin-note", () => this.transcript.note(`${list} need${names.length === 1 ? "s" : ""} a sign-in · /mcp → Authenticate`, C.dim));
+    }, 300);
+  }
 
   constructor(
     readonly renderer: CliRenderer,
@@ -417,8 +439,10 @@ export class ChatApp {
     if (first !== agent) notes.push(`${agent} has no protocol engine here; starting ${first}`);
     for (const n of await recoverAwake({ ...defaultAwakeDeps(), interactive: (fn) => this.withTerminal(fn) }).catch(() => [])) notes.push(n);
     if (this.config.awake && this.config.awake !== "off") {
+      // The footer's "● awake" says it is on; at start only a failure or the lid-closed advice is worth a line.
       const st = await this.awake.set(this.config.awake).catch(() => null);
-      if (st) notes.push(st.mode === "off" ? "keep-awake could not be turned on" : `keeping this machine awake${st.lid ? ", lid closed included" : ""} (/awake off to stop)`, ...st.notes);
+      if (st && st.mode === "off") notes.push("keep-awake could not be turned on");
+      else if (st) notes.push(...st.notes.filter((n) => /lid closed/i.test(n)));
     }
     const updatedTo = process.env[UPDATED_TO_ENV];
     if (updatedTo !== undefined) {
@@ -432,7 +456,7 @@ export class ChatApp {
     const sh = this.refreshShared();
     if (sh.mcp.length || sh.skills.length) {
       const by = Object.entries(sh.mcp.reduce<Record<string, number>>((m, s) => ((m[s.source.split(":")[0]!] = (m[s.source.split(":")[0]!] ?? 0) + 1), m), {})).map(([k, v]) => `${k} ${v}`).join(", ");
-      notes.push(`every agent gets the others' setup: ${sh.mcp.length} MCP server${sh.mcp.length === 1 ? "" : "s"}${by ? ` (${by})` : ""} and ${sh.skills.length} skill${sh.skills.length === 1 ? "" : "s"}`);
+      notes.push(`shared across agents: ${sh.mcp.length} MCP server${sh.mcp.length === 1 ? "" : "s"}${by ? ` (${by})` : ""}, ${sh.skills.length} skill${sh.skills.length === 1 ? "" : "s"} · /mcp`);
     }
     for (const e of sh.errors.slice(0, 3)) notes.push(`could not read ${e.file.replace(HOME, "~")}: ${e.error.slice(0, 80)}`);
     debugEvent("app-start", this.debugInfo());
@@ -2713,7 +2737,9 @@ export class ChatApp {
       let line: string;
       if (row.own) {
         if (!a.engine.mcpAction) throw new Error(`${a.name} offers no way to ${action} its own server from here`);
-        line = await a.engine.mcpAction(action, row.name);
+        // Its own setup, from the config codemax read (the sign-in has to pass it over the protocol).
+        const own = this.shared.mcp.find((s) => s.name.toLowerCase() === row.name.toLowerCase());
+        line = await a.engine.mcpAction(action, row.name, own);
       } else {
         // A shared server: codemax changes what it passes, and the session is loaded again.
         const set = this.mcpDisabled.get(a.agent) ?? new Set<string>();
@@ -2722,7 +2748,7 @@ export class ChatApp {
         this.mcpDisabled.set(a.agent, set);
         if (action === "authenticate") {
           if (!a.engine.mcpAction) throw new Error(`${a.name} offers no login from here`);
-          line = await a.engine.mcpAction("authenticate", row.name);
+          line = await a.engine.mcpAction("authenticate", row.name, row.shared);
         } else {
           if (!a.engine.reloadMcp) throw new Error(`${a.name} cannot reload its session; /switch ${a.agent} restarts it`);
           await a.engine.reloadMcp(sharedFor(a.agent, this.shared).mcp, [...set]);
@@ -2802,24 +2828,27 @@ export class ChatApp {
       const resumed = !!resume && engine.session?.id === resume.id;
       active.replay = null;
       const version = this.detect.get(agent)?.version ?? info.version;
+      // The handoff order's model for this agent: on a handoff, and on a new session (a
+      // resumed one keeps whatever model you chose there). Set before the session rule, so
+      // the rule names the model that answers.
+      const want = o.model ?? (resumed ? undefined : this.chainEntry(agent)?.model);
+      let modelNote: string | undefined;
+      if (want && engine.setModel && info.currentModel !== want) {
+        try {
+          await engine.setModel(want);
+          info.currentModel = want;
+        } catch (e: any) {
+          modelNote = `could not use ${displayModelName(want, info.models)} on ${adapter.name} (${String(e?.message ?? e).slice(0, 120)}); staying on ${displayModelName(info.currentModel, info.models)}`;
+        }
+      }
       const model = info.currentModel ? ` · ${displayModelName(info.currentModel, info.models)}` : "";
       this.transcript.divider(`${adapter.name}${version ? ` ${version}` : ""}${model} · ${resumed ? "resumed" : "new session"}`);
+      if (modelNote) this.transcript.note(modelNote, C.warn);
       if (NO_PERMISSION_PROMPTS.has(agent)) this.transcript.note(grokPermissionNote() ?? `${adapter.name} acts without asking permission`, C.warn);
       else if (EDITS_WITHOUT_ASKING.has(agent)) this.transcript.note(`${adapter.name} edits files without asking (it asks only before shell commands), so its edits come without a prompt or diff here · /undo or Esc Esc puts the files back`, C.warn);
       else {
         const loose = selfApprovingMode(info.currentMode, info.modes);
-        if (loose) this.transcript.note(`${adapter.name} starts in ${loose.what} mode (its own settings): ${loose.effect}, so you won't see those prompts or their diffs. Shift+Tab or /mode to switch${loose.ask ? ` to "${loose.ask}"` : ""}.`, C.warn);
-      }
-      // The handoff order's model for this agent: on a handoff, and on a new session (a
-      // resumed one keeps whatever model you chose there).
-      const want = o.model ?? (resumed ? undefined : this.chainEntry(agent)?.model);
-      if (want && engine.setModel && info.currentModel !== want) {
-        try {
-          await engine.setModel(want);
-          this.transcript.note(`using ${displayModelName(want, info.models)} (handoff order)`);
-        } catch (e: any) {
-          this.transcript.note(`could not use ${displayModelName(want, info.models)} on ${adapter.name} (${String(e?.message ?? e).slice(0, 120)}); staying on ${displayModelName(info.currentModel, info.models)}`, C.warn);
-        }
+        if (loose) this.transcript.note(`${loose.what} mode (${adapter.name}'s own setting): ${loose.effect}, no prompts or diffs here · Shift+Tab to change`, C.warn);
       }
       this.setWorking(null);
       this.renderFooter();
@@ -3135,6 +3164,21 @@ export class ChatApp {
       case "log":
         if (e.level !== "info") debugEvent("agent-log", { agent: active.agent, level: e.level, message: e.message });
         if (e.level !== "info") this.transcript.note(`${active.name}: ${e.message}`, e.level === "error" ? C.error : C.dim);
+        break;
+      case "open_url": {
+        // An MCP server's sign-in page. Opened when you asked (/mcp → Authenticate); otherwise named, with the link.
+        const what = e.server ? `${e.server}` : "an MCP server";
+        if (e.auto) {
+          const opened = this.openUrl(e.url);
+          this.transcript.note(opened ? `${active.name}: sign in to ${what} in the browser that just opened · [${e.url.replace(/^https?:\/\//, "").slice(0, 60)}](${e.url}) · waiting for you to finish there` : `${active.name}: could not open a browser · open this to sign in to ${what}: [${e.url.slice(0, 80)}](${e.url})`, C.warn);
+        } else this.mentionSignin(what);
+        debugEvent("mcp-signin", { agent: active.agent, server: e.server, auto: e.auto });
+        break;
+      }
+      case "url_done":
+        debugEvent("mcp-signin-done", { agent: active.agent, server: e.server, ok: e.ok });
+        if (e.ok) this.transcript.note(`${e.server ?? "the server"} signed in · /mcp to check`, C.ok);
+        else this.transcript.error(`sign-in for ${e.server ?? "the server"} failed${e.error ? `: ${e.error.slice(0, 160)}` : ""}`);
         break;
       case "notice": {
         debugEvent("agent-notice", { agent: active.agent, level: e.level, title: e.title });
@@ -4235,6 +4279,7 @@ export class ChatApp {
     this.shellRun?.stop();
     for (const e of this.tempEngines) void e.close().catch(() => {});
     if (this.noteArmTimer) clearTimeout(this.noteArmTimer);
+    if (this.signinTimer) clearTimeout(this.signinTimer);
     this.term.close();
     this.subagents.destroy();
     this.switching = true;

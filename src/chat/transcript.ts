@@ -1,7 +1,7 @@
 import { debugEvent } from "../core/debuglog.ts";
 import { BoxRenderable, ScrollBoxRenderable, StyledText, TextRenderable, bold, dim, fg, italic, strikethrough, stringToStyledText, type CliRenderer, type TextChunk } from "@opentui/core";
 import { C, G } from "./theme.ts";
-import { styleMarkdown, styleToolOutput } from "./markdown.ts";
+import { styleInline, styleMarkdown, styleToolOutput } from "./markdown.ts";
 import { collapsedDiff, diffRows, isDiff, styleDiffRows } from "./diffview.ts";
 import { fmtTime12 } from "../core/time.ts";
 
@@ -133,7 +133,8 @@ export class Transcript {
   user(text: string, ts = Date.now()) {
     // Claude Code's look: a grey "❯" and your words, normal weight, on a grey band.
     const node = this.line(`${G.prompt} `, text, { fg: undefined, glyphFg: C.dim, gap: true, bg: C.userBg });
-    node.content = new StyledText([...stringToStyledText(text).chunks, fg(C.dimmer)(`  · ${fmtTime12(ts)}`)]);
+    // `code` in your message is coloured as Claude Code colours it; the rest stays as typed.
+    node.content = new StyledText([...styleInline(text), fg(C.dimmer)(`  · ${fmtTime12(ts)}`)]);
   }
 
   note(text: string, fg_: string = C.dim) {
@@ -174,8 +175,9 @@ export class Transcript {
     };
     const addToGroup = (id: string, title: string, status: string, cls: ToolClass) => {
       if (!group) {
-        const glyph = new TextRenderable(self.renderer, { id: `tg-${++self.n}`, content: `${G.bullet} `, width: 2, fg: C.dim, wrapMode: "none" });
-        const node = self.lineWithGlyph(glyph, "", { gap: true });
+        // No bullet: a dim line under the text column, as Claude Code shows "Read 3 files".
+        const glyph = new TextRenderable(self.renderer, { id: `tg-${++self.n}`, content: "  ", width: 2, fg: C.dim, wrapMode: "none" });
+        const node = self.lineWithGlyph(glyph, "", { gap: true, fg: C.dim });
         const items = new Map<string, { title: string; status: string; cls: ToolClass }>();
         const c: Collapsible = { node, full: "", render: (_t, expanded) => groupText([...items.values()], expanded) };
         self.collapsibles.push(c);
@@ -194,7 +196,7 @@ export class Transcript {
         if (styleTimer) clearTimeout(styleTimer);
         styleTimer = null;
         try {
-          para.node.content = styleMarkdown(para.text);
+          para.node.content = styleMarkdown(para.text, self.textWidth());
         } catch {
           para.node.content = para.text;
         }
@@ -240,7 +242,7 @@ export class Transcript {
             styleTimer = null;
             // Styling runs on a timer, outside every handler: a failure keeps the plain text.
             try {
-              p.node.content = styleMarkdown(p.text);
+              p.node.content = styleMarkdown(p.text, self.textWidth());
             } catch {
               p.node.content = p.text;
             }
@@ -401,6 +403,11 @@ export class Transcript {
     return body;
   }
 
+  /** Columns a paragraph's text has: the transcript's padding and the bullet column taken off. */
+  private textWidth(): number {
+    return Math.max(20, this.renderer.width - 4);
+  }
+
   private nested(text: string, fg_: string) {
     this.nestedNode(text, fg_);
     this.scrollToEnd();
@@ -525,11 +532,15 @@ function groupText(items: { title: string; status: string; cls: ToolClass }[], e
   let text = parts.join(", ");
   text = text.charAt(0).toUpperCase() + text.slice(1) + (running ? "…" : "");
   const failed = items.filter((i) => i.status === "failed").length;
-  const chunks: TextChunk[] = [...stringToStyledText(text).chunks];
+  // The counts in bold, as Claude Code shows "Read **3** files".
+  const chunks: TextChunk[] = [];
+  for (const piece of text.split(/(\d+)/)) {
+    if (/^\d+$/.test(piece)) chunks.push(bold(piece));
+    else if (piece) chunks.push(...stringToStyledText(piece).chunks);
+  }
   if (failed) chunks.push(fg(C.error)(` · ${failed} failed`));
   if (!expanded) {
-    chunks.push(dim(" (ctrl+o to expand)"));
-    // The latest step, so a long run of reads still shows what it is doing.
+    // The latest step, so a long run of reads still shows what it is doing (ctrl+o lists them all).
     const last = items.at(-1)!;
     if (running) chunks.push(...stringToStyledText("\n").chunks, fg(C.dimmer)(`  ${G.nest}  `), dim(last.title.replace(/\s+/g, " ").slice(0, 120)));
     return new StyledText(chunks);

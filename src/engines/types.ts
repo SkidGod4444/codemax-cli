@@ -16,6 +16,10 @@ export type EngineEvent =
   | SubagentEvent
   /** The agent asks the user something (Claude's AskUserQuestion, MCP forms). Answer with `answerQuestion`. */
   | { type: "question_request"; request: QuestionRequest }
+  /** The agent needs a web page opened (an MCP server's sign-in). `auto`: the user asked for it, open the browser; else just say so. */
+  | { type: "open_url"; id: string; url: string; message?: string; server?: string; auto: boolean }
+  /** The page's job is done (the sign-in finished). */
+  | { type: "url_done"; id: string; server?: string; ok: boolean; error?: string }
   | { type: "plan"; entries: { content: string; status: string; priority?: string }[] }
   | { type: "mode"; modeId: string }
   | { type: "commands"; commands: { name: string; description?: string }[] }
@@ -197,8 +201,8 @@ export interface Engine {
   setMode?(modeId: string): Promise<void>;
   /** The agent's MCP servers and how they are doing (/mcp); null when the agent reports nothing. */
   mcpStatus?(): Promise<import("../core/mcpstatus.ts").McpStatus[] | null>;
-  /** Reconnect, enable, disable or authenticate one of the agent's own servers; resolves to a line to show, rejects when the agent cannot. */
-  mcpAction?(action: McpAction, name: string): Promise<string>;
+  /** Reconnect, enable, disable or authenticate one of the agent's own servers; resolves to a line to show, rejects when the agent cannot. `config` is the server's own setup, when codemax has it (an authenticate may need to pass it over the protocol). */
+  mcpAction?(action: McpAction, name: string, config?: import("../core/share.ts").SharedMcpServer): Promise<string>;
   /** The shared servers changed (one disabled or enabled, or a reconnect): load the session again with the new list. */
   reloadMcp?(servers: import("../core/share.ts").SharedMcpServer[], disabled: string[]): Promise<void>;
   setModel?(modelId: string): Promise<void>;

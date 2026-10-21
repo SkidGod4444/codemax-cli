@@ -110,8 +110,13 @@ export class AcpEngine implements Engine {
     const stream = this.opts.stream ?? this.spawn(o.cwd);
     const client: Client = {
       requestPermission: (p) => this.onPermission(p),
-      // Form questions only: codemax shows them in its own dialog. URL elicitations are not advertised.
+      // Form questions open codemax's dialog; a URL one (an MCP server's sign-in) opens the browser when you asked for it.
       createElicitation: (p) => this.onElicitation(p) as any,
+      completeElicitation: async (p: any) => {
+        const server = this.urlServers.get(String(p?.elicitationId)) ;
+        this.urlServers.delete(String(p?.elicitationId));
+        this.emit({ type: "url_done", id: String(p?.elicitationId), server, ok: true });
+      },
       sessionUpdate: ({ sessionId, update }) => {
         // Another session on this connection is a spawned agent (Cursor, Grok): its steps
         // are its activity, never part of the main transcript.
@@ -137,7 +142,7 @@ export class AcpEngine implements Engine {
     this.instructions = o.instructions?.trim() || undefined;
     this.shared = o.mcpServers ?? [];
     this.mcpDisabled = new Set(o.mcpDisabled ?? []);
-    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, ...(o.questions === false ? {} : { elicitation: { form: {} } }) } });
+    const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, elicitation: { url: {}, ...(o.questions === false ? {} : { form: {} }) } } });
 
     let sessionId: string;
     let modes: any;
@@ -321,16 +326,38 @@ export class AcpEngine implements Engine {
         this.noteMessageId(u.messageId);
         if (u.content?.type === "text") this.emit({ type: "thought_delta", text: u.content.text, messageId: u.messageId });
         break;
-      case "tool_call":
+      case "tool_call": {
         this.rememberDiff(u);
         this.trackSubagent(u, true);
+        // An agent's own todo tool (OpenCode's todowrite, Cursor's updateTodos, Grok's and
+        // Antigravity's task lists) is its plan: shown as the task list, as the Claude adapter
+        // already does for TodoWrite, never as a tool row.
+        // Live, the first call often carries no list yet (Cursor's `{_toolName: "updateTodos"}`,
+        // OpenCode's `todowrite` with `{}`); the update brings it. The row is skipped either way.
+        const todo = todoPlan(u.rawInput, u.title);
+        if (todo || isTodoTool(u.rawInput, u.title)) {
+          this.planTools.add(u.toolCallId);
+          debugEvent("todo-plan", { agent: this.agent, entries: todo?.length ?? 0 });
+          if (todo) this.emit({ type: "plan", entries: todo });
+          break;
+        }
         this.emit({ type: "tool_call", id: u.toolCallId, title: u.title ?? u.toolCallId, kind: u.kind, status: mapStatus(u.status), detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
-      case "tool_call_update":
+      }
+      case "tool_call_update": {
         this.rememberDiff(u);
         this.trackSubagent(u, false);
+        if (this.planTools.has(u.toolCallId)) {
+          const todo = todoPlan(u.rawInput, u.title);
+          if (todo) {
+            debugEvent("todo-plan", { agent: this.agent, entries: todo.length, update: true });
+            this.emit({ type: "plan", entries: todo });
+          }
+          break;
+        }
         this.emit({ type: "tool_update", id: u.toolCallId, status: u.status ? mapStatus(u.status) : undefined, title: u.title, detail: summarize(u), input: u.rawInput, files: paths(u), ...full(u) });
         break;
+      }
       case "plan":
         this.emit({ type: "plan", entries: (u.entries ?? []).map((e: any) => ({ content: e.content, status: e.status, priority: e.priority })) });
         break;
@@ -468,10 +495,24 @@ export class AcpEngine implements Engine {
     return parsed;
   }
 
-  async mcpAction(action: import("./types.ts").McpAction, name: string): Promise<string> {
+  async mcpAction(action: import("./types.ts").McpAction, name: string, config?: import("../core/share.ts").SharedMcpServer): Promise<string> {
+    if (action === "authenticate") {
+      // The adapter starts a sign-in (a URL elicitation) only for servers passed over ACP, at
+      // session setup. So the server goes into the list (its own config, when it is the agent's
+      // own), and the session is loaded again. Verified live: the authorize URL arrives.
+      if (!this.shared.some((s) => s.name === name)) {
+        if (!config) throw new Error(`codemax has no setup for ${name} to start its sign-in with`);
+        this.shared = [...this.shared, config];
+      }
+      this.authWanted.add(name);
+      this.mcpDisabled.delete(name);
+      // An http/sse server only goes over to an agent that takes them (mcpCapabilities); otherwise nothing would happen.
+      if (!this.mcpServers(this.initResult).some((s: any) => s.name === name)) throw new Error(`${this.opts.name} does not take this kind of MCP server over its protocol, so codemax cannot start its sign-in; sign in inside ${this.opts.name} itself once`);
+      await this.reloadMcp(this.shared, [...this.mcpDisabled]);
+      return `sign-in started for ${name}: finish it in your browser`;
+    }
     if (!this.hasMcpCommand) throw new Error(`${this.opts.name} has no MCP commands over its protocol`);
-    // Authentication is what a reconnect starts for a server that needs it (the adapter's rule).
-    const verb = action === "authenticate" ? "reconnect" : action;
+    const verb = action;
     const text = await this.hiddenPrompt(`/mcp ${verb} ${name}`);
     return text.split(/\n\s*\n/)[0]!.replace(/\*\*/g, "").replace(/`/g, "").trim() || `${verb} sent`;
   }
@@ -640,7 +681,24 @@ export class AcpEngine implements Engine {
     if (u?.sessionUpdate === "tool_call" && u.title) this.emit({ type: "subagent", id: sessionId, activity: String(u.title) });
   }
 
+  /** Tool calls that were the agent's todo list (shown as the plan), so their updates stay off the transcript. */
+  private planTools = new Set<string>();
+  /** Servers whose sign-in you asked for (/mcp → Authenticate): their URL is opened; others are only mentioned. */
+  private authWanted = new Set<string>();
+  private urlServers = new Map<string, string | undefined>();
+
   private async onElicitation(p: any) {
+    if (p?.mode === "url" && typeof p.url === "string") {
+      // The Claude adapter: "Authenticate with MCP server <name>", a URL, and a completion notice later.
+      const server = String(p.message ?? "").match(/MCP server (.+?)\.?$/)?.[1];
+      const auto = !!server && this.authWanted.has(server);
+      const id = String(p.elicitationId ?? `url-${++this.permSeq}`);
+      this.urlServers.set(id, server);
+      debugEvent("url-elicitation", { agent: this.agent, server, auto });
+      this.emit({ type: "open_url", id, url: p.url, message: p.message ? String(p.message) : undefined, server, auto });
+      // Accepted when opened: the agent then waits for the sign-in to finish. Declined otherwise, so it does not wait on nothing.
+      return { action: auto ? "accept" : "decline" };
+    }
     if (p?.mode && p.mode !== "form") return { action: "decline" };
     const id = `ask-${++this.permSeq}`;
     const request = parseElicitation(id, p);
@@ -899,4 +957,29 @@ function formatInput(raw: unknown): string | undefined {
     lines.push(`${k}: ${val.length > 300 ? val.slice(0, 297) + "…" : val}`);
   }
   return lines.join("\n") || undefined;
+}
+
+/**
+ * A todo tool's input as plan entries, or null when the input is not a todo list. Accepts the
+ * shapes seen live: OpenCode `todos: [{content, status, priority}]`, Cursor `todos:
+ * [{id, content, status: "TODO_STATUS_IN_PROGRESS"}]`, and `tasks`/`items` with `title` or
+ * `description` instead of `content`. Statuses come back as Claude Code's words.
+ */
+export function todoPlan(input: any, title?: string): { content: string; status: string; priority?: string }[] | null {
+  // `todos` is always a todo list; `tasks` / `items` only on a tool named for it (an MCP tool
+  // creating issues with `items: [{title, status}]` is a real tool call and keeps its row).
+  const list = input?.todos ?? (isTodoTool(input, title) ? input?.tasks ?? input?.items : undefined);
+  if (!Array.isArray(list) || !list.length || !list.every((t) => t && typeof t === "object" && (t.content || t.title || t.description || t.text) && typeof t.status === "string")) return null;
+  return list.map((t: any) => {
+    const raw = String(t.status).toLowerCase().replace(/^todo_status_/, "").replace(/-/g, "_");
+    const status = /complete|done/.test(raw) ? "completed" : /progress|active|doing/.test(raw) ? "in_progress" : /cancel/.test(raw) ? "cancelled" : "pending";
+    return { content: String(t.content ?? t.title ?? t.description ?? t.text), status, priority: typeof t.priority === "string" ? t.priority : undefined };
+  });
+}
+
+/** A tool that is the agent's todo list, by name: Cursor's updateTodos, OpenCode's todowrite ("5 todos" titles), Claude's TodoWrite, task-list tools. */
+export function isTodoTool(input: any, title?: string): boolean {
+  const name = String(input?._toolName ?? input?.toolName ?? "");
+  const t = String(title ?? "");
+  return /^(update_?todos?|todo_?write|task_?list|update_?plan)$/i.test(name) || /^(todo_?write|update todos?\b|\d+ todos?$|task_?list)/i.test(t);
 }

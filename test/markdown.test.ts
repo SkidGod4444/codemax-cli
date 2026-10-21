@@ -103,3 +103,43 @@ test("long code is highlighted in cached pieces: same text back, and a growing b
   expect(performance.now() - t0).toBeLessThan(300);
   expect(highlightCode(code, "ts").some((c: any) => c.fg)).toBe(true);
 });
+
+test("tables are drawn with box lines like Claude Code's: header centred and bold, cells padded, code spans coloured, wide tables wrap to the width", async () => {
+  const { styleMarkdown } = await import("../src/chat/markdown.ts");
+  const md = "Summary:\n\n| File | Purpose |\n|---|:---:|\n| `src/auth.ts` | Exports **isExpired** |\n| src/util.ts | Helper |\n\nAfter.";
+  const s = styleMarkdown(md);
+  const text = s.chunks.map((c) => c.text).join("");
+  const lines = text.split("\n");
+  expect(lines.slice(2, 9)).toEqual([
+    "┌─────────────┬───────────────────┐",
+    "│    File     │      Purpose      │",
+    "├─────────────┼───────────────────┤",
+    "│ src/auth.ts │ Exports isExpired │", // code span coloured, no backticks; centred column (:---:)
+    "├─────────────┼───────────────────┤",
+    "│ src/util.ts │      Helper       │",
+    "└─────────────┴───────────────────┘",
+  ]);
+  expect(lines.slice(0, 2)).toEqual(["Summary:", ""]);
+  expect(lines.slice(9)).toEqual(["", "After."]);
+  expect(s.chunks.find((c) => c.text === "src/auth.ts")?.fg).toBeTruthy(); // code span inside a cell
+  expect(s.chunks.find((c) => c.text === "File")?.attributes).toBe(1); // bold header
+  // Too wide: the widest column wraps so the box fits in 40 columns.
+  const wide = styleMarkdown("| Name | Description |\n|---|---|\n| a | " + "word ".repeat(20).trim() + " |", 40);
+  const wl = wide.chunks.map((c) => c.text).join("").split("\n");
+  expect(Math.max(...wl.map((l) => Bun.stringWidth(l)))).toBeLessThanOrEqual(40);
+  expect(wl.filter((l) => l.startsWith("│ a") || l.startsWith("│  ")).length).toBeGreaterThan(1);
+  // Streaming: a header alone is text until its separator arrives; a partial last row never throws.
+  expect(styleMarkdown("| a | b |").chunks.map((c) => c.text).join("")).toBe("| a | b |");
+  expect(styleMarkdown("| a | b |\n|---|---|\n| 1 | 2").chunks.map((c) => c.text).join("")).toContain("│ 1 │ 2 │");
+});
+
+test("a git diff printed by a shell command (inside a fence, after other output) has no phantom 'No changes' file", async () => {
+  const { diffRows } = await import("../src/chat/diffview.ts");
+  const t = "```console\n$ git diff\ndiff --git a/src/auth.ts b/src/auth.ts\nindex 01c8b18..d9363be 100644\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1,3 +1,2 @@\n export function isExpired(exp: number, now = Date.now()) {\n-  if (exp < now) return true\n-  return false\n+  return exp < now\n }\ndiff --git a/src/util.ts b/src/util.ts\n--- a/src/util.ts\n+++ b/src/util.ts\n@@ -1 +1,3 @@\n export const greet = (n: string) => `hi ${n}`\n+\n+export const clamp = (n: number) => n\nTSC_OK\n```";
+  const rows = diffRows(t);
+  const summaries = rows.filter((r) => r.kind === "summary").map((r) => r.text);
+  expect(summaries).toEqual(["src/auth.ts · Added 1 line, removed 2 lines", "src/util.ts · Added 2 lines"]);
+  expect(rows[0]).toEqual({ kind: "note", text: "$ git diff" }); // what came before the diff, as is
+  expect(rows.some((r) => r.kind === "note" && /```/.test(r.text))).toBe(false);
+  expect(rows.some((r) => r.text === "TSC_OK")).toBe(true);
+});

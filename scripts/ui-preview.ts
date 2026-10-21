@@ -46,11 +46,12 @@ function fakeAgent() {
       await u({ sessionUpdate: "agent_thought_chunk", messageId: "t1", content: { type: "text", text: "The failing test is in auth; the expiry comparison is probably off by one. Read the check, then fix and rerun." } });
       await u({ sessionUpdate: "plan", entries: [{ content: "Find the failing assertion", status: "completed", priority: "high" }, { content: "Fix the token expiry check", status: "in_progress", priority: "high" }, { content: "Run the auth tests", status: "pending", priority: "medium" }] });
       await u({ sessionUpdate: "tool_call", toolCallId: "r1", title: "Read src/auth.ts", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "export function isExpired(exp: number, now = Date.now()) {\n  if (exp < now) return true\n  return false\n}" } }] });
+      await u({ sessionUpdate: "tool_call", toolCallId: "r2", title: "Read test/auth.test.ts", kind: "read", status: "completed", content: [{ type: "content", content: { type: "text", text: "expect(isExpired(now)).toBe(true)" } }] });
       await pause();
       await u({ sessionUpdate: "agent_message_chunk", messageId: "m1", content: { type: "text", text: "The check treats a token that expires **this exact millisecond** as valid." } });
       await u({ sessionUpdate: "tool_call", toolCallId: "e1", title: "Edit src/auth.ts", kind: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "@@ -1,4 +1,4 @@\n-  if (exp < now) return true\n+  if (exp <= now) return true" } }] });
       await u({ sessionUpdate: "tool_call", toolCallId: "b1", title: "Bash(bun test test/auth.test.ts)", kind: "execute", status: "failed", content: [{ type: "content", content: { type: "text", text: "error: snapshot mismatch in refresh.test.ts" } }] });
-      await u({ sessionUpdate: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "Fixed the off-by-one in `isExpired`. The auth tests pass; one unrelated snapshot in `refresh.test.ts` still fails." } });
+      await u({ sessionUpdate: "agent_message_chunk", messageId: "m2", content: { type: "text", text: "Fixed the off-by-one in `isExpired`. The auth tests pass; one unrelated snapshot in `refresh.test.ts` still fails.\n\n| File | Change |\n|---|---|\n| `src/auth.ts` | `<` became `<=` in the expiry check |\n| `test/auth.test.ts` | unchanged, passes |" } });
       await u({ sessionUpdate: "usage_update", used: 41200, size: 200000, cost: { amount: 0.12, currency: "USD" } });
       return { stopReason: "end_turn" };
     },
@@ -78,7 +79,7 @@ async function shoot(mode: "dark" | "light") {
     throw new Error("preview timed out:\n" + setup.captureCharFrame());
   };
   await until((f) => f.includes("new session"));
-  await setup.mockInput.typeText("fix the failing auth test");
+  await setup.mockInput.typeText("fix the failing auth test (run `bun test test/auth.test.ts` first)");
   setup.mockInput.pressEnter();
   await until((f) => f.includes("still fails") && f.includes("for "));
   await Bun.sleep(120);

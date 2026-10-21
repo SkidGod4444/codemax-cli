@@ -564,7 +564,7 @@ test("handoff order: agents and models first to last; at a limit the next one ta
     await h.send("work on the parser");
     f = await h.frame((f) => f.includes("codex did it"), 15000);
     expect(f).toContain("handing off to Codex · Small 4 (next in your handoff order)");
-    expect(f).toContain("using Small 4 (handoff order)");
+    expect(f).toMatch(/Codex[^\n]*Small 4 · new session/); // the session rule names the model that answers
     expect(models.set).toContainEqual({ agent: "codex", modelId: "small-4" });
     expect(h.prompts.at(-1)).toContain("work on the parser");
   } finally { await h.cleanup(); }
