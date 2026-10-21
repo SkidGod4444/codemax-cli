@@ -2622,6 +2622,8 @@ export class ChatApp {
   private mcpDisabled = new Map<AgentId, Set<string>>();
   /** Why the last /mcp list has no statuses (the agent was working, or reports none), for the rows. */
   private mcpNoStatus?: string;
+  /** The last /mcp list was taken while the agent worked (its own servers came from its config). */
+  private mcpBusy = false;
 
   // ---------- /mcp: the agent's MCP servers, as Claude Code's /mcp screen ----------
 
@@ -2666,12 +2668,13 @@ export class ChatApp {
       rows.push({ name: s.name, status: disabled.has(s.name) ? { ...s, status: "disabled" } : s, shared: sh, own: !sh });
       seen.add(s.name.toLowerCase());
     }
-    // No report (the agent is mid-turn, or its protocol has none): its own servers still come from the
-    // config codemax read, so they can be seen and signed in to (a user saw only the shared ones and thought
-    // the agent's were gone).
+    // Mid-turn the agent cannot answer (the Claude adapter's hidden /mcp prompt): its own servers still come
+    // from the config codemax read, so they can be seen and signed in to (a user saw only the shared ones and
+    // took the agent's for gone). Agents whose protocol reports nothing keep listing only the shared ones.
     const working = /working/i.test(statusError ?? "");
+    this.mcpBusy = working;
     const ownSource = nativeMcpSource(a.agent);
-    const own = status ? [] : this.shared.mcp.filter((s) => s.source === ownSource || (a.agent === "claude" && s.source.startsWith("plugin:")));
+    const own = working ? this.shared.mcp.filter((s) => s.source === ownSource || (a.agent === "claude" && s.source.startsWith("plugin:"))) : [];
     for (const s of own) {
       if (seen.has(s.name.toLowerCase())) continue;
       seen.add(s.name.toLowerCase());
@@ -2717,8 +2720,8 @@ export class ChatApp {
     const st = row.status?.status;
     const items: PaletteItem[] = [];
     const canAct = !!a.engine.mcpAction;
-    // Offered when the server needs it, and when nothing is known (the agent was working): the login is harmless on a server that is already signed in.
-    if (st === "needs-auth" || (st === undefined && canAct)) items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: st === "needs-auth" ? 5 : 2 });
+    // Offered when the server needs it, and when nothing is known because the agent was working: the login is harmless on a server that is already signed in.
+    if (st === "needs-auth" || (st === undefined && this.mcpBusy && canAct)) items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: st === "needs-auth" ? 5 : 2 });
     if (st === "disabled") items.push({ label: "Enable", description: row.own ? (canAct ? `${a.name} turns it back on` : `edit it in ${a.name}'s own config`) : "codemax passes it to the agent again", value: "enable", disabled: row.own && !canAct, weight: 4 });
     else items.push({ label: "Disable", description: row.own ? (canAct ? `${a.name} turns it off for this session` : `edit it in ${a.name}'s own config`) : "codemax stops passing it to the agent (this run)", value: "disable", disabled: row.own && !canAct, weight: 3 });
     if (st !== "disabled") items.push({ label: "Reconnect", description: row.own ? (canAct ? `${a.name} restarts the server` : `restart ${a.name} to reconnect its own servers`) : a.engine.reloadMcp ? "the session is loaded again with this server" : `restart ${a.name}`, value: row.own && !canAct ? "restart-agent" : !row.own && !a.engine.reloadMcp ? "restart-agent" : "reconnect", weight: 4 });
