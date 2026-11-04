@@ -1,7 +1,7 @@
 import { loadConfig, CONFIG_PATH, hotkeyLabel, saveConfigKey } from "./config.ts";
 import { defaultAwakeDeps, recoverAwake } from "./core/awake.ts";
 import { checkForUpdate, installKind, isNewer, RESTART_AGENT_ENV, RESTART_THREAD_ENV, updatePlan } from "./core/update.ts";
-import { platformArgv } from "./core/spawn.ts";
+import { platformCmd } from "./core/spawn.ts";
 import pkg from "../package.json" with { type: "json" };
 import { canonicalCwd } from "./core/paths.ts";
 import { resolve } from "node:path";
@@ -239,7 +239,7 @@ async function main(argv: string[]) {
       if (plan.manual) return console.log(plan.manual);
       console.log(`updating with ${plan.label} (${installKind().kind} install)\n`);
       for (const cmd of plan.cmd) {
-        const p = Bun.spawn(platformArgv(cmd), { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
+        const p = Bun.spawn({ ...platformCmd(cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
         if ((await p.exited) !== 0) {
           console.error(`\nupdate failed · run it yourself: ${plan.cmd.map((c) => c.join(" ")).join(" && ")}`);
           process.exit(1);

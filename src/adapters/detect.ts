@@ -1,15 +1,15 @@
 import type { DetectResult } from "./types.ts";
-import { platformArgv } from "../core/spawn.ts";
+import { platformCmd } from "../core/spawn.ts";
 
 export interface DetectDeps {
   which: (bin: string) => string | null;
   run: (argv: string[], timeoutMs: number) => Promise<{ code: number | null; out: string; timedOut?: boolean }>;
 }
 
-const defaultDeps: DetectDeps = {
+export const defaultDeps: DetectDeps = {
   which: (b) => Bun.which(b),
   run: async (argv, timeoutMs) => {
-    const p = Bun.spawn(platformArgv(argv), { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const p = Bun.spawn({ ...platformCmd(argv), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;

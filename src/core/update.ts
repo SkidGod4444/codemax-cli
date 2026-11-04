@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { CODEMAX_HOME, ensureDir } from "./paths.ts";
+import { platformCmd } from "./spawn.ts";
 
 /**
  * Update checks and self-update. At most every 12 hours (3 s timeout, never
@@ -141,7 +142,7 @@ export async function relaunch(agent: string | undefined, version: string | null
   if (thread) env[RESTART_THREAD_ENV] = thread;
   if (agent) env[RESTART_AGENT_ENV] = agent;
   else delete env[RESTART_AGENT_ENV];
-  const child = Bun.spawn(argv, { stdin: "inherit", stdout: "inherit", stderr: "inherit", env });
+  const child = Bun.spawn({ ...platformCmd(argv), stdin: "inherit", stdout: "inherit", stderr: "inherit", env });
   // The new codemax owns the terminal now: Ctrl+C is its key, and signals sent to this one are passed on.
   process.on("SIGINT", () => {});
   for (const sig of ["SIGTERM", "SIGHUP"] as const) process.on(sig, () => child.kill(sig));

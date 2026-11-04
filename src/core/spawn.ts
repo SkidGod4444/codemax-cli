@@ -6,12 +6,40 @@
  */
 export const IS_WINDOWS = process.platform === "win32";
 
-/** argv ready for Bun.spawn on this platform. */
-export function platformArgv(argv: string[]): string[] {
-  if (!IS_WINDOWS || argv.length === 0) return argv;
+/** Bun.spawn's `cmd` for argv on this platform, and how to pass it. Spread it into Bun.spawn's options. */
+export interface PlatformCmd {
+  cmd: string[];
+  windowsVerbatimArguments?: boolean;
+}
+
+export function platformCmd(argv: string[]): PlatformCmd {
+  if (!IS_WINDOWS || argv.length === 0) return { cmd: argv };
   const [bin, ...rest] = argv as [string, ...string[]];
   const path = Bun.which(bin) ?? bin;
-  return /\.(cmd|bat)$/i.test(path) ? ["cmd.exe", "/d", "/s", "/c", path, ...rest] : [path, ...rest];
+  if (!/\.(cmd|bat)$/i.test(path)) return { cmd: [path, ...rest] };
+  // The line goes to cmd.exe as written: Bun's own quoting puts quotes around a path with a
+  // space (C:\Users\neeraj kumar\…\codex.cmd), and `/s` then strips the first and last quote
+  // of the line, which split the path at the space ("'C:\Users\neeraj' is not recognized").
+  return { cmd: ["cmd.exe", "/d", "/s", "/c", `"${cmdLine(path, rest)}"`], windowsVerbatimArguments: true };
+}
+
+// cmd.exe metacharacters, escaped with ^ (as cross-spawn does, https://qntm.org/cmd).
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * The command line that runs a batch file (an npm or pnpm `.cmd` shim) with these arguments under
+ * `cmd.exe /d /s /c "<line>"`. The path is quoted (cmd.exe takes a quoted command name with spaces
+ * or parentheses); each argument is quoted for the program's own parser and its cmd.exe
+ * metacharacters escaped with ^, twice for a node_modules\.bin shim, whose %* cmd.exe reads again.
+ */
+export function cmdLine(path: string, args: string[]): string {
+  const twice = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(path);
+  const arg = (a: string) => {
+    let s = `"${a.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`.replace(CMD_META, "^$1");
+    if (twice) s = s.replace(CMD_META, "^$1");
+    return s;
+  };
+  return [`"${path}"`, ...args.map(arg)].join(" ");
 }
 
 /**

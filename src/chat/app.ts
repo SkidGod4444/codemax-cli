@@ -37,7 +37,7 @@ import { appendHistory, loadHistory } from "../core/history.ts";
 import { VERIFY_FIX_CAP, VERIFY_TIMEOUT_MS, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { platformArgv, SHELL_SPAWN, shellArgv, stopChildrenOnExit } from "../core/spawn.ts";
+import { platformCmd, SHELL_SPAWN, shellArgv, stopChildrenOnExit } from "../core/spawn.ts";
 import { safeDeep } from "../core/terminal.ts";
 import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
@@ -4090,7 +4090,7 @@ export class ChatApp {
     await this.withTerminal(async () => {
       process.stdout.write(`\ncodemax: updating with ${plan.label}\n\n`);
       for (const cmd of plan.cmd) {
-        const p = Bun.spawn(platformArgv(cmd), { stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
+        const p = Bun.spawn({ ...platformCmd(cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit", env: { ...process.env, ...(plan.env ?? {}) } });
         if ((await p.exited) !== 0) {
           ok = false;
           break;
@@ -4448,7 +4448,7 @@ async function copyToClipboard(renderer: CliRenderer, text: string): Promise<boo
   for (const cmd of tools) {
     if (!Bun.which(cmd[0]!)) continue;
     try {
-      const p = Bun.spawn(platformArgv(cmd), { stdin: "pipe", stdout: "ignore", stderr: "ignore" });
+      const p = Bun.spawn({ ...platformCmd(cmd), stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       p.stdin.write(text);
       await p.stdin.end();
       if ((await p.exited) === 0) return true;

@@ -3,7 +3,7 @@ import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PromptImage, QuestionAnswer, QuestionRequest, RewindPoint, StopReason, ToolStatus } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
-import { GROUP_SPAWN, killTree, platformArgv, trackChild } from "../core/spawn.ts";
+import { GROUP_SPAWN, killTree, platformCmd, trackChild } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
 import pkg from "../../package.json" with { type: "json" };
 
@@ -120,7 +120,7 @@ export class CodexEngine implements Engine {
   }
 
   private spawn(cwd: string) {
-    const proc = trackChild(Bun.spawn(platformArgv(this.opts.cmd ?? ["codex", "app-server"]), { ...GROUP_SPAWN, cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
+    const proc = trackChild(Bun.spawn({ ...platformCmd(this.opts.cmd ?? ["codex", "app-server"]), ...GROUP_SPAWN, cwd, env: agentEnv(), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {

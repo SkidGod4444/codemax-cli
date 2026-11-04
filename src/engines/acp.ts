@@ -7,7 +7,7 @@ import type { AgentId } from "../adapters/types.ts";
 import type { Engine, EngineEvent, EngineInfo, EngineOption, EngineSessionRef, EngineStartOptions, PermissionRequest, PlanLimit, PromptImage, QuestionAnswer, RewindPoint, StopReason } from "./types.ts";
 import { elicitationResponse, parseElicitation } from "./elicitation.ts";
 import { agentEnv } from "./env.ts";
-import { GROUP_SPAWN, IS_WINDOWS, killTree, platformArgv, trackChild } from "../core/spawn.ts";
+import { GROUP_SPAWN, IS_WINDOWS, killTree, platformCmd, trackChild } from "../core/spawn.ts";
 import { classifyError } from "./errors.ts";
 
 export interface UsageSample {
@@ -242,8 +242,8 @@ export class AcpEngine implements Engine {
   }
 
   private spawn(cwd: string): Stream {
-    const argv = this.opts.plainPipes && !IS_WINDOWS ? ["/bin/sh", "-c", 'cat | "$@" | cat', "sh", ...this.opts.cmd] : platformArgv(this.opts.cmd);
-    const proc = trackChild(Bun.spawn(argv, { ...GROUP_SPAWN, cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
+    const cmd = this.opts.plainPipes && !IS_WINDOWS ? { cmd: ["/bin/sh", "-c", 'cat | "$@" | cat', "sh", ...this.opts.cmd] } : platformCmd(this.opts.cmd);
+    const proc = trackChild(Bun.spawn({ ...cmd, ...GROUP_SPAWN, cwd, env: agentEnv(this.opts.env), stdin: "pipe", stdout: "pipe", stderr: "pipe" }));
     this.proc = proc;
     void (async () => {
       for await (const chunk of proc.stderr as ReadableStream<Uint8Array>) {

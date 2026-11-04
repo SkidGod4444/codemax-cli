@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CODEMAX_HOME } from "../core/paths.ts";
-import { IS_WINDOWS, platformArgv } from "../core/spawn.ts";
+import { IS_WINDOWS, platformCmd } from "../core/spawn.ts";
 
 /**
  * Antigravity CLI (`agy`, Google's successor to Gemini CLI) has no ACP mode of
@@ -113,7 +113,7 @@ export function agyOnlyModels(acp: { id: string }[], run: () => Promise<string> 
 
 async function defaultAgyModels(): Promise<string> {
   if (!Bun.which("agy")) return "";
-  const p = Bun.spawn(platformArgv(["agy", "models"]), { stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+  const p = Bun.spawn({ ...platformCmd(["agy", "models"]), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
   const timer = setTimeout(() => p.kill(), 8000);
   const out = await new Response(p.stdout).text();
   clearTimeout(timer);
