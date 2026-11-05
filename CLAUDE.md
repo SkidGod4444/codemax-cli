@@ -22,6 +22,8 @@ cd web && bun run lint && bunx tsc --noEmit && bun run build
 ## Layout
 
 - `src/cli.ts` entry and subcommands. `src/config.ts` reads `~/.codemax/config.json`.
+- `src/serve.ts` is `codemax serve`: codemax as a library for another program (EditMax first), NDJSON on stdin/stdout, no terminal. The agent runs over the same ACP / app-server protocol as the chat UI, so permission requests still exist; the host's policy answers them (default: allow only the host's own MCP tools, refuse edits, shell and everything else). `test/serve.test.ts` drives it with a scripted ACP agent. Codex asks for MCP tool approval through `mcpServer/elicitation/request` with `_meta.codex_approval_kind = "mcp_tool_call"`; `CodexEngine.onMcpForm` turns that into a permission request (declining it is what Codex reports as "user rejected MCP tool call").
+- `.github/workflows/release.yml` attaches compiled binaries (`codemax-<platform>` + `.sha256`) to a `vX.Y.Z` tag's release; macOS ones are built and ad-hoc signed on macOS. EditMax's auto-updater downloads `codemax-darwin-<arch>` from the latest release. codemax itself carries no API-key engine (one was written and removed on 2026-11-05; EditMax has it in its own sidecar): subscriptions only.
 - `src/engines/` one engine per agent protocol, all emitting one normalized event stream (`types.ts`). `acp.ts` is the generic ACP client (Claude via `@agentclientprotocol/claude-agent-acp` (formerly `@zed-industries/claude-code-acp`), OpenCode, Grok, Cursor, Antigravity). `codex.ts` speaks native `codex app-server` JSON-RPC. `env.ts` builds every agent's environment.
 - `src/chat/` the OpenTUI chat UI: transcript, slash palette, permission dialog, markdown and diff styling, theme.
 - `src/core/` ledger, handoff brief, usage and pricing, budgets, checkpoints, `@file`, doctor, quota.
@@ -35,7 +37,7 @@ cd web && bun run lint && bunx tsc --noEmit && bun run build
 
 These come straight from the project owner. Do not offer options that weaken them.
 
-- **No one-shot headless modes.** Never drive agents with `claude -p`, `codex exec`, `opencode run` and similar. They auto-approve and drop permission prompts. Agents run only over interactive protocols (ACP, Codex app-server) where permission requests reach the user.
+- **No one-shot headless modes.** Never drive agents with `claude -p`, `codex exec`, `opencode run` and similar. They auto-approve and drop permission prompts. Agents run only over interactive protocols (ACP, Codex app-server) where permission requests reach the user. `codemax serve` (2026-11-05, the owner's decision for apps that embed codemax) keeps this: it is the same protocol path, and permission requests reach the embedding program, whose policy must refuse anything that is not one of its own MCP tools.
 - **Subscriptions only.** `src/engines/env.ts` always strips vendor API-key variables. There is no opt-out. `codemax doctor --fix` removes keys from `~/.claude/settings.json`.
 - **No auto-approval.** Every new engine maps the agent's approval requests to `permission_request` events.
 - **Never touch the user's git state.** Checkpoints use a private index and `refs/codemax/checkpoints`.

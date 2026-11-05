@@ -30,6 +30,8 @@ export interface SharedMcpServer {
   /** Where it came from: "claude", "cursor", "codex", "opencode", "gemini", or "plugin:<name>". */
   source: string;
   transport: McpTransport;
+  /** The host vouches for this server (its own tools): agents that can trust a server skip approvals for its tools. */
+  trust?: boolean;
 }
 
 export interface SharedSkill {

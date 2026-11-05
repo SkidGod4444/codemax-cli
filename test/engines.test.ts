@@ -672,3 +672,47 @@ test("MCP sign-in: a URL elicitation is declined unless you asked; /mcp authenti
   expect(cev[1]).toMatchObject({ type: "url_done", server: "notion", ok: true });
   await c.close();
 });
+
+test("codex: an MCP tool approval (an elicitation with codex_approval_kind) is a permission request, and allowing it accepts the elicitation", async () => {
+  let toEngine: ((line: string) => void) | undefined;
+  const reply = (obj: object) => toEngine?.(JSON.stringify(obj));
+  const n = (method: string, params: object) => reply({ jsonrpc: "2.0", method, params });
+  const answers: any[] = [];
+  const transport = {
+    send(line: string) {
+      const m = JSON.parse(line);
+      queueMicrotask(() => {
+        if (m.method === "initialize") reply({ jsonrpc: "2.0", id: m.id, result: { userAgent: "codemax/0.160.0 (test)" } });
+        else if (m.method === "thread/start") reply({ jsonrpc: "2.0", id: m.id, result: { thread: { id: "main", model: "gpt-6.1-sol" } } });
+        else if (m.method === "model/list") reply({ jsonrpc: "2.0", id: m.id, result: { data: [], nextCursor: null } });
+        else if (m.method === "account/read") reply({ jsonrpc: "2.0", id: m.id, result: { account: null } });
+        else if (m.method === "turn/start") {
+          reply({ jsonrpc: "2.0", id: m.id, result: { turn: { id: "t1" } } });
+          reply({ jsonrpc: "2.0", id: 77, method: "mcpServer/elicitation/request", params: { threadId: "main", turnId: "t1", serverName: "editmax", mode: "form",
+            _meta: { codex_approval_kind: "mcp_tool_call", persist: ["session", "always"], tool_params: { seconds: 2 } },
+            message: 'Allow the editmax MCP server to run tool "set_playhead"?', requestedSchema: { type: "object", properties: {} } } });
+        } else if (m.id === 77) {
+          answers.push(m.result);
+          n("item/completed", { threadId: "main", item: { id: "x1", type: "mcpToolCall", server: "editmax", tool: "set_playhead", status: "completed" } });
+          n("turn/completed", { threadId: "main", turn: { id: "t1", status: "completed" } });
+        }
+      });
+    },
+    onLine(cb: (line: string) => void) { toEngine = cb; },
+    async close() {},
+  };
+  const { CodexEngine } = await import("../src/engines/codex.ts");
+  const engine = new CodexEngine({ transport } as any);
+  const events: any[] = [];
+  engine.onEvent((e) => {
+    events.push(e);
+    if (e.type === "permission_request") engine.answerPermission(e.request.id, "accept");
+  });
+  await engine.start({ cwd: "/tmp", questions: false });
+  expect(await engine.prompt("move the playhead")).toBe("end_turn");
+  const perm = events.find((e) => e.type === "permission_request");
+  expect(perm.request).toMatchObject({ title: "editmax/set_playhead", kind: "other", detail: '{"seconds":2}' });
+  expect(perm.request.options.map((o: any) => o.kind)).toEqual(["allow_once", "reject_once"]);
+  expect(events.some((e) => e.type === "question_request")).toBe(false);
+  expect(answers).toEqual([{ action: "accept", content: {} }]);
+});

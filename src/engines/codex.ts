@@ -229,6 +229,9 @@ export class CodexEngine implements Engine {
         config[`${key}.url`] = t.url;
         if (Object.keys(t.headers).length) config[`${key}.http_headers`] = t.headers;
       }
+      // A trusted server's tools run without Codex's own approval step (otherwise Codex rejects
+      // mutating MCP calls made from its tool scripts, where it cannot ask).
+      if (s.trust) config[`${key}.default_tools_approval_mode`] = "auto";
     }
     if (this.shared.length) debugEvent("shared-mcp-given", { agent: "codex", servers: this.shared.length });
     return Object.keys(config).length ? { config } : {};
@@ -311,9 +314,9 @@ export class CodexEngine implements Engine {
         title: what,
         detail,
         diff,
+        // Once or not: Codex's "for this session" answer shape is not known, so it is not offered.
         options: [
           { id: "accept", label: "Allow once", kind: "allow_once" },
-          { id: "acceptForSession", label: "Allow for this session", kind: "allow_always" },
           { id: "decline", label: "Deny", kind: "reject_once" },
         ],
       };
@@ -355,6 +358,27 @@ export class CodexEngine implements Engine {
   /** An MCP server's form (Codex relays it); URL forms are declined, as over ACP. */
   private onMcpForm(m: any) {
     const p = m.params ?? {};
+    // Codex's own approval for an MCP tool call travels as an elicitation (_meta.codex_approval_kind);
+    // it is a permission, not a form: declining it is what "user rejected MCP tool call" means.
+    if (p._meta?.codex_approval_kind === "mcp_tool_call") {
+      const id = `perm-${++this.permSeq}`;
+      const tool = String(p.message ?? "").match(/tool "([^"]+)"/)?.[1] ?? "tool";
+      this.pendingApprovals.set(id, { rpcId: m.id, method: "mcpServer/elicitation/request" });
+      const params = p._meta.tool_params;
+      const request: PermissionRequest = {
+        id,
+        kind: "other",
+        title: `${p.serverName ?? "mcp"}/${tool}`,
+        detail: params && typeof params === "object" ? JSON.stringify(params).slice(0, 300) : undefined,
+        // Once or not: Codex's "for this session" answer shape is not known, so it is not offered.
+        options: [
+          { id: "accept", label: "Allow once", kind: "allow_once" },
+          { id: "decline", label: "Deny", kind: "reject_once" },
+        ],
+      };
+      this.emit({ type: "permission_request", request });
+      return;
+    }
     if (!this.questions || p.mode !== "form") return this.respond(m.id, { action: "decline" });
     const id = `ask-${++this.permSeq}`;
     const request = parseElicitation(id, p);
@@ -574,6 +598,10 @@ export class CodexEngine implements Engine {
     const a = this.pendingApprovals.get(requestId);
     if (!a) return;
     this.pendingApprovals.delete(requestId);
+    if (a.method === "mcpServer/elicitation/request") {
+      // An MCP tool approval answers in elicitation form.
+      return this.respond(a.rpcId, optionId === "accept" ? { action: "accept", content: {} } : { action: "decline" });
+    }
     this.transport?.send(JSON.stringify({ jsonrpc: "2.0", id: a.rpcId, result: { decision: optionId } }));
   }
 

@@ -44,6 +44,8 @@ usage:
   codemax debug [on|off|export [file]]       debug log of errors and odd behaviour (never your chat); export makes a file to send
   codemax usage [--all]                      tokens and API-equivalent cost per agent for this project (or every project)
   codemax prices [update] [<model>]          show price source and age, refresh the public list, or look up one model
+  codemax serve                              drive an agent for another program over NDJSON on stdin/stdout (no terminal)
+  codemax --version                          print the version
 
 inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
 set "hotkeys": ["ctrl+<key>", ...] in the config to change it.
@@ -79,6 +81,10 @@ async function main(argv: string[]) {
 
   if (args.includes("--help") || args.includes("-h") || cmd === "help") {
     process.stdout.write(HELP);
+    return;
+  }
+  if (args.includes("--version") || args.includes("-V") || cmd === "version") {
+    console.log(pkg.version);
     return;
   }
 
@@ -117,6 +123,11 @@ async function main(argv: string[]) {
         await runChat(config, ledger, cwd, agent, args.includes("--fresh"), !agentFlag && !resumed && !resumeId && !pickThread, !!agentFlag, pickThread, config.onboarded !== true);
       }
       process.exit(0);
+    }
+    case "serve": {
+      const { runServe } = await import("./serve.ts");
+      await runServe();
+      return;
     }
     case "debug": {
       const sub = args[0] ?? "";
