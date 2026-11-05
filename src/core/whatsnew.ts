@@ -6,6 +6,10 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.22": [
+    "Release binaries for macOS, Linux and Windows on every tag",
+    "EditMax auto-updates to this release and rolls back if it breaks",
+  ],
   "0.1.21": [
     "codemax serve: other apps embed codemax (EditMax is the first)",
     "Codex: MCP tool approvals reach you instead of being rejected",
