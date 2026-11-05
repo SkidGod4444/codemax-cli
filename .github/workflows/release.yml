@@ -17,16 +17,26 @@ permissions:
 
 jobs:
   build:
+    # One native runner per binary: bun can only compile for the platform whose @opentui/core
+    # native package is installed, and macOS binaries must be ad-hoc signed on macOS.
     strategy:
       fail-fast: false
       matrix:
         include:
-          # macOS binaries are built and ad-hoc signed on macOS: an unsigned arm64 binary is killed at launch.
           - os: macos-latest
-            targets: "bun-darwin-arm64 bun-darwin-x64"
+            name: codemax-darwin-arm64
+          - os: macos-15-intel
+            name: codemax-darwin-x64
           - os: ubuntu-latest
-            targets: "bun-linux-x64 bun-linux-arm64 bun-windows-x64"
+            name: codemax-linux-x64
+          - os: ubuntu-24.04-arm
+            name: codemax-linux-arm64
+          - os: windows-latest
+            name: codemax-windows-x64.exe
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,24 +53,16 @@ jobs:
       - name: Build
         run: |
           mkdir -p out
-          for t in ${{ matrix.targets }}; do
-            name="codemax-${t#bun-}"
-            [ "${t#bun-windows}" != "$t" ] && name="$name.exe"
-            bun build --compile --minify --target="$t" src/cli.ts --outfile "out/$name"
-            if [ "$RUNNER_OS" = "macOS" ]; then codesign --force --sign - "out/$name"; fi
-            (cd out && shasum -a 256 "$name" > "$name.sha256")
-          done
-          ls -l out
-      - name: The binary for this runner runs
-        run: |
-          case "$RUNNER_OS" in
-            macOS) bin=out/codemax-darwin-arm64;;
-            *) bin=out/codemax-linux-x64;;
-          esac
-          "$bin" --version
+          bun build --compile --minify src/cli.ts --outfile "out/${{ matrix.name }}"
+          if [ "$RUNNER_OS" = "macOS" ]; then codesign --force --sign - "out/${{ matrix.name }}"; fi
+          cd out
+          if command -v sha256sum >/dev/null; then sha256sum "${{ matrix.name }}" > "${{ matrix.name }}.sha256"; else shasum -a 256 "${{ matrix.name }}" > "${{ matrix.name }}.sha256"; fi
+          ls -l
+      - name: The binary runs
+        run: out/${{ matrix.name }} --version
       - uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.os }}
+          name: ${{ matrix.name }}
           path: out/*
 
   release:
