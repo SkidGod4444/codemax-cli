@@ -551,9 +551,11 @@ export class AcpEngine implements Engine {
    */
   private isolation(): { _meta?: any } {
     if (!this.isolated || this.opts.agent !== "claude") return {};
-    // An embedding app's tools can run for minutes (EditMax renders an export inside its tool call). Claude Code
-    // aborts a tool that sends no response or progress for 60 s, so the export failed every time.
-    const env = { CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(30 * 60_000) };
+    // An embedding app's tools can run for minutes (EditMax renders an export inside its tool call). Claude Code gives
+    // an HTTP MCP call 60 s by default (MCP_TOOL_TIMEOUT; the fetch then fails with "The operation timed out.") and
+    // 5 min of silence (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT), so every agent export of a 4K reel failed.
+    const thirtyMinutes = String(30 * 60_000);
+    const env = { MCP_TOOL_TIMEOUT: thirtyMinutes, CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: thirtyMinutes };
     return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env } } } };
   }
 
