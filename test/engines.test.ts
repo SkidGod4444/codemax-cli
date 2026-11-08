@@ -460,7 +460,7 @@ test("instructions: an ACP agent that advertises systemPrompt gets them appended
 });
 
 test("isolated: Claude sessions leave out the user's own setup (no setting sources, strict MCP); other agents and plain starts are unchanged", async () => {
-  const run = async (agent: string, isolated?: boolean) => {
+  const run = async (agent: string, isolated?: boolean, web?: boolean) => {
     const { clientStream, agentStream } = pipePair();
     const got: any = {};
     new AgentSideConnection((): Agent => ({
@@ -471,11 +471,12 @@ test("isolated: Claude sessions leave out the user's own setup (no setting sourc
       async cancel() {},
     }), agentStream);
     const e = new AcpEngine({ agent: agent as any, name: "Fake", cmd: [], stream: clientStream });
-    await e.start({ cwd: "/tmp", isolated });
+    await e.start({ cwd: "/tmp", isolated, web });
     await e.close();
     return got.meta;
   };
   expect(await run("claude", true)).toEqual({ claudeCode: { options: { settingSources: [], strictMcpConfig: true, env: { MCP_TOOL_TIMEOUT: "1800000", CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000" }, tools: ["ToolSearch"] } } });
+  expect((await run("claude", true, true)).claudeCode.options.tools).toEqual(["ToolSearch", "WebSearch", "WebFetch"]);
   expect(await run("claude")).toBeUndefined();
   expect(await run("gemini", true)).toBeUndefined();
 });

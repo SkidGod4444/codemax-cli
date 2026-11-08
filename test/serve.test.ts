@@ -6,7 +6,7 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 process.env.CODEMAX_HOME = mkdtempSync(join(tmpdir(), "codemax-serve-home-"));
 process.env.CODEMAX_FAKE_AGENT = "1";
-const { Serve, isMcpTool } = await import("../src/serve.ts");
+const { Serve, isMcpTool, isWebTool } = await import("../src/serve.ts");
 const { AcpEngine } = await import("../src/engines/acp.ts");
 const { DEFAULT_CONFIG } = await import("../src/config.ts");
 
@@ -23,6 +23,11 @@ function fakeAgent(seen: { mcpServers?: any; decisions: string[] }) {
     async prompt({ sessionId, prompt }) {
       const text = (prompt[0] as any).text as string;
       if (/limit/.test(text)) throw new Error("You've hit your usage limit");
+      if (/search the web/.test(text)) {   // Claude Code's WebSearch asks as ACP's "fetch" kind
+        const p = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "w1", title: "\"reel trends\"", kind: "fetch" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
+        seen.decisions.push(`web:${(p.outcome as any).optionId}`);
+        return { stopReason: "end_turn" };
+      }
       await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Adding a title. " } } as any });
       await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "mcp__editmax__add_text", kind: "other", status: "pending" } as any });
       const p1 = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "t1", title: "mcp__editmax__add_text" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
@@ -50,6 +55,38 @@ function lines(): { push: (s: string) => void; stream: AsyncIterable<string>; en
     stream: { async *[Symbol.asyncIterator]() { while (true) { if (queue.length) { yield queue.shift()!; continue; } if (done) return; await new Promise<void>((r) => (wake = r)); wake = null; } } },
   };
 }
+
+test("isWebTool: ACP's fetch kind or Claude Code's web tools by name, nothing else", () => {
+  expect(isWebTool("fetch", "\"reel trends 2026\"")).toBe(true);
+  expect(isWebTool(undefined, "WebSearch")).toBe(true);
+  expect(isWebTool("other", "WebFetch https://later.com")).toBe(true);
+  expect(isWebTool("execute", "date")).toBe(false);
+  expect(isWebTool("edit", "Write notes.md")).toBe(false);
+});
+
+test("serve: web search is allowed only when the host configures web: true", async () => {
+  for (const web of [false, true]) {
+    const seen = { decisions: [] as string[] } as { mcpServers?: any; decisions: string[] };
+    const out: any[] = [];
+    const io = lines();
+    const serve = new Serve({
+      config: { ...structuredClone(DEFAULT_CONFIG), order: ["fake"] },
+      engineFactory: () => new AcpEngine({ agent: "fake", name: "Fake", cmd: [], stream: fakeAgent(seen) }),
+      available: async (a) => a === "fake",
+      write: (l) => out.push(l),
+    });
+    const run = serve.run(io.stream);
+    const until = async (pred: (l: any) => boolean) => { const t0 = Date.now(); while (!out.some(pred)) { if (Date.now() - t0 > 3500) throw new Error(`timeout; got ${JSON.stringify(out).slice(0, 800)}`); await Bun.sleep(10); } return out.find(pred); };
+    io.push(JSON.stringify({ id: 1, method: "configure", params: { agent: "fake", cwd: mkdtempSync(join(tmpdir(), "codemax-web-")), mcp: [], allow: ["editmax"], web } }));
+    await until((l) => l.id === 1);
+    io.push(JSON.stringify({ id: 2, method: "prompt", params: { text: "search the web" } }));
+    await until((l) => l.id === 2);
+    expect(seen.decisions.filter((d) => d.startsWith("web:"))).toEqual([web ? "web:yes" : "web:no"]);
+    io.push(JSON.stringify({ method: "close" }));
+    io.end();
+    await run;
+  }
+});
 
 test("isMcpTool matches every agent's naming", () => {
   expect(isMcpTool("mcp__editmax__add_text", ["editmax"])).toBe(true);

@@ -141,6 +141,7 @@ export class AcpEngine implements Engine {
     this.conn = new ClientSideConnection(() => client, stream);
     this.instructions = o.instructions?.trim() || undefined;
     this.isolated = !!o.isolated;
+    this.web = !!o.web;
     this.shared = o.mcpServers ?? [];
     this.mcpDisabled = new Set(o.mcpDisabled ?? []);
     const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, elicitation: { url: {}, ...(o.questions === false ? {} : { form: {} }) } } });
@@ -544,6 +545,7 @@ export class AcpEngine implements Engine {
   }
 
   private isolated = false;
+  private web = false;
   /**
    * Claude Code's adapter reads per-session SDK options from `_meta.claudeCode.options`: no setting sources and a
    * strict MCP config keep the user's own skills, plugins, hooks and MCP servers out (EngineStartOptions.isolated),
@@ -558,8 +560,9 @@ export class AcpEngine implements Engine {
     const env = { MCP_TOOL_TIMEOUT: thirtyMinutes, CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: thirtyMinutes };
     // Only the app's own tools: Claude Code runs read-only shell commands (`date`, `ls`, `cat`) without asking, so an
     // embedded agent that "can only call EditMax's editing tools" ran `date` on the user's Mac. ToolSearch stays: it
-    // loads the app's deferred MCP tools.
-    const tools = ["ToolSearch"];
+    // loads the app's deferred MCP tools. With `web`, the agent also keeps its web search and page fetch, which reach
+    // the web, not this Mac.
+    const tools = this.web ? ["ToolSearch", "WebSearch", "WebFetch"] : ["ToolSearch"];
     return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env, tools } } } };
   }
 
