@@ -150,6 +150,12 @@ export interface EngineStartOptions {
    * otherwise once, ahead of the first message of a new session, never again.
    */
   instructions?: string;
+  /**
+   * Leave out the user's own agent setup (Claude Code: settings, skills, plugins, hooks and MCP servers from
+   * ~/.claude and the project), so only `mcpServers` load. `codemax serve` sets it: an embedding app's agent works
+   * with that app's tools, and a full personal setup cost EditMax 31 s to start and 58k tokens before a word.
+   */
+  isolated?: boolean;
   /** MCP servers from the other agents' setups, to load alongside this agent's own (src/core/share.ts). */
   mcpServers?: import("../core/share.ts").SharedMcpServer[];
   /** Names among `mcpServers` the user turned off for this session (/mcp). */

@@ -459,6 +459,27 @@ test("instructions: an ACP agent that advertises systemPrompt gets them appended
   await c.close();
 });
 
+test("isolated: Claude sessions leave out the user's own setup (no setting sources, strict MCP); other agents and plain starts are unchanged", async () => {
+  const run = async (agent: string, isolated?: boolean) => {
+    const { clientStream, agentStream } = pipePair();
+    const got: any = {};
+    new AgentSideConnection((): Agent => ({
+      async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", version: "1" }, agentCapabilities: {}, authMethods: [] } as any; },
+      async newSession(p: any) { got.meta = p._meta; return { sessionId: "s1" } as any; },
+      async authenticate() { return {}; },
+      async prompt() { return { stopReason: "end_turn" }; },
+      async cancel() {},
+    }), agentStream);
+    const e = new AcpEngine({ agent: agent as any, name: "Fake", cmd: [], stream: clientStream });
+    await e.start({ cwd: "/tmp", isolated });
+    await e.close();
+    return got.meta;
+  };
+  expect(await run("claude", true)).toEqual({ claudeCode: { options: { settingSources: [], strictMcpConfig: true } } });
+  expect(await run("claude")).toBeUndefined();
+  expect(await run("gemini", true)).toBeUndefined();
+});
+
 test("codex rate limits: account/rateLimits/updated becomes 5-hour and weekly windows; warnings become notices", async () => {
   const { codexWindows } = await import("../src/engines/codex.ts");
   const w = codexWindows({ primary: { usedPercent: 85, windowDurationMins: 300, resetsAt: 1800000000 }, secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: 1800500000 } });

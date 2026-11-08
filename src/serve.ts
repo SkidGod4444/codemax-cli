@@ -200,7 +200,7 @@ export class Serve {
     // Fresh by default: the host resumes with resume: "last" (this cwd's last session) or a session id.
     const last = this.ledger!.sessions()[agent];
     const prior = resume === "last" ? (last?.cwd === s.cwd ? last : undefined) : resume ? { agent, id: resume, cwd: s.cwd, startedAt: Date.now(), lastUsedAt: Date.now() } : undefined;
-    const info = await engine.start({ cwd: s.cwd, questions: false, instructions: this.instructions(), mcpServers: s.mcp, resume: prior });
+    const info = await engine.start({ cwd: s.cwd, questions: false, instructions: this.instructions(), mcpServers: s.mcp, resume: prior, isolated: true });
     this.info = info;
     // A permission mode that auto-approves (the user's own Claude Code setting) would bypass the
     // policy; the plain mode makes the agent ask, and the policy answers.

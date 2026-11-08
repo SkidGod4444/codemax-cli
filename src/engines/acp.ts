@@ -140,6 +140,7 @@ export class AcpEngine implements Engine {
     };
     this.conn = new ClientSideConnection(() => client, stream);
     this.instructions = o.instructions?.trim() || undefined;
+    this.isolated = !!o.isolated;
     this.shared = o.mcpServers ?? [];
     this.mcpDisabled = new Set(o.mcpDisabled ?? []);
     const init = await this.conn.initialize({ protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false, session: { notices: {} }, elicitation: { url: {}, ...(o.questions === false ? {} : { form: {} }) } } });
@@ -150,21 +151,21 @@ export class AcpEngine implements Engine {
     let config: any;
     if (o.resume) {
       try {
-        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
+        const r: any = await this.signedIn(init, () => this.conn!.loadSession({ sessionId: o.resume!.id, cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init), ...this.isolation() } as any));
         sessionId = o.resume.id;
         modes = r?.modes;
         models = r?.models;
         config = r?.configOptions;
       } catch (e: any) {
         this.emit({ type: "log", level: "warn", message: `resume failed (${e?.message ?? e}); starting a new session` });
-        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
+        const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init), ...this.isolation() } as any));
         sessionId = s.sessionId;
         config = s.configOptions;
         modes = s.modes;
         models = s.models;
       }
     } else {
-      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init) } as any));
+      const s: any = await this.signedIn(init, () => this.conn!.newSession({ cwd: o.cwd, mcpServers: this.mcpServers(init), ...this.systemPrompt(init), ...this.isolation() } as any));
       sessionId = s.sessionId;
       modes = s.modes;
       models = s.models;
@@ -523,7 +524,7 @@ export class AcpEngine implements Engine {
     this.shared = servers;
     this.mcpDisabled = new Set(disabled);
     const t0 = Date.now();
-    await this.conn.loadSession({ sessionId: this.session.id, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult) } as any);
+    await this.conn.loadSession({ sessionId: this.session.id, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult), ...this.isolation() } as any);
     debugEvent("mcp-reload", { agent: this.agent, servers: servers.length, disabled: disabled.length || undefined, ms: Date.now() - t0 });
   }
 
@@ -542,6 +543,15 @@ export class AcpEngine implements Engine {
     return out;
   }
 
+  private isolated = false;
+  /**
+   * Claude Code's adapter reads per-session SDK options from `_meta.claudeCode.options`: no setting sources and a
+   * strict MCP config keep the user's own skills, plugins, hooks and MCP servers out (EngineStartOptions.isolated).
+   */
+  private isolation(): { _meta?: any } {
+    return this.isolated && this.opts.agent === "claude" ? { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true } } } } : {};
+  }
+
   /** `systemPrompt` for a session request: only to an agent that advertises it (the spec requires that). */
   private systemPrompt(init: any): { systemPrompt?: unknown } {
     this.initResult = init;
@@ -556,8 +566,8 @@ export class AcpEngine implements Engine {
     const old = this.session.id;
     const { currentModel, currentMode } = this.info ?? {};
     const r: any = point.messageId
-      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult), _meta: { jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
-      : await this.conn.newSession({ cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult) } as any);
+      ? await this.conn.unstable_forkSession({ sessionId: old, cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult), ...this.isolation(), _meta: { ...this.isolation()._meta, jetbrains: { air: { fork: { version: 1, messageId: point.messageId } } } } } as any)
+      : await this.conn.newSession({ cwd: this.cwd, mcpServers: this.mcpServers(this.initResult), ...this.systemPrompt(this.initResult), ...this.isolation() } as any);
     this.session = { agent: this.agent, id: r.sessionId, cwd: this.cwd, startedAt: Date.now(), lastUsedAt: Date.now() };
     this.lastMessageId = point.messageId;
     this.idStale = false;
