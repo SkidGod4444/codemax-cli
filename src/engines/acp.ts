@@ -556,7 +556,11 @@ export class AcpEngine implements Engine {
     // 5 min of silence (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT), so every agent export of a 4K reel failed.
     const thirtyMinutes = String(30 * 60_000);
     const env = { MCP_TOOL_TIMEOUT: thirtyMinutes, CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: thirtyMinutes };
-    return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env } } } };
+    // Only the app's own tools: Claude Code runs read-only shell commands (`date`, `ls`, `cat`) without asking, so an
+    // embedded agent that "can only call EditMax's editing tools" ran `date` on the user's Mac. ToolSearch stays: it
+    // loads the app's deferred MCP tools.
+    const tools = ["ToolSearch"];
+    return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env, tools } } } };
   }
 
   /** `systemPrompt` for a session request: only to an agent that advertises it (the spec requires that). */

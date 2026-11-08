@@ -475,7 +475,7 @@ test("isolated: Claude sessions leave out the user's own setup (no setting sourc
     await e.close();
     return got.meta;
   };
-  expect(await run("claude", true)).toEqual({ claudeCode: { options: { settingSources: [], strictMcpConfig: true, env: { MCP_TOOL_TIMEOUT: "1800000", CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000" } } } });
+  expect(await run("claude", true)).toEqual({ claudeCode: { options: { settingSources: [], strictMcpConfig: true, env: { MCP_TOOL_TIMEOUT: "1800000", CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: "1800000" }, tools: ["ToolSearch"] } } });
   expect(await run("claude")).toBeUndefined();
   expect(await run("gemini", true)).toBeUndefined();
 });
