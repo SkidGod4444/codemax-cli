@@ -546,10 +546,15 @@ export class AcpEngine implements Engine {
   private isolated = false;
   /**
    * Claude Code's adapter reads per-session SDK options from `_meta.claudeCode.options`: no setting sources and a
-   * strict MCP config keep the user's own skills, plugins, hooks and MCP servers out (EngineStartOptions.isolated).
+   * strict MCP config keep the user's own skills, plugins, hooks and MCP servers out (EngineStartOptions.isolated),
+   * and a 30-minute MCP idle timeout lets the app's long tools finish.
    */
   private isolation(): { _meta?: any } {
-    return this.isolated && this.opts.agent === "claude" ? { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true } } } } : {};
+    if (!this.isolated || this.opts.agent !== "claude") return {};
+    // An embedding app's tools can run for minutes (EditMax renders an export inside its tool call). Claude Code
+    // aborts a tool that sends no response or progress for 60 s, so the export failed every time.
+    const env = { CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: String(30 * 60_000) };
+    return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env } } } };
   }
 
   /** `systemPrompt` for a session request: only to an agent that advertises it (the spec requires that). */
