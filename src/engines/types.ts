@@ -156,7 +156,7 @@ export interface EngineStartOptions {
    * with that app's tools, and a full personal setup cost EditMax 31 s to start and 58k tokens before a word.
    */
   isolated?: boolean;
-  /** With `isolated`: the agent keeps its web search and page fetch (Claude Code's WebSearch, WebFetch). */
+  /** With `isolated`: the agent keeps its web search (Claude Code's WebSearch), never page fetches (WebFetch). */
   web?: boolean;
   /** MCP servers from the other agents' setups, to load alongside this agent's own (src/core/share.ts). */
   mcpServers?: import("../core/share.ts").SharedMcpServer[];

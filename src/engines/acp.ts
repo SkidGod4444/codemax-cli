@@ -560,9 +560,9 @@ export class AcpEngine implements Engine {
     const env = { MCP_TOOL_TIMEOUT: thirtyMinutes, CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: thirtyMinutes };
     // Only the app's own tools: Claude Code runs read-only shell commands (`date`, `ls`, `cat`) without asking, so an
     // embedded agent that "can only call EditMax's editing tools" ran `date` on the user's Mac. ToolSearch stays: it
-    // loads the app's deferred MCP tools. With `web`, the agent also keeps its web search and page fetch, which reach
-    // the web, not this Mac.
-    const tools = this.web ? ["ToolSearch", "WebSearch", "WebFetch"] : ["ToolSearch"];
+    // loads the app's deferred MCP tools. With `web`, the agent also keeps its web search; never WebFetch, whose
+    // address a page's text could choose to carry project data out.
+    const tools = this.web ? ["ToolSearch", "WebSearch"] : ["ToolSearch"];
     return { _meta: { claudeCode: { options: { settingSources: [], strictMcpConfig: true, env, tools } } } };
   }
 

