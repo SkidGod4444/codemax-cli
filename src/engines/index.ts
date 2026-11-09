@@ -7,6 +7,8 @@ import { AcpEngine, type UsageSample } from "./acp.ts";
 import { CodexEngine } from "./codex.ts";
 import { ClaudeUsageTail } from "../transcripts/claude-usage.ts";
 import { antigravityServer } from "./antigravity.ts";
+import { which } from "../core/spawn.ts";
+import { IS_COMPILED } from "../core/update.ts";
 
 /** Grok writes ~/.grok/sessions/<encoded cwd>/<session>/usage.json with per-turn totals. */
 function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] } {
@@ -36,21 +38,39 @@ function grokUsageTail(cwd: string, sessionId: string): { read(): UsageSample[] 
   };
 }
 
-const CLAUDE_ADAPTER_PKG = "@agentclientprotocol/claude-agent-acp@0.93.0";
+export const CLAUDE_ADAPTER_PKG = "@agentclientprotocol/claude-agent-acp@0.93.0";
+
+/** How to start the Claude ACP adapter, what it needs in its environment, and whether bunx fetches it (first run: ~10 s). */
+export interface ClaudeAdapter {
+  cmd: string[];
+  env: Record<string, string>;
+  fetched: boolean;
+}
+
+export interface AdapterDeps {
+  which: (bin: string) => string | null;
+  exists: (path: string) => boolean;
+  execPath: string;
+  /** This is the compiled codemax: Bun is built in. */
+  compiled: boolean;
+}
+
+const adapterDeps = (): AdapterDeps => ({ which, exists: existsSync, execPath: process.execPath, compiled: IS_COMPILED });
 
 /**
- * Command for the Claude ACP adapter (it runs the user's own `claude`).
- * From a source checkout it is in node_modules; from the compiled binary it is
- * fetched once by bunx and cached.
+ * The Claude ACP adapter (it runs the user's own `claude`). From a source checkout it is in node_modules; otherwise bunx
+ * fetches it once and caches it. With no Bun on the machine, the compiled codemax does that itself: it is Bun, and
+ * BUN_BE_BUN=1 makes it act as the `bun` CLI. Apps ship that binary to Macs with neither Bun nor Node, where this
+ * returned nothing before 0.1.24 and Claude Code showed as "no protocol engine on this machine".
  */
-function claudeAdapterCmd(): string[] | null {
-  const runningOnBun = basename(process.execPath).toLowerCase().startsWith("bun");
+export function claudeAdapter(d: AdapterDeps = adapterDeps()): ClaudeAdapter | null {
+  const runningOnBun = basename(d.execPath).toLowerCase().startsWith("bun");
   if (process.platform !== "win32") {
     const candidates = [
       join(import.meta.dir, "..", "..", "node_modules", ".bin", "claude-agent-acp"),
       join(process.cwd(), "node_modules", ".bin", "claude-agent-acp"),
     ];
-    for (const c of candidates) if (existsSync(c)) return [c];
+    for (const c of candidates) if (d.exists(c)) return { cmd: [c], env: {}, fetched: false };
   }
   // The installed package's own entry, run with this Bun: works where .bin shims
   // do not (Windows) and when no `bun` is on PATH (installed through npm).
@@ -59,40 +79,46 @@ function claudeAdapterCmd(): string[] | null {
       const pkgJson = Bun.resolveSync("@agentclientprotocol/claude-agent-acp/package.json", import.meta.dir);
       const bin = JSON.parse(readFileSync(pkgJson, "utf8")).bin;
       const entry = typeof bin === "string" ? bin : bin?.["claude-agent-acp"];
-      if (entry && existsSync(join(dirname(pkgJson), entry))) return [process.execPath, join(dirname(pkgJson), entry)];
+      if (entry && d.exists(join(dirname(pkgJson), entry))) return { cmd: [d.execPath, join(dirname(pkgJson), entry)], env: {}, fetched: false };
     } catch {
       /* not installed next to codemax */
     }
   }
-  const onPath = Bun.which("claude-agent-acp");
-  if (onPath) return [onPath];
-  const bun = Bun.which("bun") ?? (runningOnBun ? process.execPath : null);
-  const bunx = Bun.which("bunx") ? [Bun.which("bunx")!] : bun ? [bun, "x"] : null;
-  return bunx ? [...bunx, CLAUDE_ADAPTER_PKG] : null;
+  const onPath = d.which("claude-agent-acp");
+  if (onPath) return { cmd: [onPath], env: {}, fetched: false };
+  const bun = d.which("bun") ?? (runningOnBun ? d.execPath : null);
+  const bunx = d.which("bunx") ? [d.which("bunx")!] : bun ? [bun, "x"] : null;
+  if (bunx) return { cmd: [...bunx, CLAUDE_ADAPTER_PKG], env: {}, fetched: true };
+  // `--bun`: run the adapter (a `#!/usr/bin/env node` script) on this Bun, so Node is not needed either. The variable
+  // reaches the adapter's own children too; `claude` ignores it (checked with 2.1.319).
+  if (d.compiled) return { cmd: [d.execPath, "x", "--bun", CLAUDE_ADAPTER_PKG], env: { BUN_BE_BUN: "1" }, fetched: true };
+  return null;
 }
 
 const factories: EngineFactory[] = [
   {
     agent: "claude",
-    available: async () => !!Bun.which("claude") && !!claudeAdapterCmd(),
-    create: () =>
-      new AcpEngine({
+    available: async () => !!which("claude") && !!claudeAdapter(),
+    create: () => {
+      const adapter = claudeAdapter()!;
+      return new AcpEngine({
         agent: "claude",
         name: "Claude Code",
-        cmd: claudeAdapterCmd()!,
-        env: { CLAUDE_CODE_EXECUTABLE: Bun.which("claude")! },
+        cmd: adapter.cmd,
+        env: { ...adapter.env, CLAUDE_CODE_EXECUTABLE: which("claude")! },
         forkAtMessage: true,
         usageTail: (s) => new ClaudeUsageTail(s.cwd, s.id),
-      }),
+      });
+    },
   },
   {
     agent: "codex",
-    available: async () => !!Bun.which("codex"),
+    available: async () => !!which("codex"),
     create: () => new CodexEngine(),
   },
   {
     agent: "opencode",
-    available: async () => !!Bun.which("opencode"),
+    available: async () => !!which("opencode"),
     // OpenCode's defaults allow edits and shell without asking. Over ACP it honours an inline
     // config, so codemax makes it ask for anything that changes state; reads stay silent.
     create: () =>
@@ -105,22 +131,22 @@ const factories: EngineFactory[] = [
   },
   {
     agent: "grok",
-    available: async () => !!Bun.which("grok"),
+    available: async () => !!which("grok"),
     // Grok takes its permission mode from the user's Claude Code settings; see grokPermissionNote().
     create: () => new AcpEngine({ agent: "grok", name: "Grok", cmd: ["grok", "agent", "stdio"], permissionPrompts: !grokPermissionNote(), usageTail: (s) => grokUsageTail(s.cwd, s.id) }),
   },
   {
     agent: "cursor",
-    available: async () => !!Bun.which("cursor-agent"),
+    available: async () => !!which("cursor-agent"),
     // `cursor-agent acp` (Cursor Agent 2026.10+) asks before shell commands and edits, and
     // exposes its modes (agent / plan / ask) and models as ACP config options.
     create: () => new AcpEngine({ agent: "cursor", name: "Cursor Agent", cmd: ["cursor-agent", "acp"] }),
   },
   {
     agent: "antigravity",
-    // Google's ACP server for Antigravity (installed on request, see antigravity.ts), driven over
+    // Google's ACP server for Antigravity (downloaded once, see antigravity.ts), driven over
     // plain pipes and signed in with the user's Google account only, never an API key.
-    available: async () => !!Bun.which("agy") && !!antigravityServer(),
+    available: async () => !!which("agy") && !!antigravityServer(),
     create: () => new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: antigravityServer()!.cmd, plainPipes: true, signIn: ["oauth-personal", "oauth-business"] }),
   },
 ];

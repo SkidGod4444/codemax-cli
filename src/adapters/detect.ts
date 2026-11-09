@@ -1,5 +1,5 @@
 import type { DetectResult } from "./types.ts";
-import { platformCmd } from "../core/spawn.ts";
+import { platformCmd, which } from "../core/spawn.ts";
 
 export interface DetectDeps {
   which: (bin: string) => string | null;
@@ -7,9 +7,9 @@ export interface DetectDeps {
 }
 
 export const defaultDeps: DetectDeps = {
-  which: (b) => Bun.which(b),
+  which: (b) => which(b),
   run: async (argv, timeoutMs) => {
-    const p = Bun.spawn({ ...platformCmd(argv), stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const p = Bun.spawn({ ...platformCmd(argv), env: process.env as Record<string, string>, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;

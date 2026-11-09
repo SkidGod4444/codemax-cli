@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { CODEMAX_HOME } from "../core/paths.ts";
-import { IS_WINDOWS, platformCmd } from "../core/spawn.ts";
+import { IS_WINDOWS, platformCmd, which } from "../core/spawn.ts";
 
 /**
  * Antigravity CLI (`agy`, Google's successor to Gemini CLI) has no ACP mode of
@@ -9,9 +9,10 @@ import { IS_WINDOWS, platformCmd } from "../core/spawn.ts";
  * registry (the one Zed installs): `agy_acp_server`. codemax drives that, over
  * plain pipes, signed in with the user's Google account (`oauth-personal`).
  *
- * The server is not bundled (it is proprietary and ~110 MB): codemax offers to
- * download it from the registry's own link, only from dl.google.com, into
- * ~/.codemax/agents/antigravity-acp/<version>/.
+ * The server is not bundled (it is proprietary and ~110 MB): it is downloaded from
+ * the registry's own link, only from dl.google.com, into
+ * ~/.codemax/agents/antigravity-acp/<version>/. The terminal app asks first; an app
+ * driving codemax (`serve`) gets it without asking, once agy is installed (setup.ts).
  */
 export const REGISTRY_URL = "https://raw.githubusercontent.com/agentclientprotocol/registry/main/antigravity-acp/agent.json";
 const DIR = () => join(CODEMAX_HOME, "agents", "antigravity-acp");
@@ -24,12 +25,12 @@ export interface ServerSpec {
 
 /** The installed ACP server (newest version first), or one on PATH; null when none. */
 export function antigravityServer(): ServerSpec | null {
-  const onPath = Bun.which("agy_acp_server") ?? Bun.which("agy-acp-server");
+  const onPath = which("agy_acp_server") ?? which("agy-acp-server");
   if (onPath) return { cmd: [onPath, ...linuxArgs()], version: "PATH" };
   const dir = DIR();
   if (!existsSync(dir)) return null;
   const versions = readdirSync(dir)
-    .filter((v) => existsSync(join(dir, v, BIN)))
+    .filter((v) => !v.startsWith(".") && existsSync(join(dir, v, BIN)))   // ".partial-…": a download under way
     .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
   return versions[0] ? { cmd: [join(dir, versions[0], BIN), ...linuxArgs()], version: versions[0] } : null;
 }
@@ -74,27 +75,45 @@ export async function antigravityInstallPlan(fetchImpl: typeof fetch = fetch): P
   return { version, url, bytes };
 }
 
-/** Download and unpack the server. Returns its command. */
-export async function installAntigravityServer(plan: InstallPlan, onProgress: (msg: string) => void = () => {}): Promise<ServerSpec> {
+/**
+ * Download and unpack the server. Returns its command. It is downloaded and unpacked under a temporary name and renamed
+ * into place at the end, so a process stopped half-way never leaves a version folder with a cut-off server in it.
+ */
+export async function installAntigravityServer(plan: InstallPlan, onProgress: (msg: string) => void = () => {}, fetchImpl: typeof fetch = fetch): Promise<ServerSpec> {
   const dest = join(DIR(), plan.version);
-  const zip = join(DIR(), `agy-acp-${plan.version}.zip`);
-  mkdirSync(dest, { recursive: true });
-  onProgress(`downloading ${plan.url}${plan.bytes ? ` (${Math.round(plan.bytes / 1e6)} MB)` : ""}`);
-  const res = await fetch(plan.url);
-  if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`);
-  await Bun.write(zip, res);
-  onProgress("unpacking");
-  const unzip = IS_WINDOWS
-    ? ["powershell", "-NoProfile", "-Command", `Expand-Archive -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${dest.replace(/'/g, "''")}' -Force`]
-    : ["unzip", "-q", "-o", zip, "-d", dest];
-  const p = Bun.spawn(unzip, { stdout: "pipe", stderr: "pipe" });
-  const code = await p.exited;
-  rmSync(zip, { force: true });
-  if (code !== 0) throw new Error(`could not unpack the archive: ${(await new Response(p.stderr).text()).trim().slice(0, 200)}`);
-  const bin = join(dest, BIN);
-  if (!existsSync(bin)) throw new Error(`the archive has no ${BIN}`);
-  if (!IS_WINDOWS) chmodSync(bin, 0o755);
-  return { cmd: [bin, ...linuxArgs()], version: plan.version };
+  if (existsSync(join(dest, BIN))) return { cmd: [join(dest, BIN), ...linuxArgs()], version: plan.version };
+  const tmp = join(DIR(), `.partial-${plan.version}-${process.pid}`);
+  const zip = `${tmp}.zip`;
+  rmSync(tmp, { recursive: true, force: true });
+  mkdirSync(tmp, { recursive: true });
+  try {
+    onProgress(`downloading ${plan.url}${plan.bytes ? ` (${Math.round(plan.bytes / 1e6)} MB)` : ""}`);
+    const res = await fetchImpl(plan.url);
+    if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`);
+    await Bun.write(zip, res);
+    onProgress("unpacking");
+    const unzip = IS_WINDOWS
+      ? ["powershell", "-NoProfile", "-Command", `Expand-Archive -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${tmp.replace(/'/g, "''")}' -Force`]
+      : ["unzip", "-q", "-o", zip, "-d", tmp];
+    const p = Bun.spawn(unzip, { stdout: "pipe", stderr: "pipe" });
+    const code = await p.exited;
+    if (code !== 0) throw new Error(`could not unpack the archive: ${(await new Response(p.stderr).text()).trim().slice(0, 200)}`);
+    if (!existsSync(join(tmp, BIN))) throw new Error(`the archive has no ${BIN}`);
+    if (!IS_WINDOWS) chmodSync(join(tmp, BIN), 0o755);
+    rmSync(dest, { recursive: true, force: true });   // a folder an older codemax left without a whole server
+    renameSync(tmp, dest);
+  } finally {
+    rmSync(zip, { force: true });
+    rmSync(tmp, { recursive: true, force: true });
+  }
+  return { cmd: [join(dest, BIN), ...linuxArgs()], version: plan.version };
+}
+
+/** Removes what downloads that were stopped half-way left behind. Only while no download runs (setup.ts holds its lock). */
+export function clearPartialDownloads() {
+  const dir = DIR();
+  if (!existsSync(dir)) return;
+  for (const n of readdirSync(dir)) if (n.startsWith(".partial-")) rmSync(join(dir, n), { recursive: true, force: true });
 }
 
 /**
@@ -112,8 +131,8 @@ export function agyOnlyModels(acp: { id: string }[], run: () => Promise<string> 
 }
 
 async function defaultAgyModels(): Promise<string> {
-  if (!Bun.which("agy")) return "";
-  const p = Bun.spawn({ ...platformCmd(["agy", "models"]), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+  if (!which("agy")) return "";
+  const p = Bun.spawn({ ...platformCmd(["agy", "models"]), env: process.env as Record<string, string>, stdout: "pipe", stderr: "ignore", stdin: "ignore" });
   const timer = setTimeout(() => p.kill(), 8000);
   const out = await new Response(p.stdout).text();
   clearTimeout(timer);

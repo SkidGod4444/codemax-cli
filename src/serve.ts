@@ -47,6 +47,10 @@ export interface ServeOptions {
   write?: (line: Line) => void;
   /** Called when the host says close or stdin ends. */
   onExit?: () => void;
+  /** Awaited before anything looks for an agent (runServe: widen PATH to the person's shell PATH, syspath.ts). */
+  beforeDetect?: () => Promise<void>;
+  /** Sets up a missing protocol engine for an installed agent; what to report meanwhile (runServe: setup.ts). */
+  setup?: (agent: AgentId, engine: boolean) => string | undefined;
 }
 
 interface Configured {
@@ -143,6 +147,7 @@ export class Serve {
       else this.write({ event: "error", kind: "other", message: text });
     };
     try {
+      if (this.opts.beforeDetect && msg.method !== "cancel" && msg.method !== "permission") await this.opts.beforeDetect();
       switch (msg.method) {
         case "configure":
           reply(await this.configure(msg.params ?? {}));
@@ -179,7 +184,9 @@ export class Serve {
       const d = await a.detect();
       const factory = engineFactories[a.id];
       const engine = factory ? await (this.opts.available ? this.opts.available(a.id) : factory.available()) : false;
-      out.push({ id: a.id, name: a.name, installed: d.installed && engine, version: d.version, problem: d.problem ?? (d.installed && !engine ? "no protocol engine on this machine" : undefined) });
+      // An installed agent whose engine codemax can fetch says so while it does (setup.ts) and is ready afterwards.
+      const setting = d.installed && this.opts.setup ? this.opts.setup(a.id, engine) : undefined;
+      out.push({ id: a.id, name: a.name, installed: d.installed && engine, version: d.version, problem: d.problem ?? setting ?? (d.installed && !engine ? "no protocol engine on this machine" : undefined) });
     }
     return out;
   }
@@ -373,7 +380,10 @@ export class Serve {
 /** The CLI entry: stdout is the protocol, so everything else goes to stderr. */
 export async function runServe(): Promise<void> {
   console.log = (...a: unknown[]) => console.error(...a);
-  const serve = new Serve({ onExit: () => process.exit(0) });
+  const { widenPath } = await import("./core/syspath.ts");
+  const { setupEngine } = await import("./engines/setup.ts");
+  void widenPath();
+  const serve = new Serve({ onExit: () => process.exit(0), beforeDetect: widenPath, setup: (agent, engine) => setupEngine(agent, engine) });
   const stop = () => serve.shutdown().finally(() => process.exit(0));
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);

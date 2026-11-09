@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CODEMAX_HOME, ensureDir } from "./paths.ts";
+import { which } from "./spawn.ts";
 
 /**
  * Keep the machine awake while codemax runs, so agents keep working.
@@ -65,7 +66,7 @@ export function defaultAwakeDeps(): AwakeDeps {
   return {
     platform: process.platform,
     pid: process.pid,
-    which: (b) => Bun.which(b),
+    which: (b) => which(b),
     recordPath: join(CODEMAX_HOME, "awake-restore.json"),
     run: async (cmd, o) => {
       const p = Bun.spawn(cmd, { stdin: o?.interactive ? "inherit" : "ignore", stdout: o?.interactive ? "inherit" : "pipe", stderr: o?.interactive ? "inherit" : "pipe" });

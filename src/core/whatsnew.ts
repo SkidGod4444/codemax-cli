@@ -6,6 +6,11 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.24": [
+    "Claude Code runs inside apps on Macs with no Bun or Node",
+    "codemax serve installs Antigravity's ACP server by itself",
+    "codemax serve finds agents anywhere your shell's PATH reaches",
+  ],
   "0.1.23": [
     "codemax serve: apps can let their agent search the web (no fetch)",
     "Embedded Claude gets only the app's tools, not your own setup",

@@ -45,6 +45,7 @@ usage:
   codemax usage [--all]                      tokens and API-equivalent cost per agent for this project (or every project)
   codemax prices [update] [<model>]          show price source and age, refresh the public list, or look up one model
   codemax serve                              drive an agent for another program over NDJSON on stdin/stdout (no terminal)
+  codemax install-engine <antigravity|claude>  set up an agent's protocol engine now (serve does this by itself)
   codemax --version                          print the version
 
 inside an agent, press the hotkey (default Ctrl+/ or Ctrl+^) to open the codemax menu.
@@ -128,6 +129,17 @@ async function main(argv: string[]) {
       const { runServe } = await import("./serve.ts");
       await runServe();
       return;
+    }
+    case "install-engine": {
+      const { runSetup, SETUP_AGENTS } = await import("./engines/setup.ts");
+      const a = args[0] as (typeof SETUP_AGENTS)[number];
+      if (!SETUP_AGENTS.includes(a)) {
+        console.error(`codemax install-engine ${SETUP_AGENTS.join("|")}`);
+        process.exit(2);
+      }
+      const { widenPath } = await import("./core/syspath.ts");
+      await widenPath();
+      process.exit(await runSetup(a));
     }
     case "debug": {
       const sub = args[0] ?? "";

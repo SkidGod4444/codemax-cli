@@ -18,8 +18,15 @@ const CACHE = () => join(CODEMAX_HOME, "update-check.json");
 
 export type InstallKind = "npm" | "script" | "source" | "binary";
 
+/**
+ * This is the compiled codemax (Bun built in). Its code is bundled under /$bunfs/root (B:\\~BUN on Windows), so
+ * import.meta.dir is that folder itself: going up two levels from it, as for a checkout, gave "/" and a binary install
+ * was taken for an npm one.
+ */
+export const IS_COMPILED = /\$bunfs|^B:\\~BUN/.test(import.meta.dir);
+
 /** How this codemax was installed, judged from where its code lives. */
-export function installKind(root = resolve(import.meta.dir, "..", "..")): { kind: InstallKind; root: string } {
+export function installKind(root = IS_COMPILED ? import.meta.dir : resolve(import.meta.dir, "..", "..")): { kind: InstallKind; root: string } {
   if (root.includes("$bunfs") || root.startsWith("/$bunfs") || root.startsWith("B:\\~BUN")) return { kind: "binary", root };
   if (root.includes(`${sep}node_modules${sep}codemax-cli`) || root.includes("/node_modules/codemax-cli")) return { kind: "npm", root };
   if (existsSync(join(root, ".git")) && /[\\/]\.codemax[\\/]cli$/.test(root)) return { kind: "script", root };

@@ -37,7 +37,7 @@ import { appendHistory, loadHistory } from "../core/history.ts";
 import { VERIFY_FIX_CAP, VERIFY_TIMEOUT_MS, runVerify, tail, verifyCandidates } from "../core/verify.ts";
 import { MENTION_RE, attachFiles, listProjectFiles, mentionedFiles } from "../core/files.ts";
 import pkg from "../../package.json" with { type: "json" };
-import { platformCmd, SHELL_SPAWN, shellArgv, stopChildrenOnExit } from "../core/spawn.ts";
+import { platformCmd, SHELL_SPAWN, shellArgv, stopChildrenOnExit, which } from "../core/spawn.ts";
 import { safeDeep } from "../core/terminal.ts";
 import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "../engines/errors.ts";
 import { TurnRecorder } from "../core/journal.ts";
@@ -4446,7 +4446,7 @@ async function copyToClipboard(renderer: CliRenderer, text: string): Promise<boo
     : process.platform === "win32" ? [["clip"]]
     : [["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]];
   for (const cmd of tools) {
-    if (!Bun.which(cmd[0]!)) continue;
+    if (!which(cmd[0]!)) continue;
     try {
       const p = Bun.spawn({ ...platformCmd(cmd), stdin: "pipe", stdout: "ignore", stderr: "ignore" });
       p.stdin.write(text);

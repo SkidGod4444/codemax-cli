@@ -6,6 +6,14 @@
  */
 export const IS_WINDOWS = process.platform === "win32";
 
+/**
+ * Where `bin` is on PATH. Bun.which on its own searches the PATH the process started with, so a PATH widened later
+ * (`serve` adds the user's shell PATH, see syspath.ts) would never be searched: this always passes the current one.
+ */
+export function which(bin: string): string | null {
+  return Bun.which(bin, { PATH: process.env.PATH ?? "" });
+}
+
 /** Bun.spawn's `cmd` for argv on this platform, and how to pass it. Spread it into Bun.spawn's options. */
 export interface PlatformCmd {
   cmd: string[];
@@ -15,7 +23,7 @@ export interface PlatformCmd {
 export function platformCmd(argv: string[]): PlatformCmd {
   if (!IS_WINDOWS || argv.length === 0) return { cmd: argv };
   const [bin, ...rest] = argv as [string, ...string[]];
-  const path = Bun.which(bin) ?? bin;
+  const path = which(bin) ?? bin;
   if (!/\.(cmd|bat)$/i.test(path)) return { cmd: [path, ...rest] };
   // The line goes to cmd.exe as written: Bun's own quoting puts quotes around a path with a
   // space (C:\Users\neeraj kumar\…\codex.cmd), and `/s` then strips the first and last quote
