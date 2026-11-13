@@ -40,13 +40,13 @@ test("which: follows a PATH widened after start (Bun.which alone keeps the PATH 
 test("system-wide PATH: the login shell's PATH first, then the app's, then the usual folders, each once", async () => {
   expect(mergePath(["/a", "/b"], ["/b", "/usr/bin"].join(delimiter), ["/a", "/c"])).toBe(["/a", "/b", "/usr/bin", "/c"].join(delimiter));
   const home = mkdtempSync(join(tmpdir(), "codemax-home-"));
+  if (process.platform === "win32") return expect(knownBinDirs(home)).toEqual([]);   // no such folders, and no login shell to ask, there
   for (const d of [".local/bin", ".nvm/versions/node/v18.20.0/bin", ".nvm/versions/node/v22.3.0/bin"]) mkdirSync(join(home, d), { recursive: true });
   expect(knownBinDirs(home, (p) => p.startsWith(home) && existsSync(p))).toEqual([
     join(home, ".local/bin"),
     join(home, ".nvm/versions/node/v22.3.0/bin"),
     join(home, ".nvm/versions/node/v18.20.0/bin"),
   ]);
-  if (process.platform === "win32") return;   // no login shell to ask there
   // A shell whose rc files print things: only the marked PATH counts.
   const sh = join(home, "chatty-shell");
   writeFileSync(sh, '#!/bin/sh\necho "welcome back"\nPATH=/from/zshrc:/usr/bin\neval "$2"\necho bye\n');

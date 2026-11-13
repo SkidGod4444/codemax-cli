@@ -618,12 +618,12 @@ test("an agent that does not read the project's CLAUDE.md gets its rules with it
   d.setDebugLog(true);
   const repo = newRepo();
   writeFileSync(join(repo, "CLAUDE.md"), "PROJECT-RULE: never push without asking.");
-  const h = await harness(async (_t, ctx) => ctx.say("ok"), { repo, agent: "codex", cfg: { order: ["codex"] } });
+  const h = await harness(async (_t, ctx) => ctx.say("RULES-REPLY"), { repo, agent: "codex", cfg: { order: ["codex"] } });
   try {
     const f = await h.frame((f) => f.includes("given this project's rules from CLAUDE.md"));
     expect(f).toContain("does not read that file itself");
     await h.send("hello");
-    await h.frame((f) => f.includes("ok"));
+    await h.frame((f) => f.includes("RULES-REPLY") && h.prompts.length > 0);
     expect(h.prompts[0]).toContain("PROJECT-RULE: never push without asking.");
     const log = readFileSync(d.debugLogPath(), "utf8");
     expect(log).toMatch(/"kind":"shared-for-agent"|"rules":1/);
