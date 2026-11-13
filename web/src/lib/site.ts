@@ -8,7 +8,7 @@ export const SITE = {
   title: "codemax — every AI coding plan you pay for, one terminal",
   shortTitle: "Every AI coding plan you pay for. One terminal.",
   description:
-    "Use Claude Code, Codex, OpenCode, Grok, Cursor and Antigravity from one terminal. When one hits its usage limit, the next finishes your task with the same context. Uses only the subscriptions you already pay for. Free and open source.",
+    "Use Claude Code, Codex, OpenCode, Grok, Cursor, Antigravity and Copilot CLI from one terminal. When one hits its usage limit, the next finishes your task with the same context. Uses only the subscriptions you already pay for. Free and open source.",
   repo: "https://github.com/SkidGod4444/codemax-cli",
   /** Short link for every "GitHub" button on the site; redirects to `repo`. */
   github: "https://ref.saidev.codes/codemax",
@@ -22,6 +22,9 @@ export const SITE = {
     "OpenCode",
     "Grok CLI",
     "Antigravity CLI",
+    "Cursor Agent",
+    "GitHub Copilot CLI",
+    "multiple agents one task",
     "usage limit",
     "AI subscription",
     "multi-agent terminal",

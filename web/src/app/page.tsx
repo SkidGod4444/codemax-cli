@@ -2,14 +2,19 @@ import {
   ArrowRight,
   ArrowUpRight,
   CircleDollarSign,
-  FileSearch,
   Gauge,
   Handshake,
+  Eye,
   History,
+  Hourglass,
   Layers,
-  MessagesSquare,
+  ListChecks,
+  Scale,
+  Share2,
+  Package,
   ShieldCheck,
   Undo2,
+  Users,
   Wallet,
 } from "lucide-react";
 import AsciiArt from "@/components/AsciiArt";
@@ -20,6 +25,8 @@ import TerminalDemo from "@/components/TerminalDemo";
 import { Accordion, AccordionItem, AccordionPanel, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 
+import { Suspense } from "react";
+import { count, downloads, KNOWN, type Downloads } from "@/lib/downloads";
 import { INSTALL_COMMANDS, SITE } from "@/lib/site";
 
 const REPO = SITE.github;
@@ -98,27 +105,65 @@ const agents = [
   { name: "Grok", plan: "SuperGrok", status: "Supported" },
   { name: "Cursor", plan: "Cursor plans", status: "Supported" },
   { name: "Antigravity CLI", plan: "Google AI plans", status: "Supported" },
-  { name: "Copilot", plan: "GitHub Copilot plans", status: "Coming soon" },
+  { name: "Copilot CLI", plan: "GitHub Copilot plans", status: "Supported" },
 ] as const;
 
 const features = [
   { icon: Handshake, title: "Never stalls on a limit", body: "When one agent runs out mid-task, the next one carries on with the request you were working on." },
   { icon: History, title: "Context that follows you", body: "Every agent sees what the others did: the conversation, the changes, what's still to do." },
+  { icon: Users, title: "A team on one task", body: "Ask for a team: your agent splits the work, several agents build their parts at the same time, and you get one checked result." },
+  { icon: Scale, title: "Plans argued out first", body: "Have two or three agents each propose a plan, challenge the others and settle on the best one before anything is built." },
+  { icon: Hourglass, title: "Waits out a limit", body: "Every plan used up? codemax waits for the first one to reset and carries on with the task by itself." },
+  { icon: Share2, title: "Your setup, everywhere", body: "Project rules, custom commands, skills and connected tools you set up for one agent work in all of them." },
+  { icon: Eye, title: "A second pair of eyes", body: "A second agent reads the work after each step and speaks up only when something looks wrong. Or ask one a quick question any time." },
+  { icon: ListChecks, title: "Tests after every change", body: "Your own test command runs after each change, and a failure goes straight back to the agent to fix." },
+  { icon: Undo2, title: "Undo and rewind", body: "Didn't like a change? Undo the last turn, or go back to any earlier message, files included." },
   { icon: Wallet, title: "Daily budgets", body: "Decide how much of each plan to use per day. codemax hands off before you hit the wall." },
   { icon: CircleDollarSign, title: "See what you get", body: "Know exactly how much work each subscription is doing for you, side by side." },
-  { icon: Undo2, title: "One-step undo", body: "Didn't like what an agent changed? Roll its last turn back instantly." },
-  { icon: MessagesSquare, title: "Second opinions", body: "Ask another agent a quick question without leaving the one you're working with." },
-  { icon: FileSearch, title: "Bring any file", body: "Type @ and pick a file; every agent gets it in context." },
-  { icon: ShieldCheck, title: "You stay in charge", body: "Agents still ask before they edit or run anything. Nothing happens behind your back." },
+  { icon: ShieldCheck, title: "You stay in charge", body: "Agents ask before they edit or run anything. Trust a task? Turn the questions off for that one run." },
 ];
 
 const faqs = [
   { q: "Will codemax cost me extra?", a: "No. codemax is free and open source, and it only uses the subscriptions you already pay for. It never bills an API key, and it warns you if anything on your machine would." },
   { q: "Does it replace Claude Code or Codex?", a: "No. Those agents still do the work. codemax is the one place you use them from, so you can move between them freely and never start from scratch." },
-  { q: "Is my code safe?", a: "Everything runs on your machine. Your code goes only to the agents you already use, under your own accounts, and every edit asks for your approval first." },
-  { q: "Which agents does it work with?", a: "Claude Code, Codex, OpenCode, Grok, Cursor and Google's Antigravity CLI today, with Copilot next." },
+  { q: "Is my code safe?", a: "Everything runs on your machine. Your code goes only to the agents you already use, under your own accounts. Agents ask before they change or run anything, unless you turn that off yourself for a run." },
+  { q: "Can several agents work on one task?", a: "Yes. Ask for a team and your agent splits the task, each agent builds its part at the same time in its own copy of your project, and the parts are merged and checked. Your own files change only at the end." },
+  { q: "What if every plan runs out?", a: "codemax waits for the first limit to reset and continues the task on its own. You can also set a daily budget per plan so that never happens." },
+  { q: "Which agents does it work with?", a: "Claude Code, Codex, OpenCode, Grok, Cursor, Google's Antigravity CLI and GitHub Copilot CLI." },
   { q: "Who is it for?", a: "Developers who pay for more than one AI coding plan and are tired of hitting a limit in the middle of real work." },
 ];
+
+/** Every download npm and GitHub count, added up (refreshed about hourly). */
+async function TotalDownloads() {
+  return <>{count((await downloads()).total)}</>;
+}
+
+/** Where the downloads come from: one badge for npm, one for GitHub, each linking to the place that counts it. */
+function DownloadBadgeRow({ d }: { d: Downloads }) {
+  const badge = "inline-flex cursor-pointer items-center gap-2 border border-[var(--line-strong)] px-2.5 py-1.5 font-mono text-[10.5px] tracking-[0.12em] text-[var(--ink-2)] uppercase transition-colors hover:bg-[var(--hover)]";
+  const n = "font-medium text-[var(--ink)] tabular-nums";
+  return (
+    <div className="flex flex-wrap gap-2">
+      <a className={badge} href="https://www.npmjs.com/package/codemax-cli" target="_blank" rel="noreferrer" aria-label={`${count(d.npm)} downloads on npm`}>
+        <Package className="size-3.5" aria-hidden />
+        npm <span className={n}>{count(d.npm)}</span> downloads
+        {d.npmWeek > 0 && (
+          <span className="border-l border-[var(--line-strong)] pl-2">
+            <span className={n}>{count(d.npmWeek)}</span> this week
+          </span>
+        )}
+      </a>
+      <a className={badge} href={`${SITE.repo}/releases`} target="_blank" rel="noreferrer" aria-label={`${count(d.github)} downloads on GitHub`}>
+        <GitHubMark className="size-3.5" />
+        GitHub <span className={n}>{count(d.github)}</span> downloads
+      </a>
+    </div>
+  );
+}
+
+async function DownloadBadges() {
+  return <DownloadBadgeRow d={await downloads()} />;
+}
 
 /** Structured data: the app itself, plus the FAQ for rich results. */
 function JsonLd() {
@@ -201,20 +246,27 @@ export default function Home() {
             <div className="mt-6 max-w-md">
               <InstallCommand commands={INSTALL_COMMANDS} />
             </div>
+            <div className="mt-4">
+              <Suspense fallback={<DownloadBadgeRow d={KNOWN} />}>
+                <DownloadBadges />
+              </Suspense>
+            </div>
           </div>
           <div className="border-t border-[var(--line)] p-5 sm:p-8 lg:border-t-0 lg:border-l">
-            <Figure scene="rings" n="01" caption="Five agents, one chain" className="flex aspect-[4/3] flex-col sm:aspect-[16/9] lg:aspect-[5/4]" cell={6} />
+            <Figure scene="rings" n="01" caption="Seven agents, one chain" className="flex aspect-[4/3] flex-col sm:aspect-[16/9] lg:aspect-[5/4]" cell={6} />
           </div>
         </div>
         {/* stat row */}
         <div className="quilt relative grid grid-cols-2 border-t border-[var(--line)] md:grid-cols-4">
           <Marks at={[25, 50, 75]} from="md" />
-          {[
-            ["Coding agents", "4+"],
-            ["Plans you can combine", "All"],
-            ["Extra cost", "$0"],
-            ["Restarts after a limit", "None"],
-          ].map(([k, v], i) => (
+          {(
+            [
+              ["Downloads", <Suspense key="d" fallback={count(KNOWN.total)}><TotalDownloads /></Suspense>],
+              ["Coding agents", "7"],
+              ["Extra cost", "$0"],
+              ["Restarts after a limit", "None"],
+            ] as [string, React.ReactNode][]
+          ).map(([k, v], i) => (
             <div key={k} className={`px-5 py-6 sm:px-8 ${i % 2 ? "border-l border-[var(--line)]" : ""} ${i === 2 ? "md:border-l" : ""} ${i > 1 ? "border-t border-[var(--line)] md:border-t-0" : ""}`}>
               <Label>{k}</Label>
               <p className="mt-2 font-serif text-4xl">{v}</p>
@@ -393,7 +445,7 @@ export default function Home() {
             <Logo className="h-3.5 w-auto" /> · AGPL-3.0 ·
             <a href="https://saidev.codes" target="_blank" rel="noreferrer" className="text-[var(--label)] underline-offset-4 transition hover:text-[var(--ink)] hover:underline">by Saidev Dhal</a>
           </span>
-          <span className="border-t border-[var(--line)] px-5 py-6 sm:px-10 md:border-t-0 md:border-l md:text-right">Not affiliated with Anthropic, OpenAI, xAI or Google</span>
+          <span className="border-t border-[var(--line)] px-5 py-6 sm:px-10 md:border-t-0 md:border-l md:text-right">Not affiliated with Anthropic, OpenAI, xAI, Google, Cursor or GitHub</span>
         </div>
       </footer>
     </main>
