@@ -3,11 +3,13 @@
  * removed so each agent uses its login. Nested-session markers from a parent
  * Claude Code / Codex session are removed too. CLAUDE_CODE_EXECUTABLE is kept
  * on purpose: the Claude ACP adapter uses it to run the user's own `claude`.
+ * Copilot CLI's own-provider variables (COPILOT_PROVIDER_*: a model billed by key) and its
+ * switches that approve tools without asking (COPILOT_ALLOW_ALL, COPILOT_ASSISTED_APPROVAL) go too.
  */
 // AI vendors' keys (any of their *_API_KEY / *_AUTH_TOKEN / *_ACCESS_TOKEN names, so a key for a
 // provider an agent can bill, like OpenRouter for OpenCode, never reaches it), plus the markers.
 const VENDORS = "ANTHROPIC|OPENAI|AZURE_OPENAI|CODEX|CURSOR|XAI|GROK|GEMINI|GOOGLE|GOOGLE_GENAI|VERTEX|OPENROUTER|MISTRAL|DEEPSEEK|GROQ|TOGETHER|FIREWORKS|PERPLEXITY|COHERE|HUGGINGFACE|HF|REPLICATE|CEREBRAS|OPENCODE|MOONSHOT|KIMI|ZAI|ZHIPU|DASHSCOPE|QWEN|NVIDIA|SAMBANOVA|AI21|VOYAGE|AMP|COPILOT";
-const STRIP = new RegExp(`^(${VENDORS})_(API_KEY|AUTH_TOKEN|ACCESS_TOKEN|KEY)$|^(CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CODEX_SANDBOX|CODEX_THREAD_ID|AWS_BEARER_TOKEN_BEDROCK)$|^CLAUDE_CODE_(?!EXECUTABLE$)`);
+const STRIP = new RegExp(`^(${VENDORS})_(API_KEY|AUTH_TOKEN|ACCESS_TOKEN|KEY)$|^(CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CODEX_SANDBOX|CODEX_THREAD_ID|AWS_BEARER_TOKEN_BEDROCK)$|^CLAUDE_CODE_(?!EXECUTABLE$)|^COPILOT_(PROVIDER_.*|PROVIDERS_CONFIG|ALLOW_ALL|ASSISTED_APPROVAL)$`);
 
 export function agentEnv(extra: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};

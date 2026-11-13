@@ -5,7 +5,7 @@
 <p align="center"><b>Every AI coding plan you pay for. One terminal.</b></p>
 
 <p align="center">
-  Claude Code · Codex · OpenCode · Grok · Cursor · Antigravity CLI
+  Claude Code · Codex · OpenCode · Grok · Cursor · Antigravity CLI · Copilot CLI
 </p>
 
 ---
@@ -82,7 +82,7 @@ cd codemax-cli && bun install && bun link
 | Grok | SuperGrok | Supported |
 | Cursor Agent | Cursor plans | Supported (needs Cursor Agent 2026.10 or newer). Changing its model with `/model` also changes Cursor's own default. |
 | Antigravity CLI | Google AI plans | Supported. It has no ACP mode of its own, so codemax offers to download Google's official ACP server for it (about 110 MB, once, from dl.google.com) the first time you switch to it, and signs in with your Google account (a browser may open once). It reports context size but not token counts, so `/usage` shows input only. |
-| Copilot CLI | GitHub Copilot plans | In its own UI via `codemax --tui` |
+| Copilot CLI | GitHub Copilot plans | Supported (Copilot CLI 1.0.111 or newer, signed in with `copilot login`). It asks before edits and before commands that change something; it reports no model list. |
 
 ## Everyday keys
 
@@ -95,6 +95,7 @@ cd codemax-cli && bun install && bun link
 | `/ask codex <msg>` | One question to another agent |
 | `@file` | Attach a file to your message |
 | `/task` | The shared task: plan, who did what, where it stopped, files changed |
+| `/team <goal>` (or just ask: "split this between Claude and Codex") | Your agent splits the task into parts that touch different files; 2 to 4 agents, on models you pick, build the parts at the same time, each in its own copy of the project; codemax merges them into your folder and your agent checks the result |
 | `/debate <goal>` | 2-3 agents, on models you pick, each propose a plan, argue it out, and a judge merges the best; then build it with your agent |
 | `Ctrl+G` or `/editor` | Write your message in your own editor |
 | `/copy`, `/export` | Copy the last reply; save the conversation as Markdown |

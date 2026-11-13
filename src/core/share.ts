@@ -42,9 +42,32 @@ export interface SharedSkill {
   source: string;
 }
 
+/** A custom slash command: a prompt saved under a name (Claude's commands, Codex's prompts, OpenCode's and Cursor's commands, Gemini's TOML ones). */
+export interface SharedCommand {
+  /** Typed as /name. */
+  name: string;
+  description: string;
+  /** The prompt, with its placeholders ($ARGUMENTS, $1…, {{args}}). */
+  body: string;
+  source: string;
+  path: string;
+}
+
+/** One of the project's rules files (CLAUDE.md, AGENTS.md, GEMINI.md…): what an agent is told about this project. */
+export interface SharedRule {
+  /** As named in the project ("CLAUDE.md", ".github/copilot-instructions.md"). */
+  file: string;
+  path: string;
+  text: string;
+}
+
 export interface Shared {
   mcp: SharedMcpServer[];
   skills: SharedSkill[];
+  /** The project's rules files, for the agents that do not read them themselves. */
+  rules: SharedRule[];
+  /** Custom slash commands of any agent: codemax expands them itself, so they run in every agent. */
+  commands: SharedCommand[];
   /** Config files that could not be read, by path (shown once, logged). */
   errors: { file: string; error: string }[];
 }
@@ -309,18 +332,177 @@ export function collectShared(cwd: string, home = shareHome()): Shared {
   };
   for (const d of skillDirs(home, cwd)) addSkills(skillsIn(d.dir, d.source));
   for (const p of plugins) addSkills(skillsIn(join(p.dir, "skills"), `plugin:${p.name}`).map((s) => ({ ...s, source: "plugin" })));
-  debugEvent("shared-collected", { mcp: mcp.length, skills: skills.length, plugins: plugins.length, bySource: countBy(mcp.map((s) => s.source.split(":")[0]!)), errors: errors.length || undefined });
+  const rules = projectRules(cwd);
+  const commands: SharedCommand[] = [];
+  const seenCommands = new Set<string>();
+  for (const c of [...commandDirs(home, cwd).flatMap((d) => commandsIn(d.dir, d.source)), ...plugins.flatMap((p) => commandsIn(join(p.dir, "commands"), "plugin"))]) {
+    if (seenCommands.has(c.name)) continue;   // one per name: the project's before the user's, Claude's before the others'
+    seenCommands.add(c.name);
+    commands.push(c);
+  }
+  debugEvent("shared-collected", { mcp: mcp.length, skills: skills.length, rules: rules.length || undefined, commands: commands.length || undefined, plugins: plugins.length, bySource: countBy(mcp.map((s) => s.source.split(":")[0]!)), errors: errors.length || undefined });
   for (const e of errors) debugEvent("shared-config-error", { file: basename(e.file), ...errorFields(new Error(e.error)) });
-  return { mcp, skills, errors };
+  return { mcp, skills, rules, commands, errors };
+}
+
+// ---------- custom slash commands ----------
+//
+// A custom command is a prompt in a file. Each agent runs only its own folder's, so a command
+// written for Claude Code did nothing in Codex. codemax reads them all and, when the agent at
+// work does not offer a command of that name itself, sends the command's prompt with the
+// arguments filled in. Lines that only Claude Code acts on (!`shell`, @file) go as text.
+
+/** Command folders by owner, the project's before the user's. */
+export function commandDirs(home: string, cwd: string): { dir: string; source: string }[] {
+  return [
+    { dir: join(cwd, ".claude", "commands"), source: "claude" },
+    { dir: join(home, ".claude", "commands"), source: "claude" },
+    { dir: join(cwd, ".cursor", "commands"), source: "cursor" },
+    { dir: join(home, ".cursor", "commands"), source: "cursor" },
+    { dir: join(home, ".codex", "prompts"), source: "codex" },
+    { dir: join(cwd, ".opencode", "command"), source: "opencode" },
+    { dir: join(cwd, ".opencode", "commands"), source: "opencode" },
+    { dir: join(home, ".config", "opencode", "command"), source: "opencode" },
+    { dir: join(home, ".config", "opencode", "commands"), source: "opencode" },
+    { dir: join(cwd, ".gemini", "commands"), source: "gemini" },
+    { dir: join(home, ".gemini", "commands"), source: "gemini" },
+  ];
+}
+
+/** The commands in a folder (and one level of subfolders): `name.md` with optional frontmatter, or Gemini's `name.toml`. */
+export function commandsIn(dir: string, source: string, depth = 0): SharedCommand[] {
+  const out: SharedCommand[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir).sort();
+  } catch {
+    return out;
+  }
+  for (const n of names) {
+    const path = join(dir, n);
+    try {
+      const st = statSync(path);
+      if (st.isDirectory()) {
+        if (depth < 1) out.push(...commandsIn(path, source, depth + 1));
+        continue;
+      }
+      const m = n.match(/^([A-Za-z0-9][A-Za-z0-9_-]*)\.(md|toml)$/);
+      if (!m || st.size > 200_000) continue;
+      const raw = readFileSync(path, "utf8");
+      let body: string;
+      let description = "";
+      if (m[2] === "toml") {
+        const t: any = Bun.TOML.parse(raw);
+        body = String(t.prompt ?? "");
+        description = String(t.description ?? "");
+      } else {
+        const fm = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+        body = fm ? raw.slice(fm[0].length) : raw;
+        description = fm?.[1]?.match(/^description:\s*(.+)$/m)?.[1]?.trim().replace(/^["']|["']$/g, "") ?? "";
+      }
+      body = body.trim();
+      if (!body) continue;
+      out.push({ name: m[1]!.toLowerCase(), description: (description || body.split("\n")[0]!).replace(/\s+/g, " ").slice(0, 120), body, source, path });
+    } catch {
+      /* unreadable: skipped */
+    }
+  }
+  return out;
+}
+
+/** The command's prompt with the arguments in place: $ARGUMENTS / {{args}} whole, $1…$9 by word; added at the end when the prompt has no placeholder. */
+export function expandCommand(c: SharedCommand, args: string): string {
+  const all = args.trim();
+  const words = all.split(/\s+/).filter(Boolean);
+  const placed = /\$ARGUMENTS|\$[1-9]|\{\{args\}\}/.test(c.body);
+  const body = c.body.replace(/\$ARGUMENTS|\{\{args\}\}/g, () => all).replace(/\$([1-9])/g, (_m, n) => words[Number(n) - 1] ?? "");
+  return placed || !all ? body : `${body}\n\n${all}`;
+}
+
+// ---------- project rules ----------
+//
+// Each agent reads its own rules file and no other: a project written for Claude Code has only
+// CLAUDE.md, so Codex or Antigravity taking over the task knew none of the project's rules.
+
+/** The rules files a project can have, in the order they are given. */
+const RULES_FILES = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "GEMINI.md", ".cursorrules", ".github/copilot-instructions.md"];
+/** A rules file larger than this is not read (it is no rules file). */
+const RULES_MAX_BYTES = 400_000;
+
+/**
+ * What each agent reads from the project by itself (their docs, and the file names in their
+ * programs: claude 2.1.323, codex 0.159.3, opencode 1.19.3, grok 1.0.62, agy 1.4.2).
+ * `firstOnly`: it takes the first of its files that exists and skips the rest (OpenCode reads
+ * CLAUDE.md only when there is no AGENTS.md). An agent not listed reads none.
+ */
+const RULES_READ: Record<string, { files: string[]; firstOnly?: boolean }> = {
+  claude: { files: ["CLAUDE.md", ".claude/CLAUDE.md"] },
+  codex: { files: ["AGENTS.md"] },
+  opencode: { files: ["AGENTS.md", "CLAUDE.md"], firstOnly: true },
+  cursor: { files: ["AGENTS.md", "CLAUDE.md", ".cursorrules"] },
+  grok: { files: ["AGENTS.md", "CLAUDE.md"] },
+  antigravity: { files: ["AGENTS.md", "GEMINI.md"] },
+  // From GitHub's docs only (its program could not be searched): it reads the other agents' files too.
+  copilot: { files: ["AGENTS.md", "CLAUDE.md", "GEMINI.md", ".github/copilot-instructions.md"] },
+};
+
+/** The project's rules files that have something in them. */
+export function projectRules(cwd: string): SharedRule[] {
+  const out: SharedRule[] = [];
+  for (const file of RULES_FILES) {
+    const path = join(cwd, file);
+    try {
+      if (!statSync(path).isFile() || statSync(path).size > RULES_MAX_BYTES) continue;
+      const text = readFileSync(path, "utf8").trim();
+      if (text) out.push({ file, path, text });
+    } catch {
+      /* not there */
+    }
+  }
+  return out;
+}
+
+/**
+ * The rules files `agent` should be given: the ones it does not read itself, unless one only
+ * repeats or points to a file it does read (a CLAUDE.md that says "@AGENTS.md", a link).
+ */
+export function rulesFor(agent: AgentId | string, rules: SharedRule[]): SharedRule[] {
+  const reads = RULES_READ[agent] ?? { files: [] };
+  const present = reads.files.filter((f) => rules.some((r) => r.file === f));
+  const own = rules.filter((r) => (reads.firstOnly ? r.file === present[0] : present.includes(r.file)));
+  const given: SharedRule[] = [];
+  for (const r of rules) {
+    if (own.includes(r)) continue;
+    const known = [...own, ...given];
+    if (known.some((o) => o.text === r.text)) continue;
+    if (r.text.length < 400 && known.some((o) => r.text.includes(basename(o.file)))) continue;
+    given.push(r);
+  }
+  return given;
+}
+
+/** Rules this long or shorter go into the instructions whole; a longer file is named, to be read first. */
+export const RULES_INLINE_CHARS = 6000;
+
+/** The agent's instructions for the project's rules it does not read itself. */
+export function rulesNote(rules: SharedRule[]): string {
+  if (!rules.length) return "";
+  const parts = rules.map((r) =>
+    r.text.length <= RULES_INLINE_CHARS
+      ? `From ${r.file}:\n${r.text}`
+      : `${r.file} (${r.text.split("\n").length} lines) is at ${r.path}: read it before your first step.`,
+  );
+  return `This project's rules (codemax passes them on: they were written for another agent, and they bind you the same). Follow them:\n\n${parts.join("\n\n")}`;
 }
 
 /** What `agent` should be given: the servers and skills it does not load itself. */
-export function sharedFor(agent: AgentId | string, shared: Shared): { mcp: SharedMcpServer[]; skills: SharedSkill[] } {
+export function sharedFor(agent: AgentId | string, shared: Shared): { mcp: SharedMcpServer[]; skills: SharedSkill[]; rules: SharedRule[] } {
   const ownMcp = nativeMcpSource(agent);
   const ownSkills = nativeSkillSources(agent);
   return {
     mcp: shared.mcp.filter((s) => s.source !== ownMcp && !(agent === "claude" && s.source.startsWith("plugin:"))),
     skills: shared.skills.filter((s) => !ownSkills.has(s.source)),
+    rules: rulesFor(agent, shared.rules ?? []),
   };
 }
 

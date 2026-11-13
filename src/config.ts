@@ -31,6 +31,10 @@ export interface Config {
   autoSwitch: boolean;
   /** With autoSwitch: hand off to the next agent without asking first. */
   autoHandoff?: boolean;
+  /** A message that asks to share the work out among agents opens the /team picker (default on). */
+  teamOffer?: boolean;
+  /** With autoSwitch, when every agent is out: wait for the first limit to reset and continue the task (default on). */
+  waitForReset?: boolean;
   /**
    * The handoff order at usage limits, first to last: an agent and, optionally, the model to
    * use there (`modelName` is its display name, so the order can be shown without starting

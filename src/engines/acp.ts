@@ -284,6 +284,8 @@ export class AcpEngine implements Engine {
       title: `${kind === "write" ? (old === null ? "Create" : "Edit") : "Read"} outside this project: ${path}`,
       detail: secret ? `This is ${secret}.` : undefined,
       diff: kind === "write" ? simpleDiff(path, old, content ?? "") : undefined,
+      paths: [path],
+      guard: "outside",
       options: [
         { id: "allow", label: "Allow once", kind: "allow_once" },
         { id: "reject", label: "Deny", kind: "reject_once" },
@@ -307,6 +309,7 @@ export class AcpEngine implements Engine {
       title: p.toolCall?.title ?? p.toolCall?.toolCallId ?? "tool",
       detail: formatInput(p.toolCall?.rawInput),
       diff: contentDiff(p.toolCall?.content, this.cwd) ?? this.toolDiffs.get(p.toolCall?.toolCallId) ?? inputDiff(p.toolCall?.rawInput, this.cwd),
+      paths: requestPaths(p.toolCall),
       options: (p.options ?? []).map((o: any) => ({ id: o.optionId, label: o.name ?? o.optionId, kind: o.kind })),
     };
     const choice = await new Promise<string | null>((resolve) => {
@@ -868,6 +871,14 @@ function mapStop(s: string | undefined): StopReason {
   }
 }
 
+/** The files a permission request is about: the tool call's locations and diffs, and the path in its input. */
+function requestPaths(tc: any): string[] | undefined {
+  const out = new Set<string>(paths(tc ?? {}) ?? []);
+  const input = tc?.rawInput;
+  if (input && typeof input === "object") for (const k of ["file_path", "filePath", "path", "notebook_path", "fileName"]) if (typeof input[k] === "string" && input[k]) out.add(input[k]);
+  return out.size ? [...out] : undefined;
+}
+
 function paths(u: any): string[] | undefined {
   const out = new Set<string>();
   for (const l of u.locations ?? []) if (l?.path) out.add(l.path);
@@ -921,9 +932,14 @@ export function contentDiff(content: unknown, cwd = ""): string | undefined {
  */
 export function inputDiff(raw: any, cwd = ""): string | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const path: unknown = raw.file_path ?? raw.filePath ?? raw.path;
+  const path: unknown = raw.file_path ?? raw.filePath ?? raw.path ?? raw.fileName;
   if (typeof path !== "string" || !path) return undefined;
   const abs = isAbsolute(path) || !cwd ? path : join(cwd, path);
+  // Copilot CLI sends the change as a git diff (`fileName` + `diff`): shown with the file named once, as the others are.
+  if (typeof raw.diff === "string" && /^@@/m.test(raw.diff)) {
+    const hunks = raw.diff.slice(raw.diff.search(/^@@/m)).replace(/\n+$/, "");
+    return [`--- ${shownPath(abs, cwd)}`, `+++ ${shownPath(abs, cwd)}`, hunks].join("\n");
+  }
   const current = (() => {
     try {
       return existsSync(abs) ? readFileSync(abs, "utf8") : null;

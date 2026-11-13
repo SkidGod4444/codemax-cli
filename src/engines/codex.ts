@@ -314,6 +314,7 @@ export class CodexEngine implements Engine {
         title: what,
         detail,
         diff,
+        paths: changes?.map((c) => c.path).filter((x): x is string => typeof x === "string" && !!x),
         // Once or not: Codex's "for this session" answer shape is not known, so it is not offered.
         options: [
           { id: "accept", label: "Allow once", kind: "allow_once" },

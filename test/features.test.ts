@@ -1225,14 +1225,14 @@ test("44. while an agent asks: the prompt still works, a digit answers only alon
     h.setup.mockInput.pressEnter();
     await h.frame((f) => f.includes("Do you want to proceed?") && /thread|session/i.test(f));
     expect((h.app as any).queue).toEqual(["2 more tests please"]);
-    // Shift+Tab cycles default → accept edits → plan → auto → default, never to bypass.
+    // Shift+Tab cycles default → accept edits → plan → auto → codemax's full auto (with ask, then without) → default, never to bypass.
     const seen: string[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 6; i++) {
       h.setup.mockInput.pressTab({ shift: true });
       await Bun.sleep(30);
-      seen.push((h.app as any).active.mode);
+      seen.push(`${(h.app as any).active.mode}${(h.app as any).fullAuto !== "off" ? `+${(h.app as any).fullAuto}` : ""}`);
     }
-    expect(seen).toEqual(["acceptEdits", "plan", "auto", "default"]);
+    expect(seen).toEqual(["acceptEdits", "plan", "auto", "auto+guarded", "auto+all", "default"]);
     // A lone digit answers.
     await h.setup.mockInput.typeText("1");
     await Bun.sleep(30);
@@ -1640,7 +1640,7 @@ test("58. in the / palette, Tab writes the highlighted command into the prompt; 
     const app: any = h.app;
     const step = async (keys: string) => { await h.setup.mockInput.typeText(keys); await Bun.sleep(30); };
     await step("/");
-    await h.frame((f) => f.includes("/config"));
+    await h.frame((f) => f.includes("/agents"));   // the palette is open
     h.setup.mockInput.pressBackspace();
     await Bun.sleep(30);
     await step("/");

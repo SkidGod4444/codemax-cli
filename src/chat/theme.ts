@@ -201,7 +201,11 @@ export function pick<T>(arr: readonly T[], seed = Date.now()): T {
 
 /** Footer wording per permission mode, matching Claude Code's indicator style. */
 export function modeLabel(agent: string, modeId: string | undefined): { glyph: string; text: string; color: string } {
-  switch (modeId) {
+  // Copilot CLI names its modes by ACP's own addresses (…/session-modes#agent, #plan, #autopilot).
+  const acp = modeId?.match(/session-modes#(\w+)$/)?.[1];
+  if (acp === "autopilot") return { glyph: G.modeOn, text: "autopilot on · nothing asks", color: C.error };
+  if (acp === "agent") return { glyph: G.modeAsk, text: "asks before acting", color: C.dim };
+  switch (acp ?? modeId) {
     case "acceptEdits":
       return { glyph: G.modeOn, text: "accept edits on", color: C.accent };
     case "plan":

@@ -738,3 +738,33 @@ test("codex: an MCP tool approval (an elicitation with codex_approval_kind) is a
   expect(events.some((e) => e.type === "question_request")).toBe(false);
   expect(answers).toEqual([{ action: "accept", content: {} }]);
 });
+
+test("Copilot CLI: an engine over its own ACP mode; its diff, mode names and auto-approval switches are handled", async () => {
+  const { engineFactories } = await import("../src/engines/index.ts");
+  const { inputDiff } = await import("../src/engines/acp.ts");
+  const { agentEnv } = await import("../src/engines/env.ts");
+  const { modeLabel } = await import("../src/chat/theme.ts");
+  const { selfApprovingMode } = await import("../src/chat/app.ts");
+  expect(engineFactories.copilot).toBeDefined();
+  // Only GitHub's CLI at the version checked live: older builds were reported to approve tools themselves over ACP.
+  const { copilotVersionOk } = await import("../src/engines/index.ts");
+  expect(["GitHub Copilot CLI 1.0.111.", "GitHub Copilot CLI 1.0.112.\nRun 'copilot update'", "GitHub Copilot CLI 1.2.0", "GitHub Copilot CLI 2.0.0"].map(copilotVersionOk)).toEqual([true, true, true, true]);
+  expect(["GitHub Copilot CLI 1.0.91", "GitHub Copilot CLI 0.9.300", "copilot version: v1.34.0 (AWS)", ""].map(copilotVersionOk)).toEqual([false, false, false, false]);
+  // Its edit request carries a git diff and the file's name: shown as the other agents' diffs are.
+  const diff = inputDiff({ fileName: "/repo/src/a.ts", diff: "\ndiff --git a/repo/src/a.ts b/repo/src/a.ts\nindex 1..2\n--- a/repo/src/a.ts\n+++ b/repo/src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n\n" }, "/repo");
+  expect(diff).toBe("--- src/a.ts\n+++ src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new");
+  // Its modes are ACP addresses: agent asks, autopilot approves everything itself.
+  const modes = ["agent", "plan", "autopilot"].map((m) => ({ id: `https://agentclientprotocol.com/protocol/session-modes#${m}`, name: m }));
+  expect(modeLabel("Copilot CLI", modes[0]!.id).text).toBe("asks before acting");
+  expect(modeLabel("Copilot CLI", modes[1]!.id).text).toBe("plan mode on");
+  expect(modeLabel("Copilot CLI", modes[2]!.id).text).toContain("nothing asks");
+  expect(selfApprovingMode(modes[0]!.id, modes)).toBeNull();
+  expect(selfApprovingMode(modes[2]!.id, modes)?.ask).toBe(modes[0]!.id);
+  // A model billed by key, or a switch that approves tools without asking, never reaches it; its login token does.
+  const set = { COPILOT_PROVIDER_API_KEY: "k", COPILOT_PROVIDER_BASE_URL: "u", COPILOT_PROVIDERS_CONFIG: "f", COPILOT_ALLOW_ALL: "true", COPILOT_ASSISTED_APPROVAL: "1", COPILOT_HOME: "/h", GH_TOKEN: "t" };
+  Object.assign(process.env, set);
+  try {
+    const env = agentEnv();
+    expect(Object.keys(set).filter((k) => k in env)).toEqual(["COPILOT_HOME", "GH_TOKEN"]);
+  } finally { for (const k of Object.keys(set)) delete process.env[k]; }
+});

@@ -6,6 +6,12 @@ import { isNewer } from "./update.ts";
  * at most 4 lines, each under 70 characters, user-facing (what you get, not how).
  */
 export const WHATS_NEW: Record<string, string[]> = {
+  "0.1.25": [
+    "/team: several agents build one task at once, then it is merged",
+    "/auto: no permission prompts for this run, with or without stops",
+    "Copilot CLI joins; your rules and /commands work in every agent",
+    "Antigravity MCP fix; all agents out? It waits for the reset",
+  ],
   "0.1.24": [
     "Claude Code runs inside apps on Macs with no Bun or Node",
     "codemax serve installs Antigravity's ACP server by itself",

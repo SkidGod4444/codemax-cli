@@ -6,8 +6,9 @@ import type { Engine, EngineFactory } from "./types.ts";
 import { AcpEngine, type UsageSample } from "./acp.ts";
 import { CodexEngine } from "./codex.ts";
 import { ClaudeUsageTail } from "../transcripts/claude-usage.ts";
-import { antigravityServer } from "./antigravity.ts";
-import { which } from "../core/spawn.ts";
+import { antigravityHome, antigravityServer } from "./antigravity.ts";
+import { platformCmd, which } from "../core/spawn.ts";
+import { debugEvent } from "../core/debuglog.ts";
 import { IS_COMPILED } from "../core/update.ts";
 
 /** Grok writes ~/.grok/sessions/<encoded cwd>/<session>/usage.json with per-turn totals. */
@@ -95,6 +96,36 @@ export function claudeAdapter(d: AdapterDeps = adapterDeps()): ClaudeAdapter | n
   return null;
 }
 
+/** The oldest Copilot CLI whose ACP mode was seen asking before edits and commands. */
+export const COPILOT_MIN = [1, 0, 111];
+
+/** Is this `copilot --version` text GitHub's Copilot CLI, COPILOT_MIN or newer? */
+export function copilotVersionOk(text: string): boolean {
+  const m = text.match(/GitHub Copilot CLI (\d+)\.(\d+)\.(\d+)/);
+  if (!m) return false;
+  const v = m.slice(1, 4).map(Number);
+  for (let i = 0; i < 3; i++) if (v[i] !== COPILOT_MIN[i]) return v[i]! > COPILOT_MIN[i]!;
+  return true;
+}
+
+let copilotVersionText: Promise<string> | null = null;
+function copilotVersion(): Promise<string> {
+  copilotVersionText ??= (async () => {
+    try {
+      const p = Bun.spawn({ ...platformCmd(["copilot", "--version"]), stdout: "pipe", stderr: "ignore", stdin: "ignore" });
+      const timer = setTimeout(() => p.kill(), 15_000);
+      const out = await new Response(p.stdout).text();
+      clearTimeout(timer);
+      const ok = copilotVersionOk(out);
+      debugEvent("copilot-version", { ok, version: out.match(/\d+\.\d+\.\d+/)?.[0] });
+      return out;
+    } catch {
+      return "";
+    }
+  })();
+  return copilotVersionText;
+}
+
 const factories: EngineFactory[] = [
   {
     agent: "claude",
@@ -143,11 +174,29 @@ const factories: EngineFactory[] = [
     create: () => new AcpEngine({ agent: "cursor", name: "Cursor Agent", cmd: ["cursor-agent", "acp"] }),
   },
   {
+    agent: "copilot",
+    // GitHub Copilot CLI's own ACP mode (`copilot --acp`, checked live with 1.0.111): it asks
+    // before file edits (with the diff) and before shell commands that change something, and
+    // honours a reject; read-only commands (echo, ls) run unasked. Modes agent / plan / autopilot
+    // and an "allow all" switch come as config options; codemax never turns those on. It signs
+    // in with `copilot login` (the GitHub account's Copilot plan); env.ts removes its
+    // own-provider and auto-approval variables. It reports tokens per turn and no model list.
+    // Only GitHub's CLI, 1.0.111 or newer: earlier builds were reported to approve tools themselves
+    // in ACP mode (github/copilot-cli#845), and AWS ships an unrelated `copilot`.
+    available: async () => !!which("copilot") && copilotVersionOk(await copilotVersion()),
+    create: () => new AcpEngine({ agent: "copilot", name: "Copilot CLI", cmd: ["copilot", "--acp"] }),
+  },
+  {
     agent: "antigravity",
     // Google's ACP server for Antigravity (downloaded once, see antigravity.ts), driven over
     // plain pipes and signed in with the user's Google account only, never an API key.
     available: async () => !!which("agy") && !!antigravityServer(),
-    create: () => new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: antigravityServer()!.cmd, plainPipes: true, signIn: ["oauth-personal", "oauth-business"] }),
+    // A server of its own that cannot start makes it refuse every turn: it then runs in codemax's
+    // linked home, whose MCP config leaves that server out (antigravityHome).
+    create: () => {
+      const home = antigravityHome();
+      return new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: antigravityServer()!.cmd, env: home ? { GEMINI_HOME: home.home } : undefined, plainPipes: true, signIn: ["oauth-personal", "oauth-business"] });
+    },
   },
 ];
 

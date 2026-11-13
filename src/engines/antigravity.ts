@@ -1,5 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, linkSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { debugEvent, errorFields } from "../core/debuglog.ts";
 import { CODEMAX_HOME } from "../core/paths.ts";
 import { IS_WINDOWS, platformCmd, which } from "../core/spawn.ts";
 
@@ -137,4 +139,198 @@ async function defaultAgyModels(): Promise<string> {
   const out = await new Response(p.stdout).text();
   clearTimeout(timer);
   return out;
+}
+
+// ---------- MCP servers of Antigravity's own that cannot start ----------
+//
+// agy_acp_server (1.4.1) loads every server in <gemini home>/config/mcp_config.json and, when one
+// fails to start, refuses every turn ("The MCP server 'x' failed to initialize: … to continue").
+// It ignores `"disabled": true` (what `agy mcp disable` writes), so the only way to leave a server
+// out is a config without it. The usual case: the Antigravity IDE's Data Agent Kit extension
+// registers "data-agent-kit" there, a proxy to a socket that exists only while the IDE is open.
+//
+// codemax never edits that file. The server takes its home from $GEMINI_HOME, so when a server
+// has to be left out it runs in a home of codemax's (~/.codemax/agents/antigravity-home) where
+// everything is a link to the real one, except config/mcp_config.json: a copy without the
+// servers left out. Login, conversations, plugins, skills and rules stay the user's own files.
+// Checked live: same login (no new sign-in), a refused session works again once loaded there.
+
+/** Antigravity's home: $GEMINI_HOME, else ~/.gemini (the server's own rule). */
+export function geminiHome(): string {
+  return process.env.GEMINI_HOME || join(homedir(), ".gemini");
+}
+
+const OVERLAY = () => join(CODEMAX_HOME, "agents", "antigravity-home");
+const SKIP_FILE = () => join(CODEMAX_HOME, "antigravity-mcp-skip.json");
+
+function readJson(file: string): any {
+  try {
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** Antigravity's own servers, by name, as its config has them. */
+function ownServers(base: string): Record<string, any> {
+  const all = readJson(join(base, "config", "mcp_config.json"))?.mcpServers;
+  return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+}
+
+/** A server's setup as one string: a skip holds only while the setup is the one that failed. */
+const fingerprint = (entry: unknown) => Bun.hash(JSON.stringify(entry ?? null)).toString(36);
+
+/** Servers codemax leaves out because they did not start: name → the setup that failed. */
+function skips(): Record<string, string> {
+  const s = readJson(SKIP_FILE());
+  return s && typeof s === "object" && !Array.isArray(s) ? s : {};
+}
+
+function saveSkips(s: Record<string, string>) {
+  mkdirSync(CODEMAX_HOME, { recursive: true });
+  writeFileSync(SKIP_FILE(), JSON.stringify(s, null, 2), { mode: 0o600 });
+}
+
+export interface LeftOut {
+  name: string;
+  /** "failed": it did not start under codemax; "disabled": turned off with `agy mcp disable`. */
+  why: "failed" | "disabled";
+  /** A proxy to the Antigravity IDE: it can only start while the IDE is open. */
+  needsIde: boolean;
+}
+
+/** The servers of Antigravity's own that codemax starts it without. */
+export function antigravityLeftOut(base = geminiHome()): LeftOut[] {
+  const skip = skips();
+  const out: LeftOut[] = [];
+  for (const [name, entry] of Object.entries(ownServers(base))) {
+    const why = entry?.disabled === true ? "disabled" : skip[name] === fingerprint(entry) ? "failed" : null;
+    if (why) out.push({ name, why, needsIde: /antigravityide/i.test(JSON.stringify(entry?.args ?? "")) });
+  }
+  return out;
+}
+
+/** Leave one of Antigravity's own servers out from now on (it did not start). False when its config has no such server. */
+export function skipAntigravityMcp(name: string, base = geminiHome()): boolean {
+  const own = ownServers(base);
+  const key = Object.keys(own).find((k) => k.toLowerCase() === name.toLowerCase());
+  if (!key) return false;
+  saveSkips({ ...skips(), [key]: fingerprint(own[key]) });
+  return true;
+}
+
+/** Try a left-out server again at the next start. False when it was not left out by codemax. */
+export function unskipAntigravityMcp(name: string): boolean {
+  const s = skips();
+  const key = Object.keys(s).find((k) => k.toLowerCase() === name.toLowerCase());
+  if (!key) return false;
+  delete s[key];
+  saveSkips(s);
+  return true;
+}
+
+/**
+ * The home to start the ACP server in: null (its own) when no server has to be left out, else
+ * codemax's linked home with the filtered MCP config. Built again at every start, so a changed
+ * config or a new file in the real home is picked up.
+ */
+export function antigravityHome(base = geminiHome(), link: Linker = symlinkSync): { home: string; left: LeftOut[] } | null {
+  const left = antigravityLeftOut(base);
+  const home = OVERLAY();
+  // Only for a server that did not start. One merely turned off with `agy mcp disable` is left
+  // out too once the linked home is in use, but does not bring it on by itself.
+  if (!left.some((l) => l.why === "failed") || base === home) return null;
+  try {
+    const t0 = Date.now();
+    // The login and conversations live here; were it missing, the server would create it inside
+    // codemax's home and a later start in the real one would ask to sign in again.
+    mkdirSync(join(base, "antigravity-acp"), { recursive: true, mode: 0o700 });
+    mkdirSync(join(home, "config"), { recursive: true, mode: 0o700 });
+    const links = mirror(base, home, new Set(["config"]), link) + mirror(join(base, "config"), join(home, "config"), new Set(["mcp_config.json"]), link);
+    const config = readJson(join(base, "config", "mcp_config.json"));
+    const out = new Set(left.map((l) => l.name));
+    config.mcpServers = Object.fromEntries(Object.entries(config.mcpServers).filter(([name]) => !out.has(name)));
+    const file = join(home, "config", "mcp_config.json");
+    writeFileSync(`${file}.new`, JSON.stringify(config, null, 2), { mode: 0o600 });   // it can hold tokens
+    renameSync(`${file}.new`, file);
+    // Counts only: server names and setups are the user's.
+    debugEvent("antigravity-home", { ms: Date.now() - t0, links, kept: Object.keys(config.mcpServers).length, failed: left.filter((l) => l.why === "failed").length || undefined, disabled: left.filter((l) => l.why === "disabled").length || undefined });
+    return { home, left };
+  } catch (e) {
+    // Without the linked home the agent starts as before (and may refuse its turns again).
+    debugEvent("antigravity-home-failed", errorFields(e));
+    return null;
+  }
+}
+
+/** `symlinkSync`, or a stand-in: Windows without Developer Mode refuses links to files (tests). */
+type Linker = (target: string, path: string, type: "dir" | "file" | "junction") => void;
+
+/**
+ * Make `to` show everything in `from` except `own` (which the caller writes itself): folders as
+ * links (junctions on Windows, which need no privilege), files as links, or where Windows
+ * refuses those a hard link, or a copy. Nothing is ever removed recursively: only a link, a
+ * file, or an empty folder, so the real home cannot be reached through a link and deleted.
+ */
+function mirror(from: string, to: string, own: Set<string>, link: Linker): number {
+  const want = new Map<string, boolean>();   // name → is a folder
+  for (const d of readdirSync(from, { withFileTypes: true })) {
+    if (own.has(d.name) || /\.(tmp|lock|new)$/.test(d.name)) continue;
+    let dir: boolean;
+    try {
+      dir = statSync(join(from, d.name)).isDirectory();   // follows a link in the real home
+    } catch {
+      continue;   // a dangling link
+    }
+    want.set(d.name, dir);
+  }
+  for (const d of readdirSync(to, { withFileTypes: true })) {
+    if (own.has(d.name) || d.name.endsWith(".new")) continue;
+    const at = join(to, d.name);
+    const target = join(from, d.name);
+    if (d.isSymbolicLink()) {
+      let same = false;
+      try {
+        same = want.has(d.name) && readlinkSync(at).replace(/[\\/]+$/, "") === target;
+      } catch { /* unreadable: replaced below */ }
+      if (same) want.delete(d.name);
+      else unlinkOne(at);
+    } else if (d.isFile()) {
+      unlinkOne(at);   // a hard link or copy: made again, so it is never stale
+    }
+    // A real folder here was made by the server itself: left alone.
+    else want.delete(d.name);
+  }
+  let made = 0;
+  for (const [name, dir] of want) {
+    const target = join(from, name);
+    const at = join(to, name);
+    try {
+      link(target, at, dir ? (IS_WINDOWS ? "junction" : "dir") : "file");
+    } catch {
+      if (dir) continue;
+      try {
+        linkSync(target, at);
+      } catch {
+        try {
+          copyFileSync(target, at);
+        } catch {
+          continue;
+        }
+      }
+    }
+    made++;
+  }
+  return made;
+}
+
+/** Remove one link or file. A junction is removed as the empty folder Windows sees it as. */
+function unlinkOne(at: string) {
+  try {
+    unlinkSync(at);
+  } catch {
+    try {
+      rmdirSync(at);
+    } catch { /* stays; linking over it fails and is skipped */ }
+  }
 }

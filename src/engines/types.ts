@@ -81,6 +81,10 @@ export interface PermissionRequest {
   detail?: string;
   /** The change an edit would make, as a unified-style diff (uncut; the dialog decides how much to show). */
   diff?: string;
+  /** The files it would touch, when the agent names them (full auto still asks for ones outside the project or where secrets live). */
+  paths?: string[];
+  /** codemax's own check (a write outside the project, a read where secrets live): asked in every mode, full auto included. */
+  guard?: "outside";
   options: PermissionOption[];
 }
 

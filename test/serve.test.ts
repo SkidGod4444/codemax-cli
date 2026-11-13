@@ -23,6 +23,11 @@ function fakeAgent(seen: { mcpServers?: any; decisions: string[] }) {
     async prompt({ sessionId, prompt }) {
       const text = (prompt[0] as any).text as string;
       if (/limit/.test(text)) throw new Error("You've hit your usage limit");
+      if (/refuse/.test(text) && !(seen as any).refused) {   // Antigravity with an MCP server of its own that cannot start
+        (seen as any).refused = true;
+        await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "The MCP server 'data-agent-kit' failed to initialize: connect ENOENT /tmp/x.sock. Fix the MCP server, or remove it from your configuration and start a new session, to continue." } } as any });
+        return { stopReason: "end_turn" };
+      }
       if (/search the web/.test(text)) {   // Claude Code's WebSearch asks as ACP's "fetch" kind
         const p = await conn.requestPermission({ sessionId, toolCall: { toolCallId: "w1", title: "Search \"reel trends\"", kind: "fetch" }, options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] } as any);
         seen.decisions.push(`web:${(p.outcome as any).optionId}`);
@@ -154,6 +159,37 @@ test("serve: a quota error with no other agent reports the limit instead of hang
   expect(r.result.stopReason).toBe("error");
   expect(String(r.result.error)).toMatch(/limit|quota/i);
   expect(out.some((l) => l.event === "handoff")).toBe(false);
+  io.push(JSON.stringify({ method: "close" }));
+  await run;
+}, 15000);
+
+test("serve: Antigravity refusing over an MCP server of its own that cannot start is restarted without it and asked again", async () => {
+  const { mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const ag = await import("../src/engines/antigravity.ts");
+  const base = process.env.GEMINI_HOME!;   // the test home from test/setup.ts
+  mkdirSync(join(base, "config"), { recursive: true });
+  const config = JSON.stringify({ mcpServers: { "data-agent-kit": { command: "node", args: ["proxy.js", "dataAgentKit-antigravityide"] }, good: { command: "good" } } });
+  writeFileSync(join(base, "config", "mcp_config.json"), config);
+  const seen = { decisions: [] as string[] } as { mcpServers?: any; decisions: string[] };
+  const out: any[] = [];
+  const io = lines();
+  const cwd = mkdtempSync(join(tmpdir(), "codemax-serve-cwd-"));
+  let started = 0;
+  const serve = new Serve({ config: { ...structuredClone(DEFAULT_CONFIG), order: ["antigravity"] }, engineFactory: () => (started++, new AcpEngine({ agent: "antigravity", name: "Antigravity CLI", cmd: [], stream: fakeAgent(seen) })), available: async (a) => a === "antigravity", write: (l) => out.push(l) });
+  const run = serve.run(io.stream);
+  io.push(JSON.stringify({ id: 1, method: "configure", params: { agent: "antigravity", cwd, mcp: [] } }));
+  io.push(JSON.stringify({ id: 2, method: "prompt", params: { text: "refuse first, then add a title" } }));
+  const t0 = Date.now();
+  while (!out.some((l) => l.id === 2)) { if (Date.now() - t0 > 5000) throw new Error(`timeout ${JSON.stringify(out).slice(0, 500)}`); await Bun.sleep(10); }
+  expect(out.find((l) => l.id === 2).result.stopReason).toBe("end_turn");
+  expect(started).toBe(2);
+  // The host is told the first reply was no answer, then gets the real one.
+  const retry = out.findIndex((l) => l.event === "retry");
+  expect(retry).toBeGreaterThan(-1);
+  expect(out.slice(retry).some((l) => l.event === "text_delta" && /done/.test(l.text))).toBe(true);
+  expect(ag.antigravityLeftOut(base).map((l) => l.name)).toEqual(["data-agent-kit"]);
+  expect(readFileSync(join(base, "config", "mcp_config.json"), "utf8")).toBe(config);   // the user's config is not touched
+  ag.unskipAntigravityMcp("data-agent-kit");
   io.push(JSON.stringify({ method: "close" }));
   await run;
 }, 15000);

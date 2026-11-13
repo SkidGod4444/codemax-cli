@@ -22,19 +22,24 @@ export interface Tip {
 export const TIPS: Tip[] = [
   // Several agents
   { text: "Tip: /debate <goal> · 2-3 agents argue out a plan before anything is built", when: (c) => c.agents >= 2 },
+  { text: "Tip: /team <goal> · a lead splits the task and several agents build the parts at the same time" },
   { text: "Tip: /config → Handoff order · the next agent and model take over when one hits its limit", when: (c) => c.agents >= 2 },
   { text: "Tip: /config → At a usage limit → hand off automatically, for unattended runs", when: (c) => c.agents >= 2 },
+  { text: "Tip: with every agent out, codemax waits for the first limit to reset and continues the task" },
   { text: "Tip: {hotkey} or /switch changes agent · the next one picks up the task where it stopped", when: (c) => c.agents >= 2 },
   { text: "Tip: /ask <agent> <question> asks another agent without switching", when: (c) => c.agents >= 2 },
   { text: "Tip: \"routes\" in ~/.codemax/config.json sends matching messages to the agent you name", when: (c) => c.agents >= 2 },
   { text: "Tip: /config → Side agent · a second agent reviews the work and flags problems in a note" },
+  { text: "Tip: your CLAUDE.md / AGENTS.md rules reach every agent, also the ones that do not read that file" },
   { text: "Tip: /task shows the shared task: request, plan, who did what and where it stopped" },
   { text: "Tip: /compact has the agent write a project summary that every handoff includes" },
   { text: "Tip: /agents lists your agents, their sessions and how much of their limit is left" },
   // Model and permissions
+  { text: "Tip: your custom slash commands (Claude's, Codex's, Cursor's…) run in every agent · type / to see them" },
   { text: "Tip: /model picks the agent's model from its own list" },
   { text: "Tip: /effort sets how hard the agent thinks, when its model offers levels" },
   { text: "Tip: Shift+Tab (or /mode) changes how often the agent asks permission" },
+  { text: "Tip: /auto stops permission prompts for this run (with or without the safety stops) · /auto off" },
   { text: "Tip: in a permission prompt, Ctrl+O shows more of the diff and PgUp/PgDn scroll it" },
   { text: "Tip: /config → Agent questions · let agents stop and ask you instead of guessing" },
   // Files and code

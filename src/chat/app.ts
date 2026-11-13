@@ -13,7 +13,7 @@ import { findHotkey, parseHotkeys, type HotkeySpec } from "../core/hotkey.ts";
 import { createEngine, EDITS_WITHOUT_ASKING, hasEngine, NO_PERMISSION_PROMPTS, engineFactories, grokPermissionNote } from "../engines/index.ts";
 import type { Engine, EngineEvent, PermissionRequest, PromptImage, QuestionRequest, RewindPoint, StopReason } from "../engines/types.ts";
 import { droppedContents, droppedFiles, imageType, splitDropped } from "./drop.ts";
-import { CODEMAX_HOME, HOME, ensureDir, insideDir } from "../core/paths.ts";
+import { CODEMAX_HOME, HOME, ensureDir, insideDir, secretPlace } from "../core/paths.ts";
 import { threadMarkdown } from "../core/export.ts";
 import { basename, join, relative, resolve } from "node:path";
 import { strippedKeys } from "../engines/env.ts";
@@ -43,12 +43,13 @@ import { agentSetupFailure, cleanError, isLimitNotice, parseResetTime } from "..
 import { TurnRecorder } from "../core/journal.ts";
 import { Awake, defaultAwakeDeps, recoverAwake } from "../core/awake.ts";
 import { buildReviewPrompt, forwardMessage, isForwardedNote, parseNote } from "../core/review.ts";
+import { applyPatch, copyPatch, leadPrompt, makeCopy, parseSplit, removeCopies, savePatch, splitOverlaps, splitPrompt, teamCost, conversationSoFar, teamIntent, teamRunDir, TEAM_MAX, workerPrompt, type TeamPart, type TeamResult } from "../core/team.ts";
 import { critiquePrompt, debateCost, finalPlan, judgePrompt, parseSettled, proposalPrompt, roundsLabel, settledPrompt, UNTIL_SETTLED_MAX, type DebateRounds } from "../core/debate.ts";
 import { logoLines } from "./logo.ts";
 import { checkForUpdate, relaunch, RESTARTED_ENV, UPDATED_FROM_ENV, UPDATED_TO_ENV, updatePlan } from "../core/update.ts";
 import { whatsNew } from "../core/whatsnew.ts";
 import { MAKER, firstName, greeting } from "./greeting.ts";
-import { collectShared, nativeMcpSource, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
+import { collectShared, expandCommand, nativeMcpSource, RULES_INLINE_CHARS, rulesNote, sharedFor, skillsIndex, type Shared, type SharedMcpServer } from "../core/share.ts";
 import { describeStatus, type McpStatus } from "../core/mcpstatus.ts";
 import { openInBrowser } from "../core/openurl.ts";
 import type { McpAction } from "../engines/types.ts";
@@ -59,7 +60,7 @@ import { NotePanel, splitNote } from "./notes.ts";
 import { Onboarding, type OnboardingStep } from "./onboarding.ts";
 import { nextTip, TIPS } from "./tips.ts";
 import { SubagentPanel } from "./subagents.ts";
-import { agyOnlyModels, antigravityInstallPlan, installAntigravityServer, type InstallPlan } from "../engines/antigravity.ts";
+import { agyOnlyModels, antigravityInstallPlan, antigravityLeftOut, installAntigravityServer, skipAntigravityMcp, unskipAntigravityMcp, type InstallPlan } from "../engines/antigravity.ts";
 
 const HOTKEY_NAMES: Record<string, string[]> = { "/": ["/", "_", "?"], "^": ["^", "6"] };
 const VERSION = pkg.version;
@@ -68,7 +69,23 @@ const UPDATE_RECHECK_FIRST_MS = 30 * 60_000;
 /** Shift+Tab's order (Claude Code's: default → accept edits → plan → auto); other agents' own modes follow. */
 const MODE_CYCLE = ["default", "acceptEdits", "plan", "auto"];
 /** Modes that skip every prompt stay out of Shift+Tab (pick them with /mode): one key press must never turn prompts off for good. */
-const NO_CYCLE = new Set(["bypassPermissions", "dontAsk", "yolo", "never"]);
+const NO_CYCLE = new Set(["bypassPermissions", "dontAsk", "yolo", "never", "autopilot"]);
+/** A mode's short name: Copilot CLI names its modes by ACP's addresses (…/session-modes#agent, #plan, #autopilot). */
+const modeKey = (id: string | undefined) => id?.match(/session-modes#(\w+)$/)?.[1] ?? id ?? "";
+/** Waits per request: a reset time read wrong (a weekly limit given as "3pm") must not keep codemax waiting day after day. */
+const LIMIT_WAIT_CAP = 3;
+/** How long after the stated reset codemax tries again. */
+const LIMIT_WAIT_MARGIN_MS = 60_000;
+/** What the agent whose limit has reset is told (its own session still holds the unfinished request). */
+export const CONTINUE_AFTER_RESET = "Your usage limit has reset. Continue the task where you stopped.";
+/** Full auto's choices (/auto, /config): per run, never saved. */
+const FULL_AUTO_CHOICES: { value: "off" | "guarded" | "all"; label: string; description: string }[] = [
+  { value: "off", label: "off", description: "agents ask before edits and commands, as their mode says" },
+  { value: "guarded", label: "auto, with ask", description: "asks only before changing a file outside the project or reading secrets · commands run unasked" },
+  { value: "all", label: "auto, without ask", description: "nothing asks: edits and commands anywhere, secrets included" },
+];
+/** Requests that only look: in full auto with ask, any other kind (or none) still asks when it names a file outside the project. */
+const ONLY_READS = /^(read|search|fetch|think)$/;
 /**
  * Claude Code's own rule for keeping the user informed, in as few words as it takes (it costs a
  * few dozen tokens: once per new session, or per turn where the agent caches its prompt). Claude
@@ -107,6 +124,8 @@ interface McpRow {
   shared?: SharedMcpServer;
   /** The agent's own (from its config), not one codemax passed. */
   own: boolean;
+  /** One of Antigravity's own that did not start, so codemax starts it without (Enable tries it again). */
+  leftOut?: boolean;
 }
 
 /** How long an agent's notice stays on the prompt's border (it stays in the transcript). */
@@ -144,7 +163,7 @@ function limitWarning(m: Map<string, { usedPercent?: number; resetsAt?: number; 
 }
 
 /** Built-in commands that start agent work or replace the session: they wait for the agent to finish. */
-const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|update|setup|restart|mcp)\b/i;
+const WAITS_FOR_AGENT = /^\/(task|compact|new|undo|rewind|verify|ask|debate|team|update|setup|restart|mcp)\b/i;
 /** How long a lone 0 / 1 / 2 must sit in the prompt before it acts on the side agent's note. */
 const NOTE_ARM_MS = 800;
 /** A question left unanswered this long is skipped when `questions` is "timeout". */
@@ -164,6 +183,8 @@ interface Active {
   commands: { name: string; description?: string }[];
   /** Context window fill, when the agent reports it. */
   context?: { used: number; size: number };
+  /** Where it works, when not the project folder (a /team worker's copy). */
+  cwd?: string;
 }
 
 interface Builtin {
@@ -454,9 +475,9 @@ export class ChatApp {
     }
     // What the other agents have set up, now shared with every agent (one line; details in the debug log).
     const sh = this.refreshShared();
-    if (sh.mcp.length || sh.skills.length) {
+    if (sh.mcp.length || sh.skills.length || sh.commands.length) {
       const by = Object.entries(sh.mcp.reduce<Record<string, number>>((m, s) => ((m[s.source.split(":")[0]!] = (m[s.source.split(":")[0]!] ?? 0) + 1), m), {})).map(([k, v]) => `${k} ${v}`).join(", ");
-      notes.push(`shared across agents: ${sh.mcp.length} MCP server${sh.mcp.length === 1 ? "" : "s"}${by ? ` (${by})` : ""}, ${sh.skills.length} skill${sh.skills.length === 1 ? "" : "s"} · /mcp`);
+      notes.push(`shared across agents: ${sh.mcp.length} MCP server${sh.mcp.length === 1 ? "" : "s"}${by ? ` (${by})` : ""}, ${sh.skills.length} skill${sh.skills.length === 1 ? "" : "s"}${sh.commands.length ? `, ${sh.commands.length} slash command${sh.commands.length === 1 ? "" : "s"}` : ""} · /mcp`);
     }
     for (const e of sh.errors.slice(0, 3)) notes.push(`could not read ${e.file.replace(HOME, "~")}: ${e.error.slice(0, 80)}`);
     debugEvent("app-start", this.debugInfo());
@@ -739,6 +760,13 @@ export class ChatApp {
       this.renderFooter();
       return;
     }
+    if (key.name === "escape" && this.team && !this.permission && this.paletteKind !== "handoff") {
+      key.stopPropagation();
+      this.team.stopped = true;
+      for (const a of [...this.team.planners, ...this.team.actives]) void a.engine.cancel().catch(() => {});
+      this.setFlash("stopping the team…");
+      return;
+    }
     if (key.name === "escape" && this.debate && !this.permission) {
       key.stopPropagation();
       this.debate.stopped = true;
@@ -756,6 +784,11 @@ export class ChatApp {
       key.stopPropagation();
       this.verifying.stop();
       this.setFlash("stopping the checks…");
+      return;
+    }
+    if (key.name === "escape" && this.limitWait && !this.active?.turn && !this.input.plainText) {
+      key.stopPropagation();
+      this.cancelLimitWait("esc");
       return;
     }
     if (key.name === "escape") {
@@ -987,7 +1020,29 @@ export class ChatApp {
       this.enqueue(text);
       return;
     }
+    if (this.offerTeam(this.active, text)) return;
     await this.send(this.active, text);
+  }
+
+  /**
+   * A message that asks to share the work out among agents ("split this between Claude and
+   * Codex", "delegate the tests to another agent"): the team picker opens with it as the goal.
+   * Esc there sends the message to this agent alone. /config → When a message asks to delegate.
+   */
+  private offerTeam(active: Active, text: string): boolean {
+    const wants = this.config.teamOffer !== false && !this.team && !this.debate && active === this.active && !active.turn && !this.queue.length && !isForwardedNote(text) ? teamIntent(text) : null;
+    if (!wants || !this.inGitRepo()) return false;
+    debugEvent("team-intent", { named: wants.named.length, chars: text.length });
+    this.transcript.note("this asks for the work to be shared out: opening /team · Esc sends it as an ordinary message", C.dim);
+    this.openTeam(text, { named: wants.named, send: () => void this.send(active, text) });
+    return true;
+  }
+
+  /** Is the project a git repository (a team works in copies made with git)? Asked once. */
+  private gitRepo: boolean | null = null;
+  private inGitRepo(): boolean {
+    this.gitRepo ??= this.safelyGet("git", () => Bun.spawnSync(["git", "rev-parse", "--is-inside-work-tree"], { cwd: this.cwd, stdout: "pipe", stderr: "ignore" }).exitCode === 0, false);
+    return this.gitRepo;
   }
 
   /** Append @file contents and pending shell output to an outgoing message. */
@@ -1028,6 +1083,7 @@ export class ChatApp {
     if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /rewind", C.warn);
     if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /rewind", C.warn);
     if (this.debate) return this.transcript.note("a debate is reading the code; Esc stops it, then /rewind", C.warn);
+    if (this.team) return this.transcript.note("a team is building; Esc stops it, then /rewind", C.warn);
     if (!this.config.checkpoints) return this.transcript.note("rewind needs snapshots: /config → Snapshots for /undo → on", C.warn);
     const mine = [...this.checkpoints].reverse().filter((c) => c.message !== undefined && !c.label.startsWith("before rewind: "));
     // Older snapshots of this thread (ones from before threads carry none and are kept).
@@ -1162,6 +1218,7 @@ export class ChatApp {
     if (this.active?.turn) return this.transcript.note("the agent is working; Esc first, then /undo", C.warn);
     if (this.verifying) return this.transcript.note("the checks are running; Esc first, then /undo", C.warn);
     if (this.debate) return this.transcript.note("a debate is reading the code; Esc stops it, then /undo", C.warn);
+    if (this.team) return this.transcript.note("a team is building; Esc stops it, then /undo", C.warn);
     // Look before taking it: an undo that finds nothing changed keeps the snapshot for later.
     const cp = this.checkpoints.at(-1) ?? (await listCheckpoints(this.cwd, 1))[0];
     if (!cp) return this.transcript.note("no checkpoint to restore (checkpoints need a git repo)", C.warn);
@@ -1472,6 +1529,267 @@ export class ChatApp {
     this.renderer.root.add(this.palette.box);
   }
 
+
+  // ---------- /team: several agents build one task at the same time (core/team.ts) ----------
+
+  /** A running /team: the lead while it splits the task (it only plans), the workers, and whether you stopped it (Esc). */
+  private team: { planners: Active[]; actives: Active[]; stopped: boolean } | null = null;
+
+  /** /team <goal>: choose 2 to TEAM_MAX workers, each an agent and the model it builds on, then start. */
+  private openTeam(goal: string, asked?: { named: string[]; send: () => void }) {
+    goal = goal.trim();
+    if (!goal) return this.transcript.note("usage: /team <goal> · a lead splits the task, 2 or more agents build the parts at the same time, the lead checks the result", C.warn);
+    if (this.team || this.debate) return this.transcript.note(`a ${this.team ? "team" : "debate"} is already running · Esc stops it`, C.warn);
+    if (!this.active) return this.transcript.note("no agent running — /switch to start one (it leads the team)", C.warn);
+    if (!this.inGitRepo()) return this.transcript.note("/team needs a git repository: each agent works in a copy made with git", C.warn);
+    const ok = (a: AgentId) => !!this.detect.get(a)?.installed && !!this.detect.get(a)?.engine;
+    const usable = listAdapters(this.config.order).filter((a) => ok(a.id));
+    // To start with: your agent, then the next one in your handoff order, with their models.
+    const entries: { agent: AgentId; model?: string; modelName?: string }[] = [];
+    const add = (e: { agent: AgentId; model?: string; modelName?: string }) => {
+      if (entries.length < 2 && ok(e.agent) && !entries.some((x) => x.agent === e.agent && x.model === e.model)) entries.push(e);
+    };
+    add(this.chainEntry(this.active.agent) ?? { agent: this.active.agent });
+    // The agents your message named come first, then the next ones in your handoff order.
+    for (const id of asked?.named ?? []) if (id !== this.active.agent && ok(id as AgentId) && entries.length < TEAM_MAX && !entries.some((x) => x.agent === id)) entries.push(this.chainEntry(id as AgentId) ?? { agent: id as AgentId });
+    for (const e of this.chain()) add(e);
+    let leave = () => this.closePalette();
+    if (asked) {
+      // Esc: not a team after all. The message goes to your agent as it is.
+      leave = () => {
+        this.closePalette();
+        debugEvent("team-intent-declined", {});
+        asked.send();
+      };
+    }
+    const show = () => {
+      this.closePalette();
+      this.paletteKind = "modes";
+      const items: PaletteItem[] = [
+        ...entries.map((e, i) => ({ label: `${i + 1}. ${this.entryLabel(e)}`, description: "Enter removes it", value: `e:${i}` })),
+        ...(entries.length < TEAM_MAX ? [{ label: "+ Add a worker", description: "an agent, then its model (the same agent twice is fine)", value: "add" }] : []),
+        { label: `Split the task (${entries.length} workers)`, description: entries.length < 2 ? "add at least two" : teamCost(entries.length), value: "start", disabled: entries.length < 2 },
+      ].map((it, i) => ({ ...it, weight: 100 - i }));
+      this.palette = new Palette(this.renderer, {
+        title: asked ? `Share this out among a team? · 2 to ${TEAM_MAX} agents, each on a model you choose · Esc sends it to ${this.active?.name ?? "your agent"} alone` : `Team: who builds? · 2 to ${TEAM_MAX} agents, each on a model you choose · Esc cancels`,
+        items,
+        onPick: (it) => {
+          if (it.value === "start") {
+            this.closePalette();
+            return void this.runTeam([...entries], goal, !!asked);
+          }
+          if (it.value.startsWith("e:")) {
+            entries.splice(Number(it.value.slice(2)), 1);
+            return show();
+          }
+          this.closePalette();
+          this.paletteKind = "modes";
+          this.palette = new Palette(this.renderer, {
+            title: "Which agent? · Esc back",
+            items: usable.map((a, i) => ({ label: a.name, value: a.id, weight: 100 - i })),
+            onPick: (pick) =>
+              void this.pickModelFor(pick.value as AgentId, (m) => {
+                entries.push({ agent: pick.value as AgentId, ...m });   // the same agent and model twice is two workers
+                show();
+              }),
+            onClose: () => show(),
+          }, this.paletteAnchor);
+          this.renderer.root.add(this.palette.box);
+        },
+        onClose: () => leave(),
+      }, this.paletteAnchor);
+      this.renderer.root.add(this.palette.box);
+    };
+    show();
+  }
+
+  /** The split, for you to accept before anything is built. */
+  private confirmSplit(parts: TeamPart[], names: string[]): Promise<boolean> {
+    return new Promise((done) => {
+      let answered = false;
+      const answer = (yes: boolean) => {
+        if (answered) return;
+        answered = true;
+        this.closePalette();
+        done(yes);
+      };
+      this.closePalette();
+      this.paletteKind = "handoff";
+      this.palette = new Palette(this.renderer, {
+        title: `Build these ${parts.length} parts at the same time? · Enter starts · Esc cancels`,
+        items: [
+          { label: `Start building (${parts.length} agents)`, description: "each in its own copy of the project; codemax merges them", value: "go", weight: 100 },
+          ...parts.map((p, i) => ({ label: `${i + 1}. ${p.title}`, description: `${names[i]} · ${p.files.join(", ") || "no files named"}`, value: "go", weight: 90 - i })),
+          { label: "Cancel", description: "nothing is built", value: "no", weight: 0 },
+        ],
+        onPick: (it) => answer(it.value === "go"),
+        onClose: () => answer(false),
+      }, this.paletteAnchor);
+      this.renderer.root.add(this.palette.box);
+    });
+  }
+
+  /**
+   * Run a team (see core/team.ts): the lead splits the goal (it only plans: whatever it asks to
+   * do is refused), you accept the split, each worker builds its part in its own copy with its
+   * own permission prompts (or full auto), the parts are merged into your folder as patches,
+   * and your agent gets the result to check. Usage counts; the work of the parts is not journaled,
+   * the lead's check is an ordinary turn.
+   */
+  private async runTeam(entries: { agent: AgentId; model?: string; modelName?: string }[], goal: string, fromMessage = false) {
+    const main = this.active;
+    if (this.team || this.debate || entries.length < 2 || !main) return;
+    // The lead splits the task in your agent's own session: it has to be free.
+    if (main.turn) return this.transcript.note(`${main.name} is working; Esc stops the turn, then /team again`, C.warn);
+    const t0 = Date.now();
+    const team = { planners: [] as Active[], actives: [] as Active[], stopped: false };
+    this.team = team;
+    const names = entries.map((e) => this.entryLabel(e));
+    this.transcript.divider(`team · ${names.join(" + ")}`);
+    this.transcript.note(`${teamCost(entries.length)} · Esc stops`, C.dim);
+    debugEvent("team-start", { workers: entries.length, agents: entries.map((e) => e.agent) });
+    this.renderFooter();
+    let runDir: string | null = null;
+    const copies: string[] = [];
+    let keep = false;
+    let results: TeamResult[] | null = null;
+    // A team that came from a message of yours and built nothing: the message goes back in the prompt, never lost.
+    const giveBack = () => {
+      if (!fromMessage || this.closed || this.input.plainText) return;
+      this.input.setText(goal);
+      this.transcript.note(`your message is back in the prompt · Enter sends it to ${main.name} alone`, C.dim);
+    };
+    const started: Active[] = [];
+    const start = async (entry: { agent: AgentId; model?: string }, name: string, cwd: string) => {
+      const plan = false;
+      const blocked = this.checkBlockers(entry.agent);
+      if (blocked.length) throw new Error(`${getAdapter(entry.agent).name} not started: ${blocked[0]!.message}`);
+      const engine = this.engineFactory(entry.agent);
+      const a: Active = { agent: entry.agent, name, engine, turn: null, replay: null, unsubscribe: () => {}, commands: [], cwd };
+      this.side.add(a);
+      a.unsubscribe = engine.onEvent((e) => this.onEngineEvent(a, safeDeep(e)));
+      started.push(a);
+      (plan ? team.planners : team.actives).push(a);
+      await engine.start({ cwd, questions: false, instructions: plan ? undefined : this.narration(entry.agent), mcpServers: plan ? [] : this.sharedMcp(entry.agent), mcpDisabled: [...(this.mcpDisabled.get(entry.agent) ?? [])] });
+      if (entry.model && engine.setModel && engine.info?.currentModel !== entry.model) await engine.setModel(entry.model).catch((e: any) => this.transcript.note(`${name}: could not switch model (${String(e?.message ?? e).slice(0, 100)})`, C.warn));
+      if (plan && engine.setMode && engine.info?.modes.some((m) => m.id === "plan")) await engine.setMode("plan").catch(() => {});
+      return a;
+    };
+    const ask = async (a: Active, prompt: string) => {
+      let reply = "";
+      const r = await this.runTurn(a, prompt, { record: false, journal: false, onReply: (x) => (reply = x) }).catch((e: any) => {
+        this.transcript.error(`${a.name}: ${String(e?.message ?? e).slice(0, 200)}`);
+        return undefined;
+      });
+      return { reply, stop: r?.stop ?? "error" };
+    };
+    try {
+      // The lead is your own agent, in its own session: it splits the task knowing everything you
+      // discussed. It only plans here (plan mode where it has one; whatever it asks to do is refused).
+      const lead = main;
+      this.transcript.divider(`${lead.name} splits the task`);
+      team.planners.push(lead);
+      const was = lead.mode;
+      const planMode = lead.engine.info?.modes.find((m) => modeKey(m.id) === "plan")?.id;
+      // Only when the mode it is in is known, so it can be put back.
+      const toPlan = !!planMode && !!lead.engine.setMode && !!was && was !== planMode;
+      if (toPlan) await lead.engine.setMode!(planMode!).catch(() => {});
+      let split: { reply: string; stop: string };
+      try {
+        split = await ask(lead, splitPrompt(goal, names.map((name) => ({ name }))));
+      } finally {
+        team.planners.length = 0;
+        if (toPlan) await lead.engine.setMode!(was!).then(() => (lead.mode = was)).catch(() => this.transcript.note(`${lead.name} is still in plan mode (it could not be put back): Shift+Tab or /mode`, C.warn));
+        this.renderFooter();
+      }
+      if (team.stopped) return void (this.transcript.note("team stopped", C.warn), giveBack());
+      const parts = parseSplit(split.reply, entries.length);
+      debugEvent("team-split", { ms: Date.now() - t0, parts: parts?.length ?? 0, stop: split.stop, overlaps: parts ? splitOverlaps(parts).length || undefined : undefined });
+      if (!parts) return void (this.transcript.error(`team: ${lead.name} gave no split codemax could read · nothing was built`), giveBack());
+      if (parts.length < 2) return void (this.transcript.note(`${lead.name} sees no way to split this into parts that do not share files · send it as an ordinary message instead`, C.warn), giveBack());
+      const overlaps = splitOverlaps(parts);
+      if (overlaps.length) this.transcript.note(`two parts both claim ${overlaps.slice(0, 4).join(", ")}: their changes there may not merge, and the lead then applies them by hand`, C.warn);
+      const workers = entries.slice(0, parts.length);
+      const workerNames = names.slice(0, parts.length);
+      if (!(await this.confirmSplit(parts, workerNames)) || team.stopped) return void (this.transcript.note("team cancelled · nothing was built", C.dim), giveBack());
+      // Each worker's copy starts from your files as they are now, uncommitted work included.
+      const snap = await createCheckpoint(this.cwd, `team: ${goal.slice(0, 60).replace(/\s+/g, " ")}`).catch(() => null);
+      if (!snap) return void (this.transcript.error("team: could not snapshot this folder (a team works in copies made with git) · nothing was built"), giveBack());
+      runDir = teamRunDir();
+      for (let i = 0; i < parts.length; i++) copies.push(join(runDir, `copy-${i + 1}`));
+      await Promise.all(copies.map((dir) => makeCopy(this.cwd, snap.sha, dir)));
+      // What a handoff gives a new agent, as context: the task so far, its plan, the steps taken and the diff.
+      const hasHistory = this.ledger.turns().length > 0 || this.ledger.journal.steps().some((s) => s.kind === "user");
+      const packet = hasHistory ? await buildBrief({ ledger: this.ledger, cwd: this.cwd, to: workers[0]!.agent, from: main.agent, reason: "a team is building the next step", config: this.config, purpose: "context" }).catch(() => "") : "";
+      // And the conversation itself: the record holds the current task's steps, not what was decided in earlier replies.
+      const talk = conversationSoFar(this.ledger.turns());
+      const record = [talk, packet].filter(Boolean).join("\n\n");
+      debugEvent("team-context", { chars: record.length, conversation: talk.length, lead: main.agent });
+      this.transcript.divider(`${parts.length} parts, built side by side`);
+      const auto = this.fullAuto === "off" ? "each agent asks before edits and commands as usual (/auto stops that)" : "full auto is on: they are not asked";
+      this.transcript.note(`each works in its own copy of the project; your files change only at the merge · ${auto}`, C.dim);
+      const built = await Promise.all(parts.map(async (_p, i) => {
+        const t1 = Date.now();
+        const a = await start(workers[i]!, workerNames[i]!, copies[i]!).catch((e: any) => {
+          this.transcript.error(`team: ${String(e?.message ?? e).slice(0, 200)}`);
+          return null;
+        });
+        const r = a && !team.stopped ? await ask(a, `${record ? `${record}\n\n` : ""}${workerPrompt(goal, parts, i, workerNames.map((name) => ({ name })))}`) : { reply: "", stop: a ? "cancelled" : "error" };
+        debugEvent("team-worker-end", { agent: workers[i]!.agent, part: i + 1, stop: r.stop, ms: Date.now() - t1, replyChars: r.reply.length });
+        return r;
+      }));
+      if (team.stopped) {
+        // What the parts had changed is not thrown away: each is kept as a patch you (or an agent) can apply.
+        const saved: string[] = [];
+        for (let i = 0; i < parts.length; i++) {
+          const { patch, files } = await copyPatch(copies[i]!, snap.sha).catch(() => ({ patch: "", files: [] as string[] }));
+          if (files.length) saved.push(savePatch(runDir, i + 1, patch));
+        }
+        keep = saved.length > 0;
+        return this.transcript.note(`team stopped · nothing was merged${saved.length ? ` · what ${saved.length === 1 ? "one part" : `${saved.length} parts`} had changed is kept as patches in ${runDir} (git apply <file>)` : ""}`, C.warn);
+      }
+      // The merge: your files as they are now are snapshotted first, so /undo puts them back.
+      await this.checkpoint(main, `team merge: ${goal}`, `team: ${goal}`);
+      results = [];
+      for (let i = 0; i < parts.length; i++) {
+        const { patch, files } = await copyPatch(copies[i]!, snap.sha);
+        const merged = !files.length ? "empty" : (await applyPatch(this.cwd, patch)) ? "applied" : "conflict";
+        const file = merged === "conflict" ? savePatch(runDir, i + 1, patch) : undefined;
+        if (file) keep = true;
+        results.push({ worker: workerNames[i]!, title: parts[i]!.title, stop: built[i]!.stop, files, merged, patch: file, summary: built[i]!.reply.trim().slice(-1500) });
+        this.transcript.note(`part ${i + 1} · ${parts[i]!.title} (${workerNames[i]}): ${merged === "applied" ? `merged, ${files.length} file${files.length === 1 ? "" : "s"}` : merged === "empty" ? "changed nothing" : "did not apply cleanly; the lead applies it by hand"}`, merged === "applied" ? C.ok : C.warn);
+      }
+      debugEvent("team-merge", { parts: results.length, applied: results.filter((r) => r.merged === "applied").length, conflicts: results.filter((r) => r.merged === "conflict").length, empty: results.filter((r) => r.merged === "empty").length, files: results.reduce((n, r) => n + r.files.length, 0), ms: Date.now() - t0 });
+    } catch (e: any) {
+      debugEvent("team-failed", { ms: Date.now() - t0, ...errorFields(e) });
+      this.transcript.error(`team: ${e?.message ?? e}`);
+    } finally {
+      for (const a of started) {
+        a.unsubscribe();
+        this.side.delete(a);
+        void a.engine.close().catch(() => {});
+      }
+      if (runDir) this.safely("team cleanup", () => removeCopies(runDir!, copies, keep));
+      this.team = null;
+      debugEvent("team-end", { ms: Date.now() - t0, merged: !!results, stopped: team.stopped || undefined });
+      if (this.active) this.transcript.divider(`back to ${this.active.name}`);
+      this.renderFooter();
+      // The lead's check is an ordinary turn of your agent: journaled, with its own prompts and the checks after it.
+      if (results && this.active === main && !this.closed && !isExhausted(this.quota.get(main.agent))) void this.send(main, leadPrompt(goal, results), { shown: `team: check and finish "${goal.slice(0, 80)}"` });
+      else {
+        if (results && !this.closed) {
+          // Merged, but the lead that should check it is gone or out: said plainly, with the check ready to send.
+          const check = leadPrompt(goal, results);
+          this.transcript.note(`the parts are merged but nobody has checked that they fit: ${this.active === main ? `${main.name} is at its limit` : `${main.name} is no longer your agent`} · the check is queued for ${this.active?.name ?? "the next agent"}`, C.warn);
+          if (this.active) this.queue.push(check);
+          this.renderQueue();
+          if (this.active === main && this.config.autoSwitch) this.offerHandoff(main.agent, `${main.name} is out of quota`);
+        }
+        if (this.active && !isExhausted(this.quota.get(this.active.agent))) void this.drainQueue(this.active);
+      }
+    }
+  }
+
   private showBudget() {
     const b = this.config.budgets ?? {};
     const keys = Object.keys(b) as BudgetKey[];
@@ -1492,7 +1810,7 @@ export class ChatApp {
       const label = k === "all" ? "all agents" : getAdapter(k).name;
       if (level === "warn") this.transcript.note(`${label} has used ${spent} of its ${fmtUsd(b[k])} daily budget (80%+)`, C.warn);
       // A handoff only for the agent you are on (an /ask or a debater going over does not move you).
-      else if (this.active?.agent === agent && !this.debate) this.offerHandoff(agent, `${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, k === "all");
+      else if (this.active?.agent === agent && !this.debate && !this.team) this.offerHandoff(agent, `${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, k === "all");
       else this.transcript.note(`${label} reached its ${fmtUsd(b[k])} daily budget (${spent})`, C.warn);
     }
   }
@@ -1511,6 +1829,92 @@ export class ChatApp {
   }
 
   /** The entry to continue on: the next in the handoff order after `from`, installed, not out of quota or over budget. */
+  // ---------- every agent out: wait for the first limit to reset, then continue ----------
+
+  /** The wait under way: which agent's limit resets first, and when codemax tries it again. */
+  private limitWait: { agent: AgentId; model?: string; at: number; timer: ReturnType<typeof setInterval> } | null = null;
+  /** Waits for the current request (LIMIT_WAIT_CAP). */
+  private limitWaits = 0;
+  /** You ended the wait (Esc, or the setting): none starts again until your next message. */
+  private limitWaitOff = false;
+  /** The main agent's last turn was cut off by its limit (an error, or a reply that was only the notice): there is something to continue. */
+  private cutByLimit = false;
+  /** How often the wait looks at the clock (a timer set for hours ahead fires late after the machine sleeps). */
+  limitWaitTickMs = 15_000;
+
+  /**
+   * No agent is left to hand the task to. When one of them says when its limit resets, wait for
+   * the earliest and continue the task then, instead of stopping until you come back.
+   */
+  private waitForReset(from: AgentId): boolean {
+    if (this.limitWait) return true;
+    if (this.config.waitForReset === false || this.limitWaitOff || this.closed || !isExhausted(this.quota.get(from))) return false;
+    // A limit reported after a turn that finished its work leaves nothing to continue.
+    if (!this.cutByLimit) {
+      debugEvent("limit-wait-none", { from, finished: true });
+      return false;
+    }
+    const now = Date.now();
+    const entries = [...this.chain(), { agent: from } as { agent: AgentId; model?: string }].filter((e, i, all) => all.findIndex((x) => x.agent === e.agent) === i);
+    const out = entries
+      .filter((e) => (e.agent === from || (this.detect.get(e.agent)?.engine && !this.broken.has(e.agent))) && isExhausted(this.quota.get(e.agent)))
+      .map((e) => ({ ...e, resetsAt: this.quota.get(e.agent)!.resetsAt ?? 0 }))
+      .filter((e) => e.resetsAt > now)
+      .sort((a, b) => a.resetsAt - b.resetsAt);
+    const first = out[0];
+    if (!first) {
+      debugEvent("limit-wait-none", { from, out: entries.length });
+      return false;
+    }
+    if (this.limitWaits >= LIMIT_WAIT_CAP) {
+      debugEvent("limit-wait-capped", { from, waits: this.limitWaits });
+      this.transcript.note(`not waiting again: ${LIMIT_WAIT_CAP} waits for this request already · /switch, or send a message when a limit has reset`, C.warn);
+      return true;
+    }
+    this.limitWaits++;
+    const at = first.resetsAt + LIMIT_WAIT_MARGIN_MS;
+    const timer = setInterval(() => this.safely("limit wait", () => void (Date.now() >= (this.limitWait?.at ?? Infinity) && this.resumeAfterReset())), this.limitWaitTickMs);
+    this.limitWait = { agent: first.agent, model: first.model, at, timer };
+    const name = getAdapter(first.agent).name;
+    const when = first.resetsAt - now > 20 * 3600_000 ? fmtDateTime12(first.resetsAt) : fmtTime(first.resetsAt);
+    const awake = this.awake.status.mode === "off" ? " · /awake on keeps this machine awake until then" : "";
+    this.transcript.note(`every agent is out · ${name}'s limit resets at ${when}: codemax continues the task then (leave it open${awake}) · Esc or a message from you cancels`, C.accent);
+    debugEvent("limit-wait", { agent: first.agent, minutes: Math.round((at - now) / 60000), waits: this.limitWaits, out: out.length });
+    this.renderFooter();
+    return true;
+  }
+
+  private cancelLimitWait(why: "esc" | "message" | "switch" | "quit") {
+    const w = this.limitWait;
+    if (!w) return;
+    clearInterval(w.timer);
+    this.limitWait = null;
+    debugEvent("limit-wait-cancel", { agent: w.agent, why, minutesLeft: Math.max(0, Math.round((w.at - Date.now()) / 60000)) });
+    if (why === "esc") this.limitWaitOff = true;
+    if (why === "esc") this.transcript.note(`no longer waiting for ${getAdapter(w.agent).name}'s limit`, C.dim);
+    if (why !== "quit") this.renderFooter();
+  }
+
+  /** The limit has reset: the same agent is told to carry on, another one gets the task handed over. */
+  private async resumeAfterReset() {
+    const w = this.limitWait;
+    // Something of yours is under way (a dialog, a command): the next tick tries again.
+    if (!w || this.closed || this.busy() || this.permission) return;
+    clearInterval(w.timer);
+    this.limitWait = null;
+    const q = this.quota.get(w.agent);
+    if (q) {
+      const fresh: QuotaStatus = { ...q, exhausted: false, usedPercent: undefined, detail: undefined, at: Date.now() };
+      this.quota.set(w.agent, fresh);
+      this.ledger.saveQuota(fresh);
+    }
+    const same = this.active?.agent === w.agent;
+    debugEvent("limit-wait-resume", { agent: w.agent, same, waits: this.limitWaits });
+    this.transcript.note(`${getAdapter(w.agent).name}'s limit has reset · continuing the task`, C.accent);
+    if (same) await this.send(this.active!, CONTINUE_AFTER_RESET, { shown: "continue the task (the limit has reset)", afterReset: true });
+    else await this.switchTo(w.agent, false, { resumeTask: true, model: w.model, afterReset: true });
+  }
+
   private nextAgent(from: AgentId): { agent: AgentId; model?: string; modelName?: string } | null {
     const b = this.config.budgets ?? {};
     const list = this.chain();
@@ -1551,6 +1955,7 @@ export class ChatApp {
     if (this.paletteKind === "handoff") return;
     const next = allAgents ? null : this.nextAgent(from);
     this.transcript.note(reason, C.warn);
+    if (!next && !allAgents && this.waitForReset(from)) return;
     if (!next) {
       this.transcript.note(allAgents ? "every agent shares that budget · raise it in ~/.codemax/config.json to continue" : "no other agent is available · /switch to pick one anyway", C.warn);
       return;
@@ -1772,7 +2177,7 @@ export class ChatApp {
    * once, so one of them was lost.
    */
   private busy(): boolean {
-    return !!this.active?.turn || !!this.verifying || !!this.debate || this.starting || this.sending || this.switching || this.draining;
+    return !!this.active?.turn || !!this.verifying || !!this.debate || !!this.team || this.starting || this.sending || this.switching || this.draining;
   }
 
   private draining = false;
@@ -1802,8 +2207,14 @@ export class ChatApp {
     if (this.queue.length && this.active === active && !active.turn && !this.closed) void this.drainQueue(active);
   }
 
-  private async send(active: Active, text: string, o: { shown?: string; verifyFix?: boolean } = {}): Promise<void> {
+  private async send(active: Active, text: string, o: { shown?: string; verifyFix?: boolean; afterReset?: boolean } = {}): Promise<void> {
     if (this.closed) return;
+    // A message of yours ends a wait for a limit to reset, and starts the count of waits again.
+    if (!o.afterReset && !o.verifyFix && !isForwardedNote(text)) {
+      this.cancelLimitWait("message");
+      this.limitWaits = 0;
+      this.limitWaitOff = false;
+    }
     if (!this.side.has(active)) this.notePanel.setPaused(false);
     // A new request from you starts a new task for the automatic check fixes.
     if (!o.verifyFix && !isForwardedNote(text)) this.verifyFixes = 0;
@@ -1952,6 +2363,7 @@ export class ChatApp {
       { name: "/verify", description: "Run this project's checks now · /verify <command> sets them · /verify off", run: (a) => void this.verifyCommand(a) },
       { name: "/checkpoints", description: "List working-tree snapshots taken before each turn", run: () => void this.showCheckpoints() },
       { name: "/ask", description: "Send one message to another agent without switching: /ask codex <msg>", run: (a) => void this.ask(a) },
+      { name: "/team", description: "Several agents build one task at once: a lead splits it, each builds a part in its own copy, the lead checks: /team <goal>", run: (a) => this.openTeam(a) },
       { name: "/debate", description: "2-3 agents each propose a plan, argue it out, and a judge merges the best: /debate <goal>", run: (a) => this.openDebate(a) },
       { name: "/budget", description: "Today's spend against your daily budgets", run: () => this.showBudget() },
       { name: "/update", description: "Update codemax to the latest version", run: () => void this.runUpdate() },
@@ -1960,6 +2372,7 @@ export class ChatApp {
       { name: "/copy", description: "Copy the last reply to the clipboard · /copy 2 for the one before", run: (a) => void this.copyLastReply(a) },
       { name: "/export", description: "Save this conversation as Markdown · /export <path> to choose where", run: (a) => this.exportThread(a) },
       { name: "/setup", description: "Go through every setting one by one, as on first run", run: () => void this.runOnboarding() },
+      { name: "/auto", description: "Full auto for this run: /auto ask (still asks outside the project) | all (never asks) | off", run: (a) => this.autoCommand(a) },
       { name: "/awake", description: "Keep the machine awake while agents work: /awake on | lid | off", run: (a) => void this.setAwake(a) },
       { name: "/debug", description: "Debug log of what codemax did not expect (never your chat): /debug on | off | export", run: (a) => this.debugCommand(a) },
       { name: "/theme", description: `Colours: /theme ${COLOR_THEMES.map((t) => t.id).join(" | ")}, or dark | light | auto (saved)`, run: (a) => this.setThemePref(a) },
@@ -2070,11 +2483,22 @@ export class ChatApp {
       }
       return this.send(this.active, line);
     }
+    // A custom command of any agent's (Claude's commands, Codex's prompts…) that this agent does
+    // not offer itself: codemax sends its prompt with the arguments filled in.
+    const custom = this.shared.commands.find((c) => `/${c.name}` === name);
+    if (custom) {
+      if (!this.active) return this.transcript.note("no agent running — /switch to start one", C.warn);
+      if (this.active.turn) return this.enqueue(line);
+      const prompt = expandCommand(custom, rest.join(" "));
+      debugEvent("shared-command", { source: custom.source, agent: this.active.agent, args: rest.length || undefined, chars: prompt.length });
+      return this.send(this.active, prompt, { shown: line });
+    }
     this.transcript.note(`Unknown command: ${name}`, C.warn);
   }
 
   private runCommandValue(value: string, args: string) {
     if (value.startsWith("builtin:")) return this.builtins().find((b) => b.name === value.slice(8))?.run(args);
+    if (value.startsWith("sharedcmd:")) return this.command(`/${value.slice(10)}${args ? " " + args : ""}`);
     if (value.startsWith("agentcmd:")) {
       const name = value.slice(9);
       // A name codemax also uses goes through /<agent>:<name> so the agent's own command runs.
@@ -2334,6 +2758,10 @@ export class ChatApp {
         const label = clash ? `/${this.active!.agent}:${c.name}` : `/${c.name}`;
         return { label, description: `${c.description ?? `${this.active!.name} command`}${clash ? ` (${this.active!.name}'s own /${c.name})` : ""}`, value: `agentcmd:${c.name}` };
       }),
+      // Custom commands of the other agents (a built-in or the agent's own of that name comes first).
+      ...this.shared.commands
+        .filter((c) => !builtinNames.has(`/${c.name}`) && !this.active?.commands.some((x) => x.name === c.name))
+        .map((c) => ({ label: `/${c.name}`, description: `${c.description} (${c.source === "plugin" ? "a Claude plugin's" : `${c.source}'s`} command)`, value: `sharedcmd:${c.name}` })),
     ];
     this.paletteKind = "commands";
     this.palette = new Palette(this.renderer, {
@@ -2584,10 +3012,10 @@ export class ChatApp {
   }
 
   /** What the other agents have set up (MCP servers, skills), read fresh at each agent start. */
-  private shared: Shared = { mcp: [], skills: [], errors: [] };
+  private shared: Shared = { mcp: [], skills: [], rules: [], commands: [], errors: [] };
 
   private refreshShared(): Shared {
-    this.shared = this.safelyGet("shared", () => collectShared(this.cwd), { mcp: [], skills: [], errors: [] });
+    this.shared = this.safelyGet("shared", () => collectShared(this.cwd), { mcp: [], skills: [], rules: [], commands: [], errors: [] });
     return this.shared;
   }
 
@@ -2601,12 +3029,13 @@ export class ChatApp {
 
   /**
    * The agent's instructions: NARRATE for agents that lack it (everyone but Claude Code), unless
-   * /config turned it off, plus the index of skills it does not see itself.
+   * /config turned it off, plus the project's rules files and the index of skills it does not see itself.
    */
   private narration(agent: AgentId): string | undefined {
     const parts: string[] = [];
     if (agent !== "claude" && this.config.narrate !== false) parts.push(NARRATE);
-    const skills = sharedFor(agent, this.shared).skills;
+    const { skills, rules } = sharedFor(agent, this.shared);
+    if (rules.length) parts.push(rulesNote(rules));
     if (skills.length) parts.push(skillsIndex(skills));
     return parts.length ? parts.join("\n\n") : undefined;
   }
@@ -2614,12 +3043,87 @@ export class ChatApp {
   /** The MCP servers this agent does not load itself. */
   private sharedMcp(agent: AgentId) {
     const given = sharedFor(agent, this.shared);
-    debugEvent("shared-for-agent", { agent, mcp: given.mcp.length, skills: given.skills.length, disabled: this.mcpDisabled.get(agent)?.size || undefined });
+    debugEvent("shared-for-agent", { agent, mcp: given.mcp.length, skills: given.skills.length, rules: given.rules.length || undefined, rulesInline: given.rules.filter((r) => r.text.length <= RULES_INLINE_CHARS).length || undefined, disabled: this.mcpDisabled.get(agent)?.size || undefined });
     return given.mcp;
   }
 
   /** Shared servers turned off in /mcp, per agent, for this run. */
   private mcpDisabled = new Map<AgentId, Set<string>>();
+  /** Servers left out because the agent refused to work with them ("agent:name"): once each per run, so it never loops. */
+  private mcpLeftOut = new Set<string>();
+  /** Antigravity's home, when not its usual one (tests). */
+  geminiBase?: string;
+
+  /**
+   * An MCP server that did not start, so the agent refuses every turn (Antigravity): leave it out.
+   * One codemax shares from another agent is turned off for this agent this run; one of
+   * Antigravity's own is left out from now on (its config is not touched: see antigravityHome).
+   * Null when it cannot be left out, or was already and the agent still refuses.
+   */
+  private leaveOutMcp(active: Active, name: string): { own: boolean; needsIde: boolean; from?: string } | null {
+    if (this.side.has(active) || this.active !== active) return null;
+    const key = `${active.agent}:${name.toLowerCase()}`;
+    if (this.mcpLeftOut.has(key)) return null;
+    const off = this.mcpDisabled.get(active.agent) ?? new Set<string>();
+    const shared = sharedFor(active.agent, this.shared).mcp.find((x) => x.name.toLowerCase() === name.toLowerCase() && !off.has(x.name));
+    let needsIde = false;
+    if (shared) {
+      off.add(shared.name);
+      this.mcpDisabled.set(active.agent, off);
+    } else if (active.agent === "antigravity" && skipAntigravityMcp(name, this.geminiBase)) {
+      needsIde = antigravityLeftOut(this.geminiBase).some((l) => l.name.toLowerCase() === name.toLowerCase() && l.needsIde);
+    } else {
+      debugEvent("mcp-left-out", { agent: active.agent, found: false });
+      return null;
+    }
+    this.mcpLeftOut.add(key);
+    debugEvent("mcp-left-out", { agent: active.agent, found: true, own: !shared, needsIde: needsIde || undefined });
+    return { own: !shared, needsIde, from: shared?.source };
+  }
+
+  /**
+   * Start the agent's process again in place, on the same session, model and mode: what it takes
+   * for a changed MCP list to apply to an agent that reads its servers only at start.
+   */
+  private async restartAgent(active: Active): Promise<boolean> {
+    const t0 = Date.now();
+    this.starting = true;
+    this.setWorking(`${pick(G.spinner, 0)} Restarting ${active.name}…`);
+    const old = active.engine;
+    const model = old.info?.currentModel;
+    const mode = active.mode;
+    try {
+      active.unsubscribe();
+      await old.close().catch(() => {});
+      const engine = this.engineFactory(active.agent);
+      active.unsubscribe = engine.onEvent((e) => this.onEngineEvent(active, safeDeep(e)));
+      active.engine = engine;
+      const saved = this.ledger.sessions()[active.agent];
+      const resume = saved ? { agent: active.agent, id: saved.id, cwd: this.cwd, startedAt: saved.startedAt, lastUsedAt: saved.lastUsedAt } : undefined;
+      this.refreshShared();
+      const info = await engine.start({ cwd: this.cwd, resume, questions: this.config.questions !== "off", instructions: this.narration(active.agent), mcpServers: this.sharedMcp(active.agent), mcpDisabled: [...(this.mcpDisabled.get(active.agent) ?? [])], costBaseline: resume ? this.costBaseline(active.agent, resume.id) : undefined });
+      if (model && engine.setModel && info.currentModel !== model) await engine.setModel(model).catch(() => {});
+      active.mode = info.currentMode;
+      if (mode && mode !== info.currentMode && engine.setMode && info.modes.some((m) => m.id === mode)) await engine.setMode(mode).then(() => (active.mode = mode)).catch(() => {});
+      if (engine.session) this.ledger.saveSession({ agent: active.agent, id: engine.session.id, cwd: this.cwd, startedAt: engine.session.startedAt, lastUsedAt: Date.now() } as SessionRef);
+      debugEvent("agent-restart", { agent: active.agent, ms: Date.now() - t0, resumed: !!resume && engine.session?.id === resume.id });
+      return true;
+    } catch (e: any) {
+      debugEvent("agent-restart-failed", { agent: active.agent, ms: Date.now() - t0, ...errorFields(e) });
+      this.transcript.error(`${active.name} failed to start again: ${e?.message ?? e}`);
+      if (this.active === active) {
+        active.unsubscribe();
+        await active.engine.close().catch(() => {});
+        this.active = null;
+        this.openSwitch();
+      }
+      return false;
+    } finally {
+      this.starting = false;
+      this.setWorking(null);
+      this.renderFooter();
+    }
+  }
   /** Why the last /mcp list has no statuses (the agent was working, or reports none), for the rows. */
   private mcpNoStatus?: string;
   /** The last /mcp list was taken while the agent worked (its own servers came from its config). */
@@ -2684,6 +3188,13 @@ export class ChatApp {
       if (seen.has(sh.name.toLowerCase())) continue;
       rows.push({ name: sh.name, status: disabled.has(sh.name) ? { name: sh.name, status: "disabled" } : undefined, shared: sh, own: false });
     }
+    // Antigravity's own servers that codemax leaves out: listed, so they can be tried again.
+    if (a.agent === "antigravity") {
+      for (const l of antigravityLeftOut(this.geminiBase)) {
+        if (l.why !== "failed" || seen.has(l.name.toLowerCase())) continue;
+        rows.push({ name: l.name, status: { name: l.name, status: "disabled", error: "did not start" }, own: true, leftOut: true });
+      }
+    }
     this.mcpNoStatus = status ? undefined : working ? `status unknown while ${a.name} works` : a.engine.mcpStatus ? "status not reported" : `status not reported by ${a.name}`;
     debugEvent("mcp-list", { agent: a.agent, ms: Date.now() - t0, reported: status ? status.length : null, shared: shared.length, own: own.length || undefined, disabled: disabled.size || undefined, error: statusError });
     if (working) this.transcript.note(`${a.name} is working, so its MCP servers' status is unknown · Esc stops the turn, then /mcp shows it`, C.warn);
@@ -2722,7 +3233,7 @@ export class ChatApp {
     const canAct = !!a.engine.mcpAction;
     // Offered when the server needs it, and when nothing is known because the agent was working: the login is harmless on a server that is already signed in.
     if (st === "needs-auth" || (st === undefined && this.mcpBusy && canAct)) items.push({ label: "Authenticate", description: canAct ? "start the login (a browser may open)" : `${a.name} offers no way to do this from here`, value: "authenticate", disabled: !canAct, weight: st === "needs-auth" ? 5 : 2 });
-    if (st === "disabled") items.push({ label: "Enable", description: row.own ? (canAct ? `${a.name} turns it back on` : `edit it in ${a.name}'s own config`) : "codemax passes it to the agent again", value: "enable", disabled: row.own && !canAct, weight: 4 });
+    if (st === "disabled") items.push({ label: "Enable", description: row.leftOut ? `it did not start, so codemax left it out · ${a.name} restarts with it` : row.own ? (canAct ? `${a.name} turns it back on` : `edit it in ${a.name}'s own config`) : "codemax passes it to the agent again", value: "enable", disabled: row.own && !canAct && !row.leftOut, weight: 4 });
     else items.push({ label: "Disable", description: row.own ? (canAct ? `${a.name} turns it off for this session` : `edit it in ${a.name}'s own config`) : "codemax stops passing it to the agent (this run)", value: "disable", disabled: row.own && !canAct, weight: 3 });
     if (st !== "disabled") items.push({ label: "Reconnect", description: row.own ? (canAct ? `${a.name} restarts the server` : `restart ${a.name} to reconnect its own servers`) : a.engine.reloadMcp ? "the session is loaded again with this server" : `restart ${a.name}`, value: row.own && !canAct ? "restart-agent" : !row.own && !a.engine.reloadMcp ? "restart-agent" : "reconnect", weight: 4 });
     items.push({ label: "Back", description: "to the list", value: "back", weight: 0 });
@@ -2749,6 +3260,14 @@ export class ChatApp {
   /** Do one thing to one server and say what happened. */
   private async mcpAct(a: Active, row: McpRow, action: McpAction) {
     if (a.turn || this.busy()) return this.transcript.note(`${a.name} is working; Esc stops the turn, then /mcp ${action} ${row.name} again`, C.warn);
+    if (row.leftOut) {
+      if (action !== "enable") return this.transcript.note(`${row.name} is left out for ${a.name} (it did not start) · /mcp enable ${row.name} tries it again`, C.dim);
+      unskipAntigravityMcp(row.name);
+      this.mcpLeftOut.delete(`${a.agent}:${row.name.toLowerCase()}`);
+      debugEvent("mcp-action", { agent: a.agent, action, own: true, leftOut: true });
+      this.transcript.note(`MCP · ${row.name} is back for ${a.name}; restarting it…`, C.ok);
+      return void this.switchTo(a.agent, false);
+    }
     const t0 = Date.now();
     this.setWorking(`${pick(G.spinner, 0)} ${action === "authenticate" ? "Starting the login for" : action === "reconnect" ? "Reconnecting" : action === "disable" ? "Disabling" : "Enabling"} ${row.name}…`);
     this.sending = true;
@@ -2787,15 +3306,89 @@ export class ChatApp {
 
   private modeCycleTold = new Set<AgentId>();
 
+  /**
+   * Full auto (the owner's decision, 2026-11-13): codemax answers permission requests with "allow
+   * once" itself, for whichever agent is working, until it is turned off or codemax quits. It is
+   * never saved: every start asks again. Two kinds, the user picks:
+   * - "guarded" (auto, with ask): still asks before a change to a file outside the project and
+   *   before anything where secrets live, where the request names the file. A shell command is
+   *   only text to codemax, so commands run unasked wherever they read or write: said when it
+   *   is turned on.
+   * - "all" (auto, without ask): nothing asks, those two included.
+   */
+  private fullAuto: "off" | "guarded" | "all" = "off";
+
+  private setFullAuto(mode: "off" | "guarded" | "all", via: "command" | "shift-tab" | "config") {
+    if (this.fullAuto === mode) return;
+    this.fullAuto = mode;
+    debugEvent("full-auto", { mode, via, agent: this.active?.agent, working: !!this.active?.turn || undefined, waiting: this.permissionQueue.length || undefined });
+    const name = this.active?.name ?? "the agent";
+    if (mode === "guarded") this.transcript.note(`full auto on (with ask): ${name} is no longer asked before edits or commands, for this run. You are still asked before a file outside this project is changed and before anything where secrets live (~/.ssh, .env, logins) is read. Shell commands run without asking, whatever they read or write: codemax cannot see what a command touches · Shift+Tab or /auto off`, C.error);
+    else if (mode === "all") this.transcript.note(`full auto on (without ask): nothing asks for this run. ${name} edits, deletes and runs commands without asking, outside this project and where secrets live (~/.ssh, .env, logins) included · Shift+Tab or /auto off`, C.error);
+    else this.transcript.note("full auto off: permission prompts are back", C.dim);
+    // Requests already waiting behind the open dialog are answered too.
+    if (mode !== "off" && this.active) {
+      const a = this.active;
+      const of = (e: Engine) => (e === a.engine ? a : this.team?.actives.find((w) => w.engine === e));
+      this.permissionQueue = this.permissionQueue.filter((q) => "question" in q || !of(q.engine) || !this.autoAllow(of(q.engine)!, q.request));
+    }
+    this.renderFooter();
+  }
+
+  /** What guarded full auto still asks for: codemax's own outside-project check, a file change outside the project, a file where secrets live. */
+  private fullAutoAsks(r: PermissionRequest, cwd = this.cwd): boolean {
+    if (this.fullAuto === "all") return false;
+    if (r.guard) return true;
+    return (r.paths ?? []).some((p) => !!secretPlace(resolve(cwd, p)) || (!ONLY_READS.test(r.kind ?? "") && !insideDir(cwd, p)));
+  }
+
+  /** In full auto: answer the main agent's request with "allow once" (never "always": the agent's own settings stay as they are). */
+  private autoAllow(active: Active, r: PermissionRequest): boolean {
+    // The main agent, and a /team's workers (each in its own copy: "the project" is that copy).
+    if (this.fullAuto === "off" || (this.active !== active && !this.team?.actives.includes(active)) || this.fullAutoAsks(r, active.cwd)) return false;
+    const opt = r.options.find((o) => o.kind === "allow_once") ?? r.options.find((o) => o.kind.startsWith("allow"));
+    if (!opt) return false;
+    active.engine.answerPermission(r.id, opt.id);
+    if (active.turn?.stats) active.turn.stats.permissions.allowed++;
+    debugEvent("permission", { agent: active.agent, toolKind: r.kind, hasDiff: !!r.diff || undefined, options: r.options.map((o) => o.kind), answer: "auto", guard: r.guard });
+    return true;
+  }
+
+  /** /auto opens the choice; /auto ask, /auto all and /auto off set it at once. */
+  private autoCommand(arg: string) {
+    const a = arg.trim().toLowerCase();
+    const mode = ({ ask: "guarded", on: "guarded", all: "all", noask: "all", off: "off" } as const)[a];
+    if (mode) return this.setFullAuto(mode, "command");
+    if (a) return this.transcript.note("/auto, /auto ask (asks outside the project and for secrets), /auto all (never asks) or /auto off", C.warn);
+    this.closePalette();
+    this.paletteKind = "picker";
+    this.palette = new Palette(this.renderer, {
+      title: "Full auto for this run · never saved · Esc",
+      items: FULL_AUTO_CHOICES.map((c, i) => ({ label: `${c.label}${c.value === this.fullAuto ? "  (current)" : ""}`, description: c.description, value: c.value, weight: 10 - i })),
+      onPick: (it) => {
+        this.closePalette();
+        this.setFullAuto(it.value as "off" | "guarded" | "all", "command");
+      },
+      onClose: () => this.closePalette(),
+    }, this.paletteAnchor);
+    this.renderer.root.add(this.palette.box);
+  }
+
   private async cycleMode() {
     const a = this.active;
-    if (!a?.engine.setMode) return this.setFlash("this agent has no permission modes");
-    const ids = (a.engine.info?.modes ?? []).map((m) => m.id);
+    const ids = (a?.engine.info?.modes ?? []).map((m) => m.id);
     // Claude Code's order first, then the agent's own modes (Antigravity's auto_edit, Codex's…).
-    const order = [...MODE_CYCLE.filter((m) => ids.includes(m)), ...ids.filter((m) => !MODE_CYCLE.includes(m) && !NO_CYCLE.has(m))];
-    if (order.length < 2) return this.setFlash(order.length ? "this agent has one permission mode here · /mode lists them" : "this agent has no permission modes");
+    const order = [...MODE_CYCLE.filter((m) => ids.includes(m)), ...ids.filter((m) => !MODE_CYCLE.includes(m) && !NO_CYCLE.has(modeKey(m)))];
+    // Full auto is the last stop: after the agent's last mode, and the only one for an agent without modes.
+    // Its last stops, after the agent's own modes: auto with ask, then auto without ask.
+    const stepAuto = this.fullAuto === "off" ? "guarded" : this.fullAuto === "guarded" ? "all" : "off";
+    if (!a?.engine.setMode || order.length < 2) return this.setFullAuto(stepAuto, "shift-tab");
     const from = a.mode ?? "";
-    const next = order[(order.indexOf(from) + 1) % order.length]!;
+    const wasAuto = this.fullAuto === "all";
+    if (this.fullAuto !== "off" || order.indexOf(from) === order.length - 1) this.setFullAuto(stepAuto, "shift-tab");
+    if (this.fullAuto !== "off") return;
+    const next = wasAuto ? order[0]! : order[(order.indexOf(from) + 1) % order.length]!;
+    if (next === from) return;
     // Shown at once: the next Shift+Tab moves on from here, not from the mode the agent last confirmed.
     a.mode = next;
     this.renderFooter();
@@ -2869,6 +3462,15 @@ export class ChatApp {
         const loose = selfApprovingMode(info.currentMode, info.modes);
         if (loose) this.transcript.note(`${loose.what} mode (${adapter.name}'s own setting): ${loose.effect}, no prompts or diffs here · Shift+Tab to change`, C.warn);
       }
+      // Copilot CLI's own "allow all" switch (not a mode), when the session starts with it on.
+      if (info.options?.some((x) => x.id === "allow_all" && x.current === "on")) this.transcript.note(`${adapter.name}'s "allow all" is on (its own setting): it acts without asking, no prompts or diffs here · /allow-all off turns it back`, C.warn);
+      // The project's rules files this agent does not read itself went with its instructions.
+      const rules = sharedFor(agent, this.shared).rules;
+      if (rules.length) this.transcript.note(`given this project's rules from ${rules.map((r) => r.file).join(", ")} (${adapter.name} does not read ${rules.length === 1 ? "that file" : "those files"} itself)`, C.dimmer);
+      if (this.fullAuto !== "off") this.transcript.note(`full auto is on (${this.fullAuto === "all" ? "without ask: nothing asks" : "with ask: only files outside this project and secrets ask; commands run unasked"}): ${adapter.name} is not asked before edits or commands · Shift+Tab or /auto off`, C.error);
+      // Its own MCP servers that did not start last time are left out (it refuses every turn with them).
+      const without = agent === "antigravity" ? antigravityLeftOut(this.geminiBase).filter((l) => l.why === "failed") : [];
+      if (without.length) this.transcript.note(`running without its MCP server${without.length === 1 ? "" : "s"} ${without.map((l) => `"${l.name}"`).join(", ")} (did not start${without.every((l) => l.needsIde) ? "; needs the Antigravity IDE open" : ""}) · /mcp enable ${without[0]!.name} tries again`, C.dimmer);
       this.setWorking(null);
       this.renderFooter();
       this.setTitle();
@@ -2927,6 +3529,7 @@ export class ChatApp {
     this.startSpinner(active);
     this.setTitle(`✳ ${active.name} working`);
     const main = !this.side.has(active);
+    if (main && active === this.active) this.cutByLimit = false;
     if (main) this.term.prompt(o.record === false ? "(handoff to " + active.name + ")" : text);
     let stop: StopReason;
     try {
@@ -2943,6 +3546,7 @@ export class ChatApp {
     }
     const turn = active.turn;
     active.turn = null;
+    let leftOut: ReturnType<ChatApp["leaveOutMcp"]> = null;
     this.stopSpinner();
     this.setTitle();
     if (turn && this.config.bellAfterSeconds > 0 && Date.now() - turn.startedAt > this.config.bellAfterSeconds * 1000) process.stdout.write("\x07");
@@ -2991,6 +3595,7 @@ export class ChatApp {
       const reply = block.text().trim();
       o.onReply?.(reply);
       const broken = agentSetupFailure(reply);
+      if (main && active === this.active && stop !== "cancelled" && isLimitNotice(reply)) this.cutByLimit = true;
       if (isLimitNotice(reply)) turn.rec?.markLimit(reply);
       else if (broken) turn.rec?.markError(`${active.name} could not start its MCP server "${broken.mcpServer}"`);
       turn.rec?.end(stop);
@@ -3011,11 +3616,19 @@ export class ChatApp {
         const work = reply.split(/\n\s*\n/).slice(0, -1).join("\n\n").trim();
         debugEvent("limit-in-reply", { agent: active.agent, keptWork: !!work || undefined, tools: turn.tools.size || undefined });
         if (o.record !== false && (work || turn.tools.size)) this.ledger.addTurns([{ ts: Date.now(), agent: active.agent, sessionId: active.engine.session?.id ?? "?", role: "assistant", text: work, tools: turn.tools.size ? [...turn.tools] : undefined }]);
+      } else if (broken && (leftOut = this.leaveOutMcp(active, broken.mcpServer))) {
+        // The agent refuses every turn while that server cannot start. codemax leaves the server
+        // out, starts the agent again on the same session and asks again (below), so the
+        // refusal costs a few seconds, not the task. Nothing else is sent meanwhile.
+        this.starting = true;
+        const why = leftOut.needsIde ? "it belongs to the Antigravity IDE and only runs while the IDE is open" : cleanError(broken.reason).slice(0, 160);
+        const what = leftOut.own ? `codemax starts ${active.name} without it from now on` : `codemax turned it off for ${active.name} this run (it is shared from ${leftOut.from!.replace(/^plugin:/, "plugin ")})`;
+        this.transcript.note(`${active.name}'s MCP server "${broken.mcpServer}" did not start (${why}), so it refused to work. ${what} and is asking again · /mcp enable ${broken.mcpServer} tries it again`, C.warn);
       } else if (broken) {
         // The agent refuses every turn until its own MCP setup works: the request stays
         // unanswered for the next agent, and you get what to do about it.
         const fix = active.agent === "antigravity"
-          ? `It is in Antigravity's own setup, not codemax's: \`agy mcp list\` and \`agy mcp disable ${broken.mcpServer}\` (or \`agy plugin list\` / \`disable\`), or open the Antigravity IDE if the server belongs to it, then /switch antigravity.`
+          ? `It is in Antigravity's own setup, not codemax's: \`agy mcp remove ${broken.mcpServer}\` (\`agy mcp list\` shows them; for a plugin's server try \`agy plugin disable\`), or open the Antigravity IDE if the server belongs to it, then /switch antigravity.`
           : `Fix or turn off that MCP server in ${active.name}'s own settings, then /switch ${active.agent}.`;
         this.transcript.note(`${active.name} won't work until its MCP server "${broken.mcpServer}" starts (${cleanError(broken.reason).slice(0, 160)}). ${fix}`, C.warn);
         this.broken.add(active.agent);
@@ -3031,6 +3644,16 @@ export class ChatApp {
     if (offer && this.active === active) {
       this.pendingOffer = null;
       this.offerHandoff(offer.from, offer.reason, offer.allAgents);
+    }
+    if (leftOut) {
+      // The same request again, to the agent started without the server that stopped it.
+      if (this.closed || this.active !== active) {
+        this.starting = false;
+        return { stop: "error", edited: false };
+      }
+      if (!(await this.restartAgent(active))) return { stop: "error", edited: false };
+      debugEvent("mcp-left-out-retry", { agent: active.agent });
+      return this.runTurn(active, text, { ...o, rec: o.journal === false ? undefined : new TurnRecorder(this.ledger.journal, active.agent) });
     }
     return { stop, edited: !!turn?.edited };
   }
@@ -3113,6 +3736,13 @@ export class ChatApp {
           this.transcript.note(`${active.name} asked to ${e.request.title.slice(0, 80)}: refused (a debate only plans)`, C.dim);
           break;
         }
+        // The lead of a /team only plans while it splits the task.
+        if (this.team?.planners.includes(active)) {
+          active.engine.answerPermission(e.request.id, e.request.options.find((o) => o.kind.startsWith("reject"))?.id ?? e.request.options.at(-1)!.id);
+          this.transcript.note(`${active.name} asked to ${e.request.title.slice(0, 80)}: refused (the split only plans)`, C.dim);
+          break;
+        }
+        if (this.autoAllow(active, e.request)) break;
         this.permissionQueue.push({ request: e.request, engine: active.engine });
         this.showNextPermission();
         break;
@@ -3123,7 +3753,7 @@ export class ChatApp {
         }
         break;
       case "question_request":
-        if (this.debate?.actives.includes(active)) {
+        if (this.debate?.actives.includes(active) || this.team?.planners.includes(active) || this.team?.actives.includes(active)) {
           active.engine.answerQuestion?.(e.request.id, { action: "decline" });
           break;
         }
@@ -3171,6 +3801,7 @@ export class ChatApp {
       case "error":
         debugEvent("agent-error", { agent: active.agent, errorKind: e.kind, message: e.message, side: this.side.has(active) || undefined });
         this.transcript.error(`${active.name}: ${e.message.slice(0, 500)}`);
+        if (e.kind === "quota" && this.active === active) this.cutByLimit = true;
         if (e.kind === "quota") active.turn?.rec?.markLimit(cleanError(e.message));
         else active.turn?.rec?.markError(cleanError(e.message));
         if (e.kind === "quota") this.onQuota({ agent: active.agent, exhausted: true, source: "probe", detail: e.message.slice(0, 120), resetsAt: parseResetTime(e.message), at: Date.now() });
@@ -3225,7 +3856,7 @@ export class ChatApp {
     const next = this.permissionQueue.shift()!;
     if ("question" in next) return this.showQuestion(next.question, next.engine);
     const { request, engine } = next;
-    const name = this.active?.engine === engine ? this.active.name : "the agent";
+    const name = this.active?.engine === engine ? this.active.name : (this.team?.actives.find((w) => w.engine === engine)?.name ?? "the agent");
     this.term.waiting("permission", request.title, request.kind, request.detail ? { detail: request.detail } : undefined);
     const shownAt = Date.now();
     this.permission = new PermissionDialog(this.renderer, request, name, (choice) => {
@@ -3291,7 +3922,11 @@ export class ChatApp {
     this.renderFooter();
     if (isExhausted(q) && !isExhausted(prev)) {
       this.ledger.addEvent({ kind: "quota", agent: q.agent, detail: q.detail });
-      if (this.config.autoSwitch && !this.debate && (!this.active || this.active.agent === q.agent)) this.offerHandoff(q.agent, `${getAdapter(q.agent).name} is out of quota${q.resetsAt ? ` until ${fmtTime(q.resetsAt)}` : ""}`);
+      // Not while a team builds (a worker on the same plan would move you to another agent mid-run): the team's end offers it.
+      if (this.config.autoSwitch && !this.debate && !this.team && (!this.active || this.active.agent === q.agent)) this.offerHandoff(q.agent, `${getAdapter(q.agent).name} is out of quota${q.resetsAt ? ` until ${fmtTime(q.resetsAt)}` : ""}`);
+    } else if (isExhausted(q) && !this.limitWait && !this.limitWaitOff && this.limitWaits < LIMIT_WAIT_CAP && this.config.autoSwitch && !this.debate && !this.team && this.active?.agent === q.agent && !this.active.turn && !this.nextAgent(q.agent)) {
+      // Still out after a wait you cancelled (or a message sent meanwhile): wait again, without offering the handoff twice.
+      this.waitForReset(q.agent);
     }
   }
 
@@ -3476,6 +4111,40 @@ export class ChatApp {
         },
       },
       {
+        key: "teamOffer",
+        label: "When a message asks to delegate",
+        value: c.teamOffer === false ? "send it as it is" : "open /team",
+        choices: [
+          { value: "on", label: "open /team", description: "\"split this between Claude and Codex\" opens the team picker (Esc sends the message as it is)" },
+          { value: "off", label: "send it as it is", description: "only /team <goal> starts a team" },
+        ],
+        apply: (v) => {
+          c.teamOffer = v !== "off";
+          saveConfigKey("teamOffer", c.teamOffer);
+        },
+      },
+      {
+        key: "waitForReset",
+        label: "When every agent is out",
+        value: c.waitForReset === false ? "stop" : "wait for the reset",
+        choices: [
+          { value: "wait", label: "wait for the reset", description: "codemax continues the task when the first limit resets (leave it open)" },
+          { value: "stop", description: "the task waits for you" },
+        ],
+        apply: (v) => {
+          c.waitForReset = v !== "stop";
+          saveConfigKey("waitForReset", c.waitForReset);
+          if (!c.waitForReset) this.cancelLimitWait("esc");
+        },
+      },
+      {
+        key: "fullAuto",
+        label: "Full auto (this run)",
+        value: FULL_AUTO_CHOICES.find((x) => x.value === this.fullAuto)!.label,
+        choices: FULL_AUTO_CHOICES,
+        apply: (v) => this.setFullAuto(v as "off" | "guarded" | "all", "config"),
+      },
+      {
         key: "chain",
         label: "Handoff order",
         value: c.handoffChain?.length ? c.handoffChain.map((e) => this.entryLabel(e)).join(" → ") : "installed agents, default models",
@@ -3541,6 +4210,8 @@ export class ChatApp {
       agent: "The agent codemax starts with. You can switch any time (Ctrl+^ or /switch), and the next one picks up where it left off.",
       chain: "Which agent takes over when one runs out, and on which model: e.g. Claude Code on Opus, then Cursor on Opus, then Antigravity on Gemini Flash. The first one is also where codemax starts.",
       autoSwitch: "When an agent hits its usage limit, the same task can continue in the next agent you pay for: offered (one Enter), automatic, or not at all.",
+      teamOffer: "/team <goal> has several agents build one task at the same time: your agent splits it, each builds a part in its own copy, your agent checks the result. A message that asks to delegate or split the work can open it for you.",
+      waitForReset: "When every agent you pay for is out, codemax can wait for the first limit to reset and carry on with the task by itself, instead of stopping until you are back.",
       budget: "A daily limit on the API-equivalent value of what you use (your subscription is never billed more). At the limit, codemax offers the next agent.",
       theme: "Colours for a dark or a light terminal. Auto reads your terminal's background.",
       colors: "The accent colour codemax draws with: its pink, Claude Code's own colours, blue, teal or plain greys. /theme <name> changes it later.",
@@ -4182,14 +4853,17 @@ export class ChatApp {
     const left: { text: string; prio: number }[] = [];
     // Claude Code's hint line: the permission mode only when it is not the default, then what
     // the keys do right now (esc while working, ? when idle).
-    const working = !!a?.turn || !!this.verifying || !!this.debate;
-    const special = !!mode && a?.mode !== undefined && !/^(default|on-request)$/.test(a.mode);
+    const working = !!a?.turn || !!this.verifying || !!this.debate || !!this.team;
+    const special = !!mode && a?.mode !== undefined && !/^(default|on-request)$|session-modes#agent$/.test(a.mode);
+    if (this.fullAuto !== "off") color = C.error;
     if (!a) left.push({ text: "no agent · /switch", prio: 0 });
+    else if (this.fullAuto !== "off") left.push({ text: `${G.modeOn} full auto on · ${this.fullAuto === "all" ? "nothing asks" : "asks only outside the project and for secrets"} (shift+tab to cycle)`, prio: 0 });
     else if (special) left.push({ text: `${mode!.glyph} ${mode!.text}${canCycle ? " (shift+tab to cycle)" : ""}`, prio: 0 });
     if (this.flash) left.push({ text: this.flash, prio: 1 });
     else if (working) left.push({ text: "esc to interrupt", prio: 1 });
     if (!this.flash && this.queue.length) left.push({ text: `${this.queue.length} queued`, prio: 1 });
-    if (!this.flash && !working && !this.queue.length && !this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
+    if (!this.flash && this.limitWait && !working) left.push({ text: `waiting for ${getAdapter(this.limitWait.agent).name}'s limit · continues ${fmtTime(this.limitWait.at)} · esc cancels`, prio: 1 });
+    if (!this.flash && !working && !this.queue.length && !this.limitWait && !this.shortcuts.visible) left.push({ text: "? for shortcuts", prio: 2 });
     const right: { text: string; prio: number }[] = [];
     if (this.updateAvailable) left.push({ text: `↑ ${this.updateAvailable} available · /update`, prio: 1 });
     if (this.config.sideAgent?.agent) left.push({ text: `◆ side ${this.config.sideAgent.agent}${this.config.sideAgent.model ? ` ${displayModelName(this.config.sideAgent.model, this.reviewer?.engine.info?.models)}` : ""}${this.reviewer?.busy ? " reviewing…" : ""}`, prio: 2 });
@@ -4218,7 +4892,7 @@ export class ChatApp {
       c = compose(L, R);
     }
     this.footerText.content = c.gap >= 2 ? c.ls + " ".repeat(c.gap) + c.rs : `${c.ls}  ${c.rs}`.slice(0, width);
-    this.footerText.fg = this.flash || !special ? C.dim : color;
+    this.footerText.fg = this.flash || !(special || this.fullAuto !== "off") ? C.dim : color;
   }
 
   // ---------- detection / switching / quit ----------
@@ -4237,7 +4911,8 @@ export class ChatApp {
     debugEvent("detect", { ms: Date.now() - t0, agents: Object.fromEntries([...this.detect.entries()].map(([id, d]) => [id, d.installed ? `${d.version ?? "?"}${d.engine ? "" : " (no engine)"}` : d.problem ? `missing: ${d.problem.slice(0, 80)}` : "missing"])) });
   }
 
-  private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean; model?: string } = {}) {
+  private async switchTo(agent: AgentId, fresh: boolean, o: { resumeTask?: boolean; model?: string; afterReset?: boolean } = {}) {
+    this.cancelLimitWait("switch");
     debugEvent("switch", { from: this.active?.agent, to: agent, fresh: fresh || undefined, resumeTask: o.resumeTask || undefined, model: o.model });
     // Choosing an agent yourself means you fixed it (or want to try again).
     if (!o.resumeTask) this.broken.delete(agent);
@@ -4292,6 +4967,7 @@ export class ChatApp {
     debugEvent("quit", { uptimeMin: Math.round((Date.now() - this.bornAt) / 60000), agent: this.active?.agent, working: !!this.active?.turn || undefined, queued: this.queue.length || undefined, glitches: this.uiErrors || undefined });
     this.perf?.stop();
     if (this.healthTimer) clearInterval(this.healthTimer);
+    this.cancelLimitWait("quit");
     if (this.updateTimer) clearTimeout(this.updateTimer);
     // Nothing codemax started keeps running: checks, ! commands, agents started to list models.
     this.verifying?.stop();
@@ -4348,8 +5024,8 @@ export class ChatApp {
 export function selfApprovingMode(mode: string | undefined, modes: { id: string; name: string }[] = []): { what: string; effect: string; ask?: string } | null {
   if (!mode) return null;
   const edits = /^(acceptEdits|auto_edit)$/.test(mode);
-  if (!edits && !/^(auto|bypassPermissions|yolo|never)$/.test(mode)) return null;
-  const ask = modes.find((m) => m.id === "default" || m.id === "on-request");
+  if (!edits && !/^(auto|bypassPermissions|yolo|never|autopilot)$/.test(modeKey(mode))) return null;
+  const ask = modes.find((m) => m.id === "default" || m.id === "on-request" || /session-modes#agent$/.test(m.id));
   const name = modes.find((m) => m.id === mode)?.name ?? mode;
   return { what: `"${name}"`, effect: edits ? "it edits files without asking" : "it acts without asking", ask: ask?.id };
 }

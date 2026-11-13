@@ -91,3 +91,67 @@ test("share: secrets in env and headers reach the agents but never the debug log
 test("stripJsonc leaves strings alone", () => {
   expect(JSON.parse(stripJsonc('{\n // c\n "u": "https://a/b", /* x */ "n": [1, 2,],\n}'))).toEqual({ u: "https://a/b", n: [1, 2] });
 });
+
+test("project rules: each agent gets the rules files it does not read itself, whole when short, by path when long", async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { collectShared, sharedFor, rulesNote, RULES_INLINE_CHARS } = await import("../src/core/share.ts");
+  const cwd = mkdtempSync(join(tmpdir(), "codemax-rules-"));
+  const home = mkdtempSync(join(tmpdir(), "codemax-rules-home-"));
+  const files = (agent: string) => sharedFor(agent, collectShared(cwd, home)).rules.map((r) => r.file);
+  // A project written for Claude Code: only CLAUDE.md.
+  writeFileSync(join(cwd, "CLAUDE.md"), "Never push without asking.");
+  expect(files("claude")).toEqual([]);
+  expect(files("codex")).toEqual(["CLAUDE.md"]);
+  expect(files("antigravity")).toEqual(["CLAUDE.md"]);
+  expect(files("opencode")).toEqual([]);   // it reads CLAUDE.md when there is no AGENTS.md
+  expect(files("cursor")).toEqual([]);
+  expect(rulesNote(sharedFor("codex", collectShared(cwd, home)).rules)).toContain("From CLAUDE.md:\nNever push without asking.");
+  // With AGENTS.md too, OpenCode stops reading CLAUDE.md; Claude does not read AGENTS.md.
+  writeFileSync(join(cwd, "AGENTS.md"), "Run the tests before you finish.");
+  expect(files("opencode")).toEqual(["CLAUDE.md"]);
+  expect(files("claude")).toEqual(["AGENTS.md"]);
+  expect(files("codex")).toEqual(["CLAUDE.md"]);
+  expect(files("grok")).toEqual([]);
+  // A file that only points to one the agent reads, or repeats it, is not given again.
+  writeFileSync(join(cwd, "CLAUDE.md"), "@AGENTS.md");
+  expect(files("codex")).toEqual([]);
+  expect(files("antigravity")).toEqual([]);
+  writeFileSync(join(cwd, "GEMINI.md"), "Run the tests before you finish.");
+  expect(files("codex")).toEqual([]);
+  // A long file is named with its path, to be read first; nothing of it is copied.
+  const long = "rule line\n".repeat(Math.ceil(RULES_INLINE_CHARS / 10) + 50);
+  mkdirSync(join(cwd, ".github"));
+  writeFileSync(join(cwd, ".github", "copilot-instructions.md"), long);
+  const note = rulesNote(sharedFor("codex", collectShared(cwd, home)).rules);
+  expect(note).toContain(join(cwd, ".github", "copilot-instructions.md"));
+  expect(note).toContain("read it before your first step");
+  expect(note.length).toBeLessThan(600);
+  expect(files("copilot")).toEqual([]);   // it reads AGENTS.md and its own file; the others repeat or point to them
+});
+
+test("custom slash commands: read from every agent's folder, one per name, arguments filled in", async () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { collectShared, expandCommand } = await import("../src/core/share.ts");
+  const cwd = mkdtempSync(join(tmpdir(), "codemax-cmd-"));
+  const home = mkdtempSync(join(tmpdir(), "codemax-cmd-home-"));
+  const put = (dir: string, name: string, text: string) => { mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, name), text); };
+  put(join(home, ".claude", "commands"), "review.md", "---\ndescription: Review a pull request\nargument-hint: <number>\n---\nReview PR $1 and focus on $ARGUMENTS.");
+  put(join(cwd, ".claude", "commands"), "review.md", "The project's review of $ARGUMENTS.");
+  put(join(home, ".codex", "prompts"), "ship.md", "Run the release checklist.");
+  put(join(home, ".gemini", "commands"), "plan.toml", 'description = "Plan a change"\nprompt = "Plan this: {{args}}"');
+  put(join(cwd, ".cursor", "commands", "git"), "tidy.md", "Tidy the branch.");
+  put(join(home, ".claude", "commands"), "Bad Name.md", "never listed");
+  const cmds = collectShared(cwd, home).commands;
+  expect(cmds.map((c) => `${c.name}:${c.source}`).sort()).toEqual(["plan:gemini", "review:claude", "ship:codex", "tidy:cursor"]);
+  const by = (n: string) => cmds.find((c) => c.name === n)!;
+  expect(expandCommand(by("review"), "42 the parser")).toBe("The project's review of 42 the parser.");   // the project's comes before the user's
+  expect(by("plan").description).toBe("Plan a change");
+  expect(expandCommand(by("plan"), "a cache")).toBe("Plan this: a cache");
+  expect(expandCommand(by("ship"), "")).toBe("Run the release checklist.");
+  expect(expandCommand(by("ship"), "for v2")).toBe("Run the release checklist.\n\nfor v2");   // no placeholder: added at the end
+  expect(expandCommand({ ...by("review"), body: "PR $1, then $2; all: $ARGUMENTS" }, "7 fast")).toBe("PR 7, then fast; all: 7 fast");
+});

@@ -7,7 +7,8 @@ import type { SharedMcpServer } from "./core/share.ts";
 import { Ledger } from "./core/ledger.ts";
 import { TurnRecorder } from "./core/journal.ts";
 import { buildBrief } from "./core/brief.ts";
-import { cleanError } from "./engines/errors.ts";
+import { agentSetupFailure, cleanError } from "./engines/errors.ts";
+import { skipAntigravityMcp } from "./engines/antigravity.ts";
 import { isExhausted } from "./core/quota.ts";
 import { debugEvent, errorFields } from "./core/debuglog.ts";
 import pkg from "../package.json" with { type: "json" };
@@ -97,6 +98,8 @@ export class Serve {
   private running: Promise<StopReason> | null = null;
   private toolTitles = new Map<string, string>();
   private quotaHit = false;
+  /** The turn's reply so far: a reply that is only "my MCP server did not start" is no answer. */
+  private replyText = "";
   private lastError: string | undefined;
   private offEvents: (() => void) | null = null;
   private pendingBrief: string | null = null;
@@ -254,6 +257,7 @@ export class Serve {
     const s = this.setup!;
     switch (e.type) {
       case "text_delta":
+        this.replyText += e.text;
         this.rec?.textDelta(e.text, e.messageId);
         break;
       case "thought_delta":
@@ -312,11 +316,13 @@ export class Serve {
     let full = this.pendingBrief ? `${this.pendingBrief}\n\n${text}` : text;
     this.pendingBrief = null;
     // One prompt may hop agents when one runs out; each hop is a fresh turn with a brief.
+    let leftOut = false;
     for (let hops = 0; ; hops++) {
       this.quotaHit = false;
       this.lastError = undefined;
+      this.replyText = "";
       this.rec = new TurnRecorder(this.ledger!.journal, agent);
-      this.rec.user(text);
+      if (!leftOut) this.rec.user(text);
       this.running = this.engine!.prompt(full);
       let stop: StopReason;
       try {
@@ -326,6 +332,20 @@ export class Serve {
         this.lastError ??= cleanError(String(e?.message ?? e));
       } finally {
         this.running = null;
+      }
+      // Antigravity refuses every turn while an MCP server of its own cannot start (the IDE's
+      // data-agent-kit, with the IDE closed). codemax leaves that server out (antigravityHome),
+      // starts the agent again on the same session and asks once more. The host gets a "retry"
+      // event: what it received of this turn so far was the refusal, not an answer.
+      const refused = agent === "antigravity" && !leftOut ? agentSetupFailure(this.replyText) : null;
+      if (refused && skipAntigravityMcp(refused.mcpServer)) {
+        leftOut = true;
+        this.rec.end(stop, "an MCP server of the agent's own did not start");
+        this.rec = null;
+        debugEvent("serve-mcp-left-out", { agent });
+        this.write({ event: "retry", agent, reason: `${getAdapter(agent).name}'s MCP server "${refused.mcpServer}" did not start; codemax left it out and asks again` });
+        await this.startEngine(agent, this.engine?.session?.id);
+        continue;
       }
       this.rec.end(stop, this.lastError);
       this.rec = null;

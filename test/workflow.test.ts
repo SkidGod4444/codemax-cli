@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, realpathSync, rmSync, readdirSync, lstatSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
@@ -15,7 +15,7 @@ const { DEFAULT_CONFIG } = await import("../src/config.ts");
 const { verifyCandidates } = await import("../src/core/verify.ts");
 const { loadHistory } = await import("../src/core/history.ts");
 
-type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void>; agent?: string };
+type Ctx = { conn: AgentSideConnection; sessionId: string; say: (t: string) => Promise<void>; agent?: string; cwd?: string };
 /** Models a fake agent reports, and the session/set_model calls it got. */
 type ModelOpts = { list: { modelId: string; name: string }[]; set: { agent: string; modelId: string }[] };
 type Handler = (text: string, ctx: Ctx) => Promise<void>;
@@ -25,10 +25,10 @@ type ForkLog = { forks: { from: string; messageId?: string; to: string }[]; crea
 function fakeStream(handler: Handler, fork?: ForkLog, models?: ModelOpts, agent = "claude") {
   const a2c = new TransformStream<Uint8Array, Uint8Array>();
   const c2a = new TransformStream<Uint8Array, Uint8Array>();
-  let n = 0, msg = 0;
+  let n = 0, msg = 0, cwd = "";
   new AgentSideConnection((conn): Agent => ({
     async initialize() { return { protocolVersion: 1, agentInfo: { name: "fake", title: "Fake", version: "1" }, agentCapabilities: { loadSession: true, ...(fork ? { sessionCapabilities: { fork: {} } } : {}) }, authMethods: [] } as any; },
-    async newSession() { const sessionId = `s-${++n}-${Math.random().toString(36).slice(2, 6)}`; fork?.created.push(sessionId); return { sessionId, ...(models ? { models: { currentModelId: models.list[0]!.modelId, availableModels: models.list } } : {}) } as any; },
+    async newSession(p: any) { cwd = p?.cwd ?? ""; const sessionId = `s-${++n}-${Math.random().toString(36).slice(2, 6)}`; fork?.created.push(sessionId); return { sessionId, ...(models ? { models: { currentModelId: models.list[0]!.modelId, availableModels: models.list } } : {}) } as any; },
     async extMethod(method: string, params: any) { if (method === "session/set_model") models?.set.push({ agent, modelId: params.modelId }); return {}; },
     async unstable_forkSession(p: any) { if (fork?.fail) throw new Error("fork unavailable"); const to = `f-${++n}`; fork?.forks.push({ from: p.sessionId, messageId: p._meta?.jetbrains?.air?.fork?.messageId, to }); return { sessionId: to } as any; },
     async loadSession() { return {} as any; },
@@ -38,7 +38,7 @@ function fakeStream(handler: Handler, fork?: ForkLog, models?: ModelOpts, agent 
       fork?.promptedIn.push(sessionId);
       const messageId = `m-${++msg}`;
       const say = (t: string) => conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: t } } as any });
-      await handler(text, { conn, sessionId, say });
+      await handler(text, { conn, sessionId, say, cwd });
       return { stopReason: "end_turn" } as any;
     },
     async cancel() {},
@@ -589,6 +589,313 @@ test("an agent that refuses every turn (its MCP server fails to start) is no ans
   } finally { await h.cleanup(); }
 }, 30000);
 
+test("a custom command written for Claude Code runs in another agent: codemax sends its prompt with the arguments filled in", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const repo = newRepo();
+  mkdirSync(join(repo, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(repo, ".claude", "commands", "review.md"), "---\ndescription: Review a change\n---\nREVIEW-PROMPT for $ARGUMENTS, strictly.");
+  const h = await harness(async (text, ctx) => ctx.say(`got ${text.length} chars`), { repo, agent: "codex", cfg: { order: ["codex"] } });
+  try {
+    await h.setup.mockInput.typeText("/rev");
+    const f = await h.frame((f) => f.includes("/review") && f.includes("Review a change"));
+    expect(f).toContain("claude's command");
+    for (let i = 0; i < 4; i++) h.setup.mockInput.pressBackspace();
+    await h.send("/review the parser");
+    await h.frame((f) => f.includes("got "));
+    expect(h.prompts.at(-1)).toContain("REVIEW-PROMPT for the parser, strictly.");
+    expect(await h.frame((f) => f.includes("❯ /review the parser"))).not.toContain("REVIEW-PROMPT");   // you see what you typed
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    expect(log).toContain('"kind":"shared-command"');
+    expect(log).not.toContain("REVIEW-PROMPT");
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 30000);
+
+test("an agent that does not read the project's CLAUDE.md gets its rules with its instructions", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const repo = newRepo();
+  writeFileSync(join(repo, "CLAUDE.md"), "PROJECT-RULE: never push without asking.");
+  const h = await harness(async (_t, ctx) => ctx.say("ok"), { repo, agent: "codex", cfg: { order: ["codex"] } });
+  try {
+    const f = await h.frame((f) => f.includes("given this project's rules from CLAUDE.md"));
+    expect(f).toContain("does not read that file itself");
+    await h.send("hello");
+    await h.frame((f) => f.includes("ok"));
+    expect(h.prompts[0]).toContain("PROJECT-RULE: never push without asking.");
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    expect(log).toMatch(/"kind":"shared-for-agent"|"rules":1/);
+    expect(log).toContain('"rules":1');
+    expect(log).not.toContain("PROJECT-RULE");
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 30000);
+
+test("every agent out: codemax waits for the limit to reset and continues the task; Esc or a message of yours cancels the wait", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { CONTINUE_AFTER_RESET } = await import("../src/chat/app.ts");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  let limited = true;
+  const h = await harness(async (text, ctx) => ctx.say(limited && !text.startsWith("hello") ? "You've hit your session limit · resets 3pm" : `did: ${text.slice(0, 40)}`), { prep: (app) => (app.limitWaitTickMs = 25) });
+  try {
+    await h.send("build the parser");
+    let f = await h.frame((f) => f.includes("codemax continues the task then"), 10000);
+    expect(f).toContain("every agent is out");
+    expect(f).toContain("3:00 PM");
+    expect(f).toContain("waiting for Claude Code's limit");   // the footer, for as long as it waits
+    expect(h.prompts.length).toBe(1);
+    // The reset arrives: the same agent is told to carry on, without you.
+    limited = false;
+    (h.app as any).limitWait.at = Date.now();
+    f = await h.frame((f) => f.includes("did: Your usage limit has reset"), 10000);
+    expect(f).toContain("limit has reset · continuing the task");
+    expect(h.prompts.at(-1)).toBe(CONTINUE_AFTER_RESET);
+    expect((h.app as any).limitWait).toBeNull();
+    // Out again: Esc ends the wait.
+    limited = true;
+    await h.send("now the lexer");
+    await h.frame((f) => (f.match(/codemax continues the task then/g)?.length ?? 0) >= 2, 10000);
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => f.includes("no longer waiting for Claude Code's limit"));
+    expect((h.app as any).limitWait).toBeNull();
+    // Esc sticks: a later limit report while idle (Codex sends them) does not bring the wait back.
+    (h.app as any).onQuota({ ...(h.app as any).quota.get("claude"), at: Date.now() });
+    expect((h.app as any).limitWait).toBeNull();
+    // And a message of yours does too (it is sent as usual).
+    await h.send("and the tests");
+    await h.frame((f) => f.includes("waiting for Claude Code's limit") && !!(h.app as any).limitWait, 10000);
+    await h.send("hello again");
+    await h.frame((f) => f.includes("did: hello again"));
+    expect((h.app as any).limitWait).toBeNull();
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    for (const k of ["limit-wait", "limit-wait-resume", "limit-wait-cancel"]) expect(log).toContain(`"kind":"${k}"`);
+    expect(log).toContain('"why":"esc"');
+    expect(log).toContain('"why":"message"');
+    // A limit reported after a turn that finished its work leaves nothing to continue: no wait.
+    (h.app as any).quota.delete("claude");
+    (h.app as any).onQuota({ agent: "claude", exhausted: true, resetsAt: Date.now() + 3600_000, source: "probe", at: Date.now() });
+    await h.frame((f) => f.includes("no other agent is available"));
+    expect((h.app as any).limitWait).toBeNull();
+    (h.app as any).quota.delete("claude");
+    // /config → When every agent is out → stop: no wait.
+    (h.app as any).config.waitForReset = false;
+    limited = true;
+    const sent = h.prompts.length;
+    await h.send("one more");
+    await h.frame(() => h.prompts.length > sent && !(h.app as any).active.turn, 10000);
+    await Bun.sleep(150);
+    expect((h.app as any).limitWait).toBeNull();
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 60000);
+
+test("full auto: with ask, only a change outside the project and anything where secrets live still ask; without ask, nothing does", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  const { homedir } = await import("node:os");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const outcomes: string[] = [];
+  const two = [{ optionId: "always", name: "Always", kind: "allow_always" }, { optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }];
+  let repo = "";
+  const h = await harness(async (text, ctx) => {
+    const ask = async (toolCall: any) => outcomes.push(`${toolCall.toolCallId}:${((await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall, options: two } as any)).outcome as any).optionId}`);
+    if (text === "work") {
+      await ask({ toolCallId: "edit-in", title: "Edit a.ts", kind: "edit", rawInput: { file_path: join(repo, "a.ts"), old_string: "a", new_string: "b" } });
+      await ask({ toolCallId: "run", title: "npm test", kind: "execute", rawInput: { command: "npm test" } });
+      await ask({ toolCallId: "edit-out", title: "Edit /etc/hosts", kind: "edit", rawInput: { file_path: "/etc/hosts", old_string: "a", new_string: "b" } });
+      await ask({ toolCallId: "read-secret", title: "Read id_rsa", kind: "read", locations: [{ path: join(homedir(), ".ssh", "id_rsa") }] });
+      await ask({ toolCallId: "no-kind-out", title: "Write /etc/motd", rawInput: { file_path: "/etc/motd" } });   // no kind given: still a file outside the project
+      await ask({ toolCallId: "read-out", title: "Read /etc/hosts", kind: "read", rawInput: { file_path: "/etc/hosts" } });   // only reads: goes through
+    } else if (text === "again") await ask({ toolCallId: "later", title: "Edit a.ts", kind: "edit", rawInput: { file_path: join(repo, "a.ts") } });
+    await ctx.say(`finished ${text}`);
+  });
+  repo = h.repo;
+  try {
+    await h.send("/auto ask");
+    let f = await h.frame((f) => f.includes("full auto on (with ask)"));
+    expect(f).toContain("Shell commands run without asking");   // said when it is turned on
+    expect(f).toContain("asks only outside the project");   // the footer says so for as long as it is on
+    await h.send("work");
+    // Inside the project nothing asked (allowed once, never "always"); the change outside it does.
+    f = await h.frame((f) => f.includes("Edit /etc/hosts") && f.includes("Do you want"));
+    expect(outcomes).toEqual(["edit-in:allow", "run:allow"]);
+    await h.setup.mockInput.typeText("3");
+    h.setup.mockInput.pressEnter();
+    // So does a read where secrets live.
+    await h.frame((f) => f.includes("Read id_rsa") && f.includes("Do you want"));
+    expect(outcomes.at(-1)).toBe("edit-out:reject");
+    await h.setup.mockInput.typeText("2");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("Write /etc/motd") && f.includes("Do you want"));
+    expect(outcomes.at(-1)).toMatch(/^read-secret:(allow|always)$/);
+    await h.setup.mockInput.typeText("3");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("finished work"));
+    expect(outcomes.slice(-2)).toEqual(["no-kind-out:reject", "read-out:allow"]);
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    expect(log).toContain('"kind":"full-auto"');
+    expect(log.match(/"answer":"auto"/g)?.length).toBe(3);
+    // Off again: the next request asks.
+    await h.send("/auto off");
+    await h.frame((f) => f.includes("full auto off"));
+    await h.send("again");
+    await h.frame((f) => f.includes("Do you want") && !f.includes("full auto on ·"));
+    expect(outcomes.some((o) => o.startsWith("later"))).toBe(false);
+    await h.setup.mockInput.typeText("2");
+    h.setup.mockInput.pressEnter();
+    await h.frame((f) => f.includes("finished again"));
+    // Without ask: the change outside the project and the read of a secret go through too.
+    await h.send("/auto all");
+    f = await h.frame((f) => f.includes("full auto on (without ask)"));
+    expect(f).toContain("nothing asks");
+    const before = outcomes.length;
+    await h.send("work");
+    await h.frame((f) => (f.match(/finished work/g)?.length ?? 0) >= 1 && outcomes.length === before + 6, 10000);
+    expect(outcomes.slice(before)).toEqual(["edit-in:allow", "run:allow", "edit-out:allow", "read-secret:allow", "no-kind-out:allow", "read-out:allow"]);
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 40000);
+
+/** An Antigravity home whose MCP config has the IDE's data-agent-kit proxy, one good server and one turned off with `agy mcp disable`. */
+function geminiHomeWithIdeServer() {
+  const base = mkdtempSync(join(tmpdir(), "codemax-gemini-"));
+  mkdirSync(join(base, "config", "plugins", "some-plugin"), { recursive: true });
+  mkdirSync(join(base, "antigravity-acp", "conversations"), { recursive: true });
+  writeFileSync(join(base, "antigravity-acp", "settings.json"), '{"auth":{"type":"oauth-personal"}}');
+  writeFileSync(join(base, "GEMINI.md"), "my rules");
+  writeFileSync(join(base, "config", "config.json"), '{"plugins":{}}');
+  const config = JSON.stringify({ mcpServers: {
+    "data-agent-kit": { command: "node", args: ["/ide/ext/mcp_proxy_bundle.js", "dataAgentKit-antigravityide"] },
+    good: { command: "npx", args: ["-y", "good-mcp"], env: { TOKEN: "SECRET-TOKEN-1" } },
+    off: { command: "npx", args: ["off-mcp"], disabled: true },
+  } }, null, 2);
+  writeFileSync(join(base, "config", "mcp_config.json"), config);
+  return { base, config, file: join(base, "config", "mcp_config.json") };
+}
+const REFUSAL = "The MCP server 'data-agent-kit' failed to initialize: [MCP Proxy] Socket connection error: connect ENOENT /tmp/datacloud-mcp-dataAgentKit-antigravityide.sock: connection closed: calling \"initialize\": client is closing: EOF. Fix the MCP server, or remove it from your configuration and start a new session, to continue.";
+
+test("Antigravity refusing every turn over an MCP server of its own that cannot start: codemax leaves the server out, restarts it and asks again", async () => {
+  const ag = await import("../src/engines/antigravity.ts");
+  const d = await import("../src/core/debuglog.ts");
+  const g = geminiHomeWithIdeServer();
+  ag.unskipAntigravityMcp("data-agent-kit");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  // Like Google's ACP server: it refuses while the server is in the config it was started with.
+  const starts: (string[] | null)[] = [];
+  const h = await harness(async (_text, ctx) => ctx.say(ag.antigravityLeftOut(g.base).some((l) => l.name === "data-agent-kit") ? "antigravity did it" : REFUSAL), {
+    agent: "antigravity",
+    cfg: { order: ["antigravity"] },
+    prep: (app) => {
+      app.geminiBase = g.base;
+      const make = app.engineFactory;
+      app.engineFactory = (agent: string) => {
+        const home = ag.antigravityHome(g.base)?.home;
+        starts.push(home ? Object.keys(JSON.parse(readFileSync(join(home, "config", "mcp_config.json"), "utf8")).mcpServers) : null);
+        return make(agent);
+      };
+    },
+  });
+  try {
+    await h.send("build the parser");
+    let f = await h.frame((f) => f.includes("antigravity did it"), 15000);
+    expect(f).toContain("did not start (it belongs to the Antigravity IDE");
+    expect(f).toContain("/mcp enable data-agent-kit");
+    expect(f).not.toContain("won't work until");
+    // The same request went again, to an agent started in codemax's linked home.
+    expect(h.prompts.filter((p) => p.includes("build the parser")).length).toBe(2);
+    // The first start ran in Antigravity's own home; the second in codemax's linked one.
+    expect(starts).toEqual([null, ["good"]]);
+    const home = ag.antigravityHome(g.base)!.home;
+    // That home: the user's own files as links, and an MCP config without the servers left out.
+    expect(readFileSync(join(home, "GEMINI.md"), "utf8")).toBe("my rules");
+    expect(realpathSync(join(home, "antigravity-acp"))).toBe(realpathSync(join(g.base, "antigravity-acp")));
+    expect(realpathSync(join(home, "config", "plugins"))).toBe(realpathSync(join(g.base, "config", "plugins")));
+    // The user's own config is never touched.
+    expect(readFileSync(g.file, "utf8")).toBe(g.config);
+    // The refusal is no answer; the retry's reply is.
+    const answers = h.ledger.turns().filter((t: any) => t.role === "assistant").map((t: any) => t.text);
+    expect(answers).toEqual(["antigravity did it"]);
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    expect(log).toContain('"kind":"mcp-left-out"');
+    expect(log).toContain('"kind":"agent-restart"');
+    expect(log).toContain('"kind":"mcp-left-out-retry"');
+    expect(log).toContain('"kind":"antigravity-home"');
+    expect(log).not.toContain("SECRET-TOKEN-1");
+    expect(log).not.toContain("data-agent-kit");
+    // /mcp lists it, and enabling it starts the agent with it again.
+    await h.send("/mcp enable data-agent-kit");
+    f = await h.frame((f) => f.includes("data-agent-kit is back for"), 10000);
+    await h.frame((f) => f.includes("resumed"), 10000);
+    expect(ag.antigravityLeftOut(g.base).map((l) => l.name)).toEqual(["off"]);
+    expect(ag.antigravityHome(g.base)).toBeNull();
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 40000);
+
+test("an agent that still refuses after its server was left out is not asked a third time: the task goes on to a handoff", async () => {
+  const g = geminiHomeWithIdeServer();
+  (await import("../src/engines/antigravity.ts")).unskipAntigravityMcp("data-agent-kit");
+  const h = await harness(async (_text, ctx) => ctx.say(REFUSAL), { agent: "antigravity", cfg: { order: ["antigravity"] }, prep: (app) => (app.geminiBase = g.base) });
+  try {
+    await h.send("build the parser");
+    const f = await h.frame((f) => f.includes("won't work until its MCP server"), 15000);
+    expect(f).toContain("`agy mcp remove");
+    expect(h.prompts.filter((p) => p.includes("build the parser")).length).toBe(2);
+    expect(readFileSync(g.file, "utf8")).toBe(g.config);
+  } finally { await h.cleanup(); }
+}, 40000);
+
+test("Antigravity's linked home: rebuilt at each start, follows the real one, and never removes anything from it", async () => {
+  const ag = await import("../src/engines/antigravity.ts");
+  const g = geminiHomeWithIdeServer();
+  ag.unskipAntigravityMcp("data-agent-kit");
+  // No server failed: the agent runs in its own home (one turned off with `agy mcp disable` does not change that).
+  expect(ag.antigravityHome(g.base)).toBeNull();
+  expect(ag.antigravityLeftOut(g.base).map((l) => `${l.name}:${l.why}`)).toEqual(["off:disabled"]);
+  // A server that did not start is left out while its setup stays the one that failed.
+  expect(ag.skipAntigravityMcp("nope", g.base)).toBe(false);
+  expect(ag.skipAntigravityMcp("Data-Agent-Kit", g.base)).toBe(true);
+  writeFileSync(join(g.base, "notes.txt"), "new file");
+  rmSync(join(g.base, "GEMINI.md"));
+  let o = ag.antigravityHome(g.base)!;
+  expect(o.left.map((l) => `${l.name}:${l.why}:${l.needsIde}`)).toEqual(["data-agent-kit:failed:true", "off:disabled:false"]);
+  expect(readFileSync(join(o.home, "notes.txt"), "utf8")).toBe("new file");
+  expect(existsSync(join(o.home, "GEMINI.md"))).toBe(false);
+  // What the agent writes there lands in the real home.
+  writeFileSync(join(o.home, "antigravity-acp", "conversations", "c1.db"), "x");
+  expect(existsSync(join(g.base, "antigravity-acp", "conversations", "c1.db"))).toBe(true);
+  expect(readFileSync(join(g.base, "antigravity-acp", "settings.json"), "utf8")).toContain("oauth-personal");
+  expect(readFileSync(g.file, "utf8")).toBe(g.config);
+  // Windows without Developer Mode refuses links to files: a hard link (or a copy) stands in, made again at each start.
+  const noFileLinks = (target: string, path: string, type: "dir" | "file" | "junction") => {
+    if (type === "file") throw Object.assign(new Error("EPERM: operation not permitted, symlink"), { code: "EPERM" });
+    symlinkSync(target, path, type);
+  };
+  for (const n of readdirSync(o.home)) if (lstatSync(join(o.home, n)).isSymbolicLink() && !statSync(join(o.home, n)).isDirectory()) rmSync(join(o.home, n));
+  o = ag.antigravityHome(g.base, noFileLinks)!;
+  expect(lstatSync(join(o.home, "notes.txt")).isSymbolicLink()).toBe(false);
+  expect(readFileSync(join(o.home, "notes.txt"), "utf8")).toBe("new file");
+  rmSync(join(g.base, "notes.txt"));
+  writeFileSync(join(g.base, "notes.txt"), "replaced");   // a save that replaces the file, as editors do
+  writeFileSync(join(g.base, "installation_id"), "id-1");
+  o = ag.antigravityHome(g.base, noFileLinks)!;
+  expect(readFileSync(join(o.home, "notes.txt"), "utf8")).toBe("replaced");
+  expect(readFileSync(join(o.home, "installation_id"), "utf8")).toBe("id-1");
+  rmSync(join(g.base, "installation_id"));
+  o = ag.antigravityHome(g.base, noFileLinks)!;
+  expect(existsSync(join(o.home, "installation_id"))).toBe(false);
+  expect(readFileSync(join(g.base, "notes.txt"), "utf8")).toBe("replaced");
+  expect(existsSync(join(g.base, "antigravity-acp", "conversations", "c1.db"))).toBe(true);
+  expect(readFileSync(g.file, "utf8")).toBe(g.config);
+  // A changed setup (the user fixed it) is tried again; with nothing left out there is no linked home.
+  const fixed = JSON.parse(g.config);
+  fixed.mcpServers["data-agent-kit"].args = ["fixed"];
+  delete fixed.mcpServers.off;
+  writeFileSync(g.file, JSON.stringify(fixed));
+  expect(ag.antigravityHome(g.base)).toBeNull();
+  expect(existsSync(join(g.base, "antigravity-acp", "conversations", "c1.db"))).toBe(true);
+});
+
 test("long sessions look for an update again (30 min, then 1 h, 2 h… doubling) and show it on the prompt's top border", async () => {
   const calls: { at: number; force?: boolean }[] = [];
   const t0 = Date.now();
@@ -728,6 +1035,150 @@ test("automatic handoff never hands the task to an agent that edits without aski
     await h.frame((f) => f.includes("cursor did it"), 15000);
   } finally { await h.cleanup(); }
 }, 30000);
+
+test("/team: a lead splits the task, agents build the parts at once in their own copies, the parts are merged and the lead checks", async () => {
+  const d = await import("../src/core/debuglog.ts");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const repo = newRepo();
+  writeFileSync(join(repo, "notes.txt"), "uncommitted work\n");   // the copies start from your files as they are, not from the last commit
+  const copies: Record<string, string> = {};
+  const asked: string[] = [];
+  let clash = false;
+  const h = await harness(async (text, ctx) => {
+    if (text.includes("split the task into")) {
+      // The lead only plans: an edit it asks for is refused.
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: "lead-edit", title: "Edit README.md", kind: "edit" }, options: opts } as any);
+      asked.push(`lead:${r.outcome.optionId}`);
+      return ctx.say('Two independent halves.\n```json\n{"parts": [{"title": "the parser", "files": ["src/parser.ts"], "task": "Write src/parser.ts exporting parse()."}, {"title": "the printer", "files": ["src/printer.ts"], "task": "Write src/printer.ts exporting print()."}]}\n```');
+    }
+    if (text.includes("YOUR PART")) {
+      const mine = text.includes("YOUR PART: the parser") ? "parser" : "printer";
+      copies[mine] = ctx.cwd!;
+      expect(readFileSync(join(ctx.cwd!, "notes.txt"), "utf8")).toBe("uncommitted work\n");
+      // Nothing run in a copy can reach your repository: the clone's remote is removed.
+      expect(Bun.spawnSync(["git", "remote"], { cwd: ctx.cwd! }).stdout.toString().trim()).toBe("");
+      const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: `w-${mine}`, title: `Write src/${mine}.ts`, kind: "edit", rawInput: { file_path: join(ctx.cwd!, "src", `${mine}.ts`) } }, options: opts } as any);
+      asked.push(`${mine}:${r.outcome.optionId}`);
+      mkdirSync(join(ctx.cwd!, "src"), { recursive: true });
+      writeFileSync(join(ctx.cwd!, "src", `${mine}.ts`), `export const ${mine} = "${ctx.agent}";\n`);
+      if (clash) writeFileSync(join(ctx.cwd!, "README.md"), `${mine} was here\n`);
+      return ctx.say(`Wrote src/${mine}.ts.\nNEEDS: nothing`);
+    }
+    if (text.includes("which naming")) return ctx.say("DECISION-7: snake_case everywhere.");
+    return ctx.say(text.startsWith("[codemax team]") ? "checked the combined work" : `did: ${text.slice(0, 30)}`);
+  }, { repo, prep: (app) => (app as any).detect?.set?.("codex", { installed: true, version: "t", engine: true }) });
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  const git = (...a: string[]) => Bun.spawnSync(["git", ...a], { cwd: repo }).stdout.toString();
+  const refsBefore = git("for-each-ref", "refs/heads", "refs/tags", "HEAD");
+  try {
+    await h.send("/auto ask");   // the workers are not asked inside their copies; the lead's split is refused whatever the mode
+    await h.frame((f) => f.includes("full auto on (with ask)"));
+    void (h.app as any).runTeam([{ agent: "claude" }, { agent: "codex" }], "build the parser and the printer");
+    let f = await h.frame((f) => f.includes("Build these 2 parts at the same time?"), 15000);
+    expect(f).toContain("1. the parser");
+    expect(f).toContain("src/printer.ts");
+    expect(asked).toEqual(["lead:reject"]);
+    expect(existsSync(join(repo, "src"))).toBe(false);   // nothing built before you accept
+    h.setup.mockInput.pressEnter();
+    f = await h.frame((f) => f.includes("checked the combined work"), 20000);
+    // Each part was built in its own copy, outside the project, and merged into it.
+    expect(copies.parser).not.toBe(copies.printer);
+    expect(copies.parser!.startsWith(repo)).toBe(false);
+    expect(readFileSync(join(repo, "src", "parser.ts"), "utf8")).toBe('export const parser = "claude";\n');
+    expect(readFileSync(join(repo, "src", "printer.ts"), "utf8")).toBe('export const printer = "codex";\n');
+    expect(asked.sort()).toEqual(["lead:reject", "parser:allow", "printer:allow"]);
+    // Your git state is as it was: no commit, nothing staged, no branch or worktree added; the copies are gone.
+    expect(git("for-each-ref", "refs/heads", "refs/tags", "HEAD")).toBe(refsBefore);
+    expect(git("diff", "--cached", "--name-only")).toBe("");
+    expect(git("worktree", "list").trim().split("\n").length).toBe(1);
+    expect(existsSync(copies.parser!)).toBe(false);
+    // The lead (your agent) got the result to check, as an ordinary turn.
+    const lead = h.prompts.find((p) => p.startsWith("[codemax team] The task below was split"))!;
+    expect(lead).toContain("Part 1: the parser (Claude Code) · finished · merged, 1 file: src/parser.ts");
+    expect(lead).toContain("NEEDS: nothing");
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    for (const k of ["team-start", "team-split", "team-worker-end", "team-merge", "team-end"]) expect(log).toContain(`"kind":"${k}"`);
+    expect(log).not.toContain("the parser");
+    // Two parts that changed the same file: the first merges, the second is kept as a patch for the lead to apply by hand.
+    clash = true;
+    Bun.spawnSync(["sh", "-c", "rm -rf src"], { cwd: repo });
+    // A decision made in a reply, two requests before the next team.
+    await h.send("which naming do we use?");
+    await h.frame((f) => f.includes("DECISION-7"));
+    await h.send("fine, thanks");
+    await h.frame((f) => f.includes("did: fine, thanks"));
+    void (h.app as any).runTeam([{ agent: "claude" }, { agent: "codex" }], "again, with a clash");
+    await h.frame((f) => f.includes("Build these 2 parts at the same time?"), 15000);
+    h.setup.mockInput.pressEnter();
+    await h.frame(() => h.prompts.filter((p) => p.startsWith("[codemax team] The task below was split")).length === 2, 20000);
+    const second = h.prompts.filter((p) => p.startsWith("[codemax team] The task below was split")).at(-1)!;
+    const patch = second.match(/its patch is at (\S+\.patch)/)?.[1];
+    expect(patch).toBeTruthy();
+    expect(readFileSync(patch!, "utf8")).toContain("was here");
+    expect(second).toContain("Apply each patch that was not applied by hand");
+    // No context is lost on the way to the team: the split was made in your agent's own session, and each
+    // worker's brief came after codemax's record of the work so far (marked as context, not as a task to take over).
+    const sessions = (h.app as any).ledger.sessions();
+    expect(sessions.claude?.id).toBeTruthy();
+    const briefs = h.prompts.filter((p) => p.includes("YOUR PART"));
+    expect(briefs.slice(0, 2).every((p) => p.startsWith("[codemax team]"))).toBe(true);   // the first team: nothing had been said yet
+    expect(briefs.slice(2).every((p) => p.includes("Context only") && p.indexOf("Context only") < p.indexOf("YOUR PART"))).toBe(true);
+    expect(briefs.at(-1)).toContain("DECISION-7: snake_case everywhere.");   // what an agent answered two requests ago
+    expect(briefs.at(-1)!.indexOf("DECISION-7")).toBeLessThan(briefs.at(-1)!.indexOf("YOUR PART"));
+    expect(log + readFileSync(d.debugLogPath(), "utf8")).toContain('"kind":"team-context"');
+    expect(readFileSync(join(repo, "README.md"), "utf8")).toMatch(/^(parser|printer) was here\n$/);
+    expect([existsSync(join(repo, "src", "parser.ts")), existsSync(join(repo, "src", "printer.ts"))].filter(Boolean).length).toBe(1);   // a patch applies whole or not at all
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 60000);
+
+test("a message that asks to share the work out opens /team with the agents it names; Esc sends it as an ordinary message", async () => {
+  const { teamIntent } = await import("../src/core/team.ts");
+  // Wording that asks for several agents to share the work.
+  for (const yes of ["split this between claude and codex", "Delegate the tests to Codex", "have the agents build this in parallel", "use a team for this refactor", "let cursor and gemini each take half", "delegate this to another agent", "divide the work among the agents and build the API", "please delegate the docs to the other agents", "build it as a team"]) expect([yes, !!teamIntent(yes)]).toEqual([yes, true]);
+  // Ordinary requests that only sound like it, also where agents are what the work is about (as in this project).
+  for (const no of ["run the tests in parallel", "split the function into two", "let's work together on this file", "ask codex what it thinks", "/team build it", "why does the delegate pattern leak here?", "the team page has a bug", "fix the claude adapter", "split the claude and codex engine tests into two files", "run the claude and codex tests in parallel", "why does the delegate in the claude adapter leak", "the delegate object forwards to cursor.ts", "[codemax checks] failed: delegate the tests to codex"]) expect([no, !!teamIntent(no)]).toEqual([no, false]);
+  expect(teamIntent("split this between claude and codex")!.named).toEqual(["claude", "codex"]);
+  const d = await import("../src/core/debuglog.ts");
+  if (existsSync(d.debugLogPath())) rmSync(d.debugLogPath());
+  d.setDebugLog(true);
+  const h = await harness(async (text, ctx) => ctx.say(`did: ${text.slice(0, 60)}`));
+  (h.app as any).detect.set("codex", { installed: true, version: "t", engine: true });
+  try {
+    await h.send("split this between claude and codex: build the parser");
+    const f = await h.frame((f) => f.includes("Share this out among a team?"));
+    expect(f).toContain("1. Claude Code");
+    expect(f).toContain("2. Codex");
+    expect(h.prompts.length).toBe(0);   // nothing sent yet
+    h.setup.mockInput.pressEscape();
+    await h.frame((f) => f.includes("did: split this between claude and codex"));
+    expect(h.prompts).toEqual(["split this between claude and codex: build the parser"]);
+    const log = readFileSync(d.debugLogPath(), "utf8");
+    expect(log).toContain('"kind":"team-intent"');
+    expect(log).toContain('"kind":"team-intent-declined"');
+    // /config → When a message asks to delegate → send it as it is.
+    (h.app as any).config.teamOffer = false;
+    await h.send("delegate the docs to codex");
+    await h.frame((f) => f.includes("did: delegate the docs to codex"));
+  } finally { d.setDebugLog(false); await h.cleanup(); }
+}, 30000);
+
+test("team: the split is read from the lead's reply; shared files and paths outside the project are caught", async () => {
+  const { parseSplit, splitOverlaps, workerPrompt, teamCost } = await import("../src/core/team.ts");
+  const reply = 'Here.\n```json\n{"parts":[{"title":"api","files":["src/api/","./src/routes.ts","/etc/passwd","../x"],"task":"build the api"},{"title":"ui","files":["src/ui/"],"task":"build the ui"},{"title":"extra","files":["docs/"],"task":"write docs"},{"title":"empty","files":[],"task":""}]}\n```';
+  const parts = parseSplit(reply, 2)!;
+  expect(parts.map((p) => p.title)).toEqual(["api", "ui"]);   // no more parts than workers
+  expect(parts[0]!.files).toEqual(["src/api/", "src/routes.ts"]);
+  expect(parseSplit("I cannot split this.", 3)).toBeNull();
+  expect(parseSplit('{"parts": [{"title": "one", "files": ["a.ts"], "task": "all of it"}]}', 3)!.length).toBe(1);
+  expect(splitOverlaps(parts)).toEqual([]);
+  expect(splitOverlaps([{ title: "a", files: ["src/api/"], task: "x" }, { title: "b", files: ["src/api/users.ts", "src/ui"], task: "y" }, { title: "c", files: ["src/ui/app.ts"], task: "z" }])).toEqual(["src/api/users.ts", "src/ui/app.ts"]);
+  const brief = workerPrompt("ship it", parts, 1, [{ name: "Claude Code" }, { name: "Codex" }]);
+  expect(brief).toContain("YOUR PART: ui");
+  expect(brief).toContain("Change only your files: src/ui/");
+  expect(brief).toContain("1. api (Claude Code): src/api/, src/routes.ts");
+  expect(teamCost(3)).toContain("5 agent turns");
+});
 
 test("/debate: agents on models you choose each propose, argue, and a judge's merged plan goes to your agent", async () => {
   const models: ModelOpts = { list: [{ modelId: "big-5-5", name: "Big 5.5" }, { modelId: "small-4", name: "Small 4" }], set: [] };
