@@ -91,7 +91,8 @@ export async function installAntigravityServer(plan: InstallPlan, onProgress: (m
   try {
     onProgress(`downloading ${plan.url}${plan.bytes ? ` (${Math.round(plan.bytes / 1e6)} MB)` : ""}`);
     const res = await fetchImpl(plan.url);
-    if (!res.ok || !res.body) throw new Error(`download failed: ${res.status}`);
+    // (`res.body` is not looked at: on Bun 1.3 touching it makes Bun.write(file, response) wait forever.)
+    if (!res.ok) throw new Error(`download failed: ${res.status}`);
     await Bun.write(zip, res);
     onProgress("unpacking");
     const unzip = IS_WINDOWS

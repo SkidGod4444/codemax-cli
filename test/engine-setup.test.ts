@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { CODEMAX_HOME } from "../src/core/paths.ts";
 import { which } from "../src/core/spawn.ts";
 import { knownBinDirs, loginShellPath, mergePath } from "../src/core/syspath.ts";
@@ -23,12 +23,14 @@ test("claude adapter: a compiled codemax on a Mac without Bun runs the adapter o
 
 test("which: follows a PATH widened after start (Bun.which alone keeps the PATH the process started with)", () => {
   const d = mkdtempSync(join(tmpdir(), "codemax-which-"));
-  writeFileSync(join(d, "zz-agent"), "#!/bin/sh\n");
-  chmodSync(join(d, "zz-agent"), 0o755);
+  // Windows runs a command through its .cmd shim; elsewhere it is an executable file.
+  const file = join(d, process.platform === "win32" ? "zz-agent.cmd" : "zz-agent");
+  writeFileSync(file, process.platform === "win32" ? "@echo off\r\n" : "#!/bin/sh\n");
+  chmodSync(file, 0o755);
   const old = process.env.PATH;
-  process.env.PATH = `${d}:${old}`;
+  process.env.PATH = `${d}${delimiter}${old}`;
   try {
-    expect(which("zz-agent")).toBe(join(d, "zz-agent"));
+    expect(which("zz-agent")?.toLowerCase()).toBe(file.toLowerCase());
   } finally {
     process.env.PATH = old;
   }
@@ -36,7 +38,7 @@ test("which: follows a PATH widened after start (Bun.which alone keeps the PATH 
 });
 
 test("system-wide PATH: the login shell's PATH first, then the app's, then the usual folders, each once", async () => {
-  expect(mergePath(["/a", "/b"], "/b:/usr/bin", ["/a", "/c"])).toBe("/a:/b:/usr/bin:/c");
+  expect(mergePath(["/a", "/b"], ["/b", "/usr/bin"].join(delimiter), ["/a", "/c"])).toBe(["/a", "/b", "/usr/bin", "/c"].join(delimiter));
   const home = mkdtempSync(join(tmpdir(), "codemax-home-"));
   for (const d of [".local/bin", ".nvm/versions/node/v18.20.0/bin", ".nvm/versions/node/v22.3.0/bin"]) mkdirSync(join(home, d), { recursive: true });
   expect(knownBinDirs(home, (p) => p.startsWith(home) && existsSync(p))).toEqual([
@@ -44,6 +46,7 @@ test("system-wide PATH: the login shell's PATH first, then the app's, then the u
     join(home, ".nvm/versions/node/v22.3.0/bin"),
     join(home, ".nvm/versions/node/v18.20.0/bin"),
   ]);
+  if (process.platform === "win32") return;   // no login shell to ask there
   // A shell whose rc files print things: only the marked PATH counts.
   const sh = join(home, "chatty-shell");
   writeFileSync(sh, '#!/bin/sh\necho "welcome back"\nPATH=/from/zshrc:/usr/bin\neval "$2"\necho bye\n');
@@ -99,9 +102,15 @@ test("setup: one installer at a time, a stale lock is ignored, and a failure wai
 
 test("antigravity: the server is unpacked under a temporary name and renamed into place; a failed download leaves nothing", async () => {
   const src = mkdtempSync(join(tmpdir(), "codemax-agy-zip-"));
-  writeFileSync(join(src, "agy_acp_server.par"), "#!/bin/sh\necho agy\n");
+  // Google's archive holds the server under its own name per system (.exe on Windows).
+  const win = process.platform === "win32";
+  const bin = win ? "agy_acp_server.exe" : "agy_acp_server.par";
+  writeFileSync(join(src, bin), "#!/bin/sh\necho agy\n");
   const zip = join(src, "server.zip");
-  expect(Bun.spawnSync(["zip", "-q", "-j", zip, join(src, "agy_acp_server.par")]).exitCode).toBe(0);
+  const packed = win
+    ? Bun.spawnSync(["powershell", "-NoProfile", "-Command", `Compress-Archive -LiteralPath '${join(src, bin)}' -DestinationPath '${zip}'`])
+    : Bun.spawnSync(["zip", "-q", "-j", zip, join(src, bin)]);
+  expect(packed.exitCode).toBe(0);
   const bytes = await Bun.file(zip).arrayBuffer();
   const ok = (async () => new Response(bytes)) as unknown as typeof fetch;
   const down = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
@@ -112,11 +121,11 @@ test("antigravity: the server is unpacked under a temporary name and renamed int
   expect(readdirSync(dir).filter((n) => n.startsWith(".partial"))).toEqual([]);
 
   const spec = await installAntigravityServer({ version: "9.9.9", url: "https://dl.google.com/x.zip" }, () => {}, ok);
-  expect(spec.cmd[0]).toBe(join(dir, "9.9.9", "agy_acp_server.par"));
+  expect(spec.cmd[0]).toBe(join(dir, "9.9.9", bin));
   expect(antigravityServer()?.version).toBe("9.9.9");
   // What a killed download leaves is never taken for a server, even a newer-looking one.
   mkdirSync(join(dir, ".partial-9.9.10-1"));
-  writeFileSync(join(dir, ".partial-9.9.10-1", "agy_acp_server.par"), "half");
+  writeFileSync(join(dir, ".partial-9.9.10-1", bin), "half");
   expect(antigravityServer()?.version).toBe("9.9.9");
 });
 

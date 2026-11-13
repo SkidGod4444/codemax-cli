@@ -752,7 +752,7 @@ test("Copilot CLI: an engine over its own ACP mode; its diff, mode names and aut
   expect(["GitHub Copilot CLI 1.0.91", "GitHub Copilot CLI 0.9.300", "copilot version: v1.34.0 (AWS)", ""].map(copilotVersionOk)).toEqual([false, false, false, false]);
   // Its edit request carries a git diff and the file's name: shown as the other agents' diffs are.
   const diff = inputDiff({ fileName: "/repo/src/a.ts", diff: "\ndiff --git a/repo/src/a.ts b/repo/src/a.ts\nindex 1..2\n--- a/repo/src/a.ts\n+++ b/repo/src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n\n" }, "/repo");
-  expect(diff).toBe("--- src/a.ts\n+++ src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new");
+  expect(diff!.replace(/\\/g, "/").replace(/(---|\+\+\+) \/repo\//g, "$1 ")).toBe("--- src/a.ts\n+++ src/a.ts\n@@ -1,1 +1,1 @@\n-old\n+new");   // (a POSIX path is not "inside" a Windows folder)
   // Its modes are ACP addresses: agent asks, autopilot approves everything itself.
   const modes = ["agent", "plan", "autopilot"].map((m) => ({ id: `https://agentclientprotocol.com/protocol/session-modes#${m}`, name: m }));
   expect(modeLabel("Copilot CLI", modes[0]!.id).text).toBe("asks before acting");

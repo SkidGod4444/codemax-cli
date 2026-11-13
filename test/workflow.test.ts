@@ -1045,6 +1045,8 @@ test("/team: a lead splits the task, agents build the parts at once in their own
   const copies: Record<string, string> = {};
   const asked: string[] = [];
   let clash = false;
+  // Git on Windows checks text files out with CRLF line endings: the words are what is compared.
+  const lf = (file: string) => readFileSync(file, "utf8").replace(/\r\n/g, "\n");
   const h = await harness(async (text, ctx) => {
     if (text.includes("split the task into")) {
       // The lead only plans: an edit it asks for is refused.
@@ -1055,7 +1057,7 @@ test("/team: a lead splits the task, agents build the parts at once in their own
     if (text.includes("YOUR PART")) {
       const mine = text.includes("YOUR PART: the parser") ? "parser" : "printer";
       copies[mine] = ctx.cwd!;
-      expect(readFileSync(join(ctx.cwd!, "notes.txt"), "utf8")).toBe("uncommitted work\n");
+      expect(lf(join(ctx.cwd!, "notes.txt"))).toBe("uncommitted work\n");
       // Nothing run in a copy can reach your repository: the clone's remote is removed.
       expect(Bun.spawnSync(["git", "remote"], { cwd: ctx.cwd! }).stdout.toString().trim()).toBe("");
       const r: any = await ctx.conn.requestPermission({ sessionId: ctx.sessionId, toolCall: { toolCallId: `w-${mine}`, title: `Write src/${mine}.ts`, kind: "edit", rawInput: { file_path: join(ctx.cwd!, "src", `${mine}.ts`) } }, options: opts } as any);
@@ -1085,8 +1087,8 @@ test("/team: a lead splits the task, agents build the parts at once in their own
     // Each part was built in its own copy, outside the project, and merged into it.
     expect(copies.parser).not.toBe(copies.printer);
     expect(copies.parser!.startsWith(repo)).toBe(false);
-    expect(readFileSync(join(repo, "src", "parser.ts"), "utf8")).toBe('export const parser = "claude";\n');
-    expect(readFileSync(join(repo, "src", "printer.ts"), "utf8")).toBe('export const printer = "codex";\n');
+    expect(lf(join(repo, "src", "parser.ts"))).toBe('export const parser = "claude";\n');
+    expect(lf(join(repo, "src", "printer.ts"))).toBe('export const printer = "codex";\n');
     expect(asked.sort()).toEqual(["lead:reject", "parser:allow", "printer:allow"]);
     // Your git state is as it was: no commit, nothing staged, no branch or worktree added; the copies are gone.
     expect(git("for-each-ref", "refs/heads", "refs/tags", "HEAD")).toBe(refsBefore);
@@ -1127,7 +1129,7 @@ test("/team: a lead splits the task, agents build the parts at once in their own
     expect(briefs.at(-1)).toContain("DECISION-7: snake_case everywhere.");   // what an agent answered two requests ago
     expect(briefs.at(-1)!.indexOf("DECISION-7")).toBeLessThan(briefs.at(-1)!.indexOf("YOUR PART"));
     expect(log + readFileSync(d.debugLogPath(), "utf8")).toContain('"kind":"team-context"');
-    expect(readFileSync(join(repo, "README.md"), "utf8")).toMatch(/^(parser|printer) was here\n$/);
+    expect(lf(join(repo, "README.md"))).toMatch(/^(parser|printer) was here\n$/);
     expect([existsSync(join(repo, "src", "parser.ts")), existsSync(join(repo, "src", "printer.ts"))].filter(Boolean).length).toBe(1);   // a patch applies whole or not at all
   } finally { d.setDebugLog(false); await h.cleanup(); }
 }, 60000);
